@@ -1,0 +1,8 @@
+#AOCI-CODE-VOLUME: 1
+
+===C:/Users/Langford/Documents/Project/OneAPI/===
+.gitattributes[FC7T]: F:Forces LF checkout for text files so AOCI raw-byte fingerprints remain stable across platforms | R:- | A:* text=auto eol=lf | S:AOCI hashes exact bytes; allowing CRLF conversion makes text files appear stale on Windows checkouts
+.gitignore[FC6T]: F:Keeps machine-specific Codex MCP configuration and its backups out of Git | R:- | A:.codex/config.toml and .codex/config.toml.backup.* | S:Do not ignore aoci.txt, aoci.meta.txt, aoci.code.txt, or AGENTS.md; AOCI discovery silently skips ignored cognition assets
+AGENTS.md[SG8S]: F:Defines the AOCI repository-cognition policy and Agent workflow for OneAPI | R:- | A:Call aoci_rules then aoci_overview; use aoci_maintain after managed objects reach a stable state | S:The managed block is authoritative for AOCI behavior; do not reconstruct Guide stages or override current tool contracts
+LICENSE[SV8L]: F:Provides GNU GPL v3 terms governing OneAPI copying, modification, and distribution | R:code:README.md | A:GPL-3.0 | S:Distributed modified versions must preserve GPLv3 notices and corresponding source obligations; the license text itself may not be altered
+README.md[SG7T]: F:Introduces OneAPI as a personal self-hosted all-in-one API | R:code:LICENSE | A:- | S:-
