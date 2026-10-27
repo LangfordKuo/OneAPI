@@ -90,6 +90,7 @@ export interface LogEntry {
   reasoning_tokens: number | null;
   latency_ms: number;
   first_token_ms: number | null;
+  tokens_per_second: number | null;
   created_at: number;
   api_key_name: string | null;
   channel_name: string | null;

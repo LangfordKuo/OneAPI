@@ -91,6 +91,10 @@ function formatLatency(value: number | null | undefined): string {
   return value == null ? '-' : `${value} ms`;
 }
 
+function formatTokensPerSecond(value: number | null | undefined): string {
+  return value == null ? '-' : `${value.toFixed(1)} tok/s`;
+}
+
 function statusTag(entry: LogEntry) {
   return entry.status_code >= 400 ? (
     <Tag color="red">{entry.status_code}</Tag>
@@ -226,6 +230,16 @@ export default function Logs() {
         </Tooltip>
       ),
     },
+    {
+      title: '速度',
+      key: 'speed',
+      width: 100,
+      render: (_, entry) => (
+        <Tooltip title="输出 tokens ÷ 生成耗时；流式已扣除首 token 等待">
+          {formatTokensPerSecond(entry.tokens_per_second)}
+        </Tooltip>
+      ),
+    },
     { title: '尝试', dataIndex: 'attempts', width: 70 },
     {
       title: '错误',
@@ -345,7 +359,7 @@ export default function Logs() {
           dataSource={logsQuery.data?.items ?? []}
           loading={logsQuery.isLoading}
           size="middle"
-          scroll={{ x: 1500 }}
+          scroll={{ x: 1620 }}
           rowClassName={() => 'clickable-row'}
           onRow={(record) => ({ onClick: () => setSelected(record) })}
           pagination={{
@@ -426,6 +440,9 @@ export default function Logs() {
               </Descriptions.Item>
               <Descriptions.Item label="首 token">
                 {formatLatency(detailQuery.data.first_token_ms)}
+              </Descriptions.Item>
+              <Descriptions.Item label="生成速度">
+                {formatTokensPerSecond(detailQuery.data.tokens_per_second)}
               </Descriptions.Item>
               <Descriptions.Item label="输入 / 输出 / 总计">
                 {formatNumber(detailQuery.data.prompt_tokens)} /{' '}

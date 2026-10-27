@@ -238,6 +238,7 @@ GET /healthz  /readyz
 - 2026-10-27：v0.1.3 修复日志列表筛选：行查询补 `WHERE 1=1`，避免筛选条件被并入 `LEFT JOIN` 的 ON 子句；新增筛选回归测试。
 - 2026-10-28：新增设置项 `client_ip_header`：可指定 `CF-Connecting-IP`、`X-Forwarded-For`、`X-Real-IP` 等请求头解析真实客户端 IP，登录失败限速按解析后的 IP 计数；头缺失或无效时回退 TCP 对端，仅在可信代理后配置。
 - 2026-10-28：版本升至 `0.1.4` 并发布上述客户端 IP 请求头功能。
+- 2026-10-28：日志列表与详情新增 `tokens_per_second`：输出 tokens 除以生成耗时，流式扣除首 token 等待；前端显示为 `tok/s`。
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。
