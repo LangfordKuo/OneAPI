@@ -1,22 +1,26 @@
-FROM node:22-alpine AS web-builder
+FROM node:24-alpine AS web-builder
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci
 COPY web/ ./
 RUN npm run build
 
 FROM rust:1-slim-bookworm AS rust-builder
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential pkg-config \
+    && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY migrations ./migrations
 COPY --from=web-builder /app/web/dist ./web/dist
-RUN cargo build --release
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo build --release --locked
 
 FROM debian:bookworm-slim
+LABEL org.opencontainers.image.title="OneAPI" \
+      org.opencontainers.image.description="Self-hosted AI API gateway" \
+      org.opencontainers.image.licenses="GPL-3.0-only"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

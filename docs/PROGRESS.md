@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：M6 前端已完成，准备进入 M7
+- 当前阶段：M7 进行中（CI/CD 与多平台发布已完成）
 - 当前分支：`main`
-- 最近提交：`4b4ad92 feat: 实现三协议流式网关与 Responses 流式状态`
+- 最近提交：`390cf24 feat: 完成管理后台日志、仪表盘与 Playground`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -15,20 +15,20 @@
 - [x] **M4 Responses 状态**：落库、`previous_response_id` 展开、GET/DELETE、Key 归属校验。
 - [x] **M5 流式**：SSE 解码/编码状态机、tee 透传、首 event 失败切换、断连记 499。
 - [x] **M6 前端**：登录、仪表盘、渠道、Key、日志、设置、Playground。
-- [ ] **M7 收尾**：Docker、README/部署文档、CI、保留期清理任务、`reset-password`、clippy/fmt 全绿。
+- [ ] **M7 收尾**：Docker、README/部署文档、CI、保留期清理任务、`reset-password`、clippy/fmt 全绿。（CI/CD 与多平台发布已完成，剩余清理、命令与最终验收）
 
 ## 当前状态
 
 - M0 已完成：Rust 后端、Vite + React + Ant Design 前端、SQLite 迁移、静态资源嵌入、健康检查、Makefile/Dockerfile 均已落地。
 - 环境：Rust 1.99.1；Node 24.22.1 / npm 11.19.1 位于 `/root/.local/share/vite-plus/bin`，Makefile 已自动把它加入 PATH。
-- 前端依赖：Vite 7.3.7、React 18.3.1、Ant Design 5.29.3、React Router 7.18.4、TanStack Query 5.105.0。
+- 前端依赖：Vite 7.3.7、React 18.3.1、Ant Design 5.29.3、React Router 7.18.4、TanStack Query 5.105.0、@ant-design/plots 2.6.8。
 - M1 已完成：管理员引导登录、HttpOnly Cookie 会话、上游 Key AES-256-GCM 加密、渠道 CRUD、API Key CRUD、设置接口，以及登录/渠道/Key/设置前端页面。
 - M2 已完成：统一 IR、三协议请求/响应编解码、同协议往返与跨协议转换。
 - M3 已完成：网关 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`；API Key 鉴权、渠道优先级/权重选择、失败重试与冷却、上游代理/自定义头/超时、用量日志、同协议透传与跨协议转换；后台渠道测试与模型拉取。
 - M4 已完成：Responses 本地落库、`previous_response_id` 历史展开、GET/DELETE、Key 归属校验；`store=false` 不落库且后续引用返回 400。
 - M5 已完成：三协议 SSE 解码/编码、同协议 tee 透传、跨协议 6 条流路径、首 event 失败切换、逐 chunk 空闲超时、断连 499、Responses 流式落库与回读。
 - M6 已完成：请求日志页与详情抽屉、仪表盘统计/时序/占比/最近错误、Playground 三协议（含流式）、`/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`、路由级懒加载与暗色模式。
-- 下一步进入 M7：Docker/部署文档、CI、保留期清理、`reset-password`、请求体记录开关落地与最终验收。
+- M7 进行中：已完成 GitHub Actions CI、Tag 触发的六平台 Release（Linux/Windows/macOS × amd64/arm64）与 GHCR 多架构 Docker 镜像；剩余保留期清理、`reset-password`、请求体记录开关与最终验收。
 - 已确认的产品决策见 `docs/IMPLEMENTATION_PLAN.md` 第 1 节。
 
 ## M0 验证记录
@@ -104,19 +104,35 @@
 - 新增暗色模式切换（localStorage 记忆）；`api` 客户端对非 auth 请求的 401 会回到登录态。
 - 请求/响应正文记录仍未接入网关（日志详情会显示“未记录”）；保留期清理任务仍在 M7。
 
+## M7 CI/CD 验证记录
+
+- 新增 `.github/workflows/ci.yml`：push 到 `main` / PR 触发 Rust fmt、Clippy、测试与前端 `npm ci && npm run build`。
+- 新增 `.github/workflows/release.yml`：推送 `v*` 标签触发，先校验标签与 `Cargo.toml` 版本一致，再构建六个平台：
+  - Linux amd64 `x86_64-unknown-linux-gnu`（`ubuntu-latest`）
+  - Linux arm64 `aarch64-unknown-linux-gnu`（`ubuntu-24.04-arm`）
+  - Windows amd64 `x86_64-pc-windows-msvc`（`windows-latest`）
+  - Windows arm64 `aarch64-pc-windows-msvc`（`windows-11-arm`）
+  - macOS amd64 `x86_64-apple-darwin`（`macos-15-intel`）
+  - macOS arm64 `aarch64-apple-darwin`（`macos-15`）
+- 发布产物命名 `oneapi-<tag>-<platform>.tar.gz|.zip`，包含二进制、`README.md`、`LICENSE`、`.env.example`；Release 同时上传 `SHA256SUMS`。
+- Docker 任务使用 Buildx + QEMU 构建 `linux/amd64,linux/arm64` 多架构镜像并推送 `ghcr.io/langfordkuo/oneapi`，标签包含 semver、`v<tag>`、`sha-<commit>` 与 `latest`。
+- Dockerfile 升级为 `node:24-alpine` + `rust:1-slim-bookworm` + `debian:bookworm-slim`，SQLite 使用 bundled 构建，运行镜像无需额外 SQLite 库；增加 cargo registry/npm 缓存与 OCI label。
+- 本地校验：两个 workflow 通过 PyYAML 解析；runner 标签、Windows ARM64 Tier 1 host 工具链、`windows-11-arm` 的 VS ARM64 工具与 Rust 预装均已核对。
+- 尚未推送 `v*` 标签，因此 GitHub Actions 实跑与 GHCR 首次推送待首次正式发版时验证。
+
 ## AOCI 状态
 
 - 版本：`0.1.0-rc22`，二进制 `/usr/local/bin/aoci`。
 - ZCode workspace MCP 已配置：`.zcode/config.json`（该文件为机器相关路径，已在 `.git/info/exclude` 中排除）。
 - 已完成 `init --locale zh-CN` 与 `scan`。
-- 首次完整索引（M0）已完成；M1–M6 完成后持续做增量维护，当前索引覆盖后端、前端与文档受管理文件。
+- 首次完整索引（M0）已完成；M1–M7 持续做增量维护，当前索引覆盖后端、前端与文档受管理文件。
 - 每个里程碑结束调用 `aoci_maintain` 做增量维护，完成后执行 verify/check/guide。
 
 ## 下一步
 
-1. 进入 M7：Docker/部署文档、CI、日志与 Responses 保留期清理、`reset-password` 子命令、请求体记录开关落地、最终验收。
-2. M7 完成后更新本文件，标记 M7 为已完成，并记录验证结果。
-3. 每个里程碑结束按 AOCI Guide 做增量维护。
+1. 完成 M7 剩余项：日志与 Responses 保留期清理、`reset-password` 子命令、请求体记录开关落地、最终部署与验收文档。
+2. 首次正式发版时推送 `v0.1.0`（需与 `Cargo.toml` 一致），观察 GitHub Actions 六平台构建与 GHCR 推送。
+3. M7 完成后更新本文件并做 AOCI 增量维护。
 
 ## 交接约定
 
