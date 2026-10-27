@@ -108,9 +108,9 @@
 
 - 新增 `.github/workflows/ci.yml`：push 到 `main` / PR 触发 Rust fmt、Clippy、测试与前端 `npm ci && npm run build`。
 - 新增 `.github/workflows/release.yml`：推送 `v*` 标签触发，先校验标签与 `Cargo.toml` 版本一致，再构建六个平台：
-  - Linux amd64 `x86_64-unknown-linux-gnu`（`ubuntu-latest`）
+  - Linux amd64 `x86_64-unknown-linux-gnu`（`ubuntu-24.04`）
   - Linux arm64 `aarch64-unknown-linux-gnu`（`ubuntu-24.04-arm`）
-  - Windows amd64 `x86_64-pc-windows-msvc`（`windows-latest`）
+  - Windows amd64 `x86_64-pc-windows-msvc`（`windows-2025`）
   - Windows arm64 `aarch64-pc-windows-msvc`（`windows-11-arm`）
   - macOS amd64 `x86_64-apple-darwin`（`macos-15-intel`）
   - macOS arm64 `aarch64-apple-darwin`（`macos-15`）
@@ -119,7 +119,9 @@
 - Docker 任务在六个平台构建完成后，下载 Linux amd64/arm64 产物，使用 `Dockerfile.release` 组装并推送 `ghcr.io/langfordkuo/oneapi` 多架构镜像；避免 QEMU 下二次编译 Rust，标签包含 semver、`v<tag>`、`sha-<commit>` 与 `latest`。
 - Dockerfile 升级为 `node:24-alpine` + `rust:1-slim-bookworm` + `debian:bookworm-slim`，SQLite 使用 bundled 构建，运行镜像无需额外 SQLite 库；增加 cargo registry/npm 缓存与 OCI label。
 - 本地校验：两个 workflow 通过 PyYAML 解析；runner 标签、Windows ARM64 Tier 1 host 工具链、`windows-11-arm` 的 VS ARM64 工具与 Rust 预装均已核对。
-- GitHub Actions dry-run（`workflow_dispatch`，run `40460124182`）：validate、web、六个平台 build（Linux/Windows/macOS × amd64/arm64）与 Docker `linux/amd64,linux/arm64` 组装全部成功；手动触发按设计跳过 Release 发布且不推送镜像。正式推送 `v*` 标签时会执行 push 并创建 Release。
+- GitHub Actions dry-run（`workflow_dispatch`，run `40463328866`）：validate、web、六个平台 build（Linux/Windows/macOS × amd64/arm64）与 Docker `linux/amd64,linux/arm64` 组装全部成功；注解仅剩 macOS arm64 容量提示 notice，Node 20 弃用与 `ubuntu-latest` 迁移提示已清除。手动触发按设计跳过 Release 发布且不推送镜像。
+- 已下载并校验 artifact：六个 artifact 均为原始可执行文件（ELF x86_64/aarch64、Mach-O x86_64/arm64、PE x86_64/ARM64）；按 Release 脚本打包后，Linux tar 与 Windows zip 根目录仅含二进制、README、LICENSE、`.env.example`，无嵌套压缩包；`gh run download` 全量下载成功。
+- 已关闭 Buildx 构建记录 artifact 上传，避免 `gh run download` 全量下载遇到非 zip 缓存文件；Docker 任务使用 `pattern: oneapi-*` / `oneapi-linux-*` 精确下载。
 - 尚未推送 `v*` 标签，因此 GHCR 首次镜像推送与 GitHub Release 发布待正式发版时验证。
 
 ## AOCI 状态

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-27T06:22:32Z",
+  "updated_at": "2026-10-27T06:58:05Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -23,15 +23,15 @@
     },
     ".github/workflows/ci.yml": {
       "role": "index",
-      "sha256": "0b625f43707edce192a372df38a92dee922d9332a9b70db481d39e41fda40584",
-      "size": 1087,
-      "normalized_sha256": "0b625f43707edce192a372df38a92dee922d9332a9b70db481d39e41fda40584"
+      "sha256": "6152db98d5a4af6f333ef4f9811b541a955995e9fbb5c6c68070399a76585dc6",
+      "size": 1089,
+      "normalized_sha256": "6152db98d5a4af6f333ef4f9811b541a955995e9fbb5c6c68070399a76585dc6"
     },
     ".github/workflows/release.yml": {
       "role": "index",
-      "sha256": "2b00525f8ecf43f299181637e1a82cfb392afbcdee82cd631d78d2d08c354b31",
-      "size": 6388,
-      "normalized_sha256": "2b00525f8ecf43f299181637e1a82cfb392afbcdee82cd631d78d2d08c354b31"
+      "sha256": "5a9cb1b0b3dc74fa95aedb9134dc21f74c0afc6fb44ddf345ace4f0c37602c08",
+      "size": 6899,
+      "normalized_sha256": "5a9cb1b0b3dc74fa95aedb9134dc21f74c0afc6fb44ddf345ace4f0c37602c08"
     },
     ".gitignore": {
       "role": "index",
@@ -83,15 +83,15 @@
     },
     "README.md": {
       "role": "index",
-      "sha256": "b5be6c74413e7b034c196e840e7f125d75be4f35e50a134d3561f5177e84f51b",
-      "size": 4855,
-      "normalized_sha256": "b5be6c74413e7b034c196e840e7f125d75be4f35e50a134d3561f5177e84f51b"
+      "sha256": "891ae85bb719adc3e3d93097fb3ad0ac4f9ce2d27b3ee9a43de8056ed44b6ff6",
+      "size": 5008,
+      "normalized_sha256": "891ae85bb719adc3e3d93097fb3ad0ac4f9ce2d27b3ee9a43de8056ed44b6ff6"
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "d2e907b0cf48af23c9e3a5fb5a30d06fc02892b265d80cfe086fbe5db3ee339b",
-      "size": 35756,
-      "normalized_sha256": "d2e907b0cf48af23c9e3a5fb5a30d06fc02892b265d80cfe086fbe5db3ee339b"
+      "sha256": "f235462e08a6a7b717dca228bbfadfe3569c14e5fb41604592b31f47dc1f8af5",
+      "size": 36054,
+      "normalized_sha256": "f235462e08a6a7b717dca228bbfadfe3569c14e5fb41604592b31f47dc1f8af5"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -119,15 +119,15 @@
     },
     "docs/IMPLEMENTATION_PLAN.md": {
       "role": "index",
-      "sha256": "8519a3a5bbe046d2f17b23477be93d924e839933d93918a6c1ada72cbd4d8ce9",
-      "size": 20408,
-      "normalized_sha256": "8519a3a5bbe046d2f17b23477be93d924e839933d93918a6c1ada72cbd4d8ce9"
+      "sha256": "7b2cc90f59f8e3ca8135ef2be3053e783f44f0fb83e03e419480a17f2536c86b",
+      "size": 20527,
+      "normalized_sha256": "7b2cc90f59f8e3ca8135ef2be3053e783f44f0fb83e03e419480a17f2536c86b"
     },
     "docs/PROGRESS.md": {
       "role": "index",
-      "sha256": "6a64e27dd4575d510e2a88e4a3d2ebe02a8623c6b265996b212f76b150bf5b47",
-      "size": 12816,
-      "normalized_sha256": "6a64e27dd4575d510e2a88e4a3d2ebe02a8623c6b265996b212f76b150bf5b47"
+      "sha256": "34aa5bf87e2b3c5bd21219ff6c603c8989c4194572f63d24492cee118810efb6",
+      "size": 13783,
+      "normalized_sha256": "34aa5bf87e2b3c5bd21219ff6c603c8989c4194572f63d24492cee118810efb6"
     },
     "migrations/0001_init.sql": {
       "role": "index",
