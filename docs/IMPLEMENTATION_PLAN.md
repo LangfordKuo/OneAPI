@@ -47,17 +47,16 @@ OneAPI/
 │   ├── state.rs  error.rs  telemetry.rs  security.rs
 │   ├── db.rs               # pool、migrations、WAL/busy_timeout
 │   ├── models/             # admin, channel, api_key, usage_log, response, setting
-│   ├── admin/              # auth, channels, keys, logs, dashboard, settings, playground
+│   ├── admin/              # auth, channels, keys, settings, csrf
 │   ├── gateway/
-│   │   ├── mod.rs  router.rs  auth.rs  select.rs  executor.rs
-│   │   ├── identity.rs     # 同协议透传 + tee 观察者
-│   │   └── usage.rs        # 日志队列、Drop guard(499)
+│   │   ├── mod.rs  auth.rs  select.rs  execute.rs  error.rs
+│   │   ├── stream.rs       # 同协议 tee、跨协议流转换、首 event 切换、499
+│   │   ├── responses_state.rs
+│   │   └── usage.rs
 │   ├── protocol/
-│   │   ├── ir.rs  error.rs  sse.rs
-│   │   ├── chat/{request,response,stream}.rs
-│   │   ├── responses/{request,response,stream,store}.rs
-│   │   └── anthropic/{request,response,stream}.rs
-│   ├── upstream/client.rs  # 每渠道 reqwest client(proxy/headers/timeout)
+│   │   ├── ir.rs  error.rs  sse.rs  stream.rs
+│   │   └── chat.rs  responses.rs  anthropic.rs
+│   ├── upstream.rs         # 每渠道 reqwest client(proxy/headers/timeout)
 │   └── web.rs              # release: rust-embed; debug: ServeDir + SPA fallback
 ├── tests/  + tests/fixtures/{chat,responses,anthropic}/
 └── web/                    # Vite + React
@@ -228,3 +227,4 @@ GET /healthz  /readyz
 ## 15. 变更记录
 
 - 2026-10-27：创建本文档，记录已确认决策、架构、数据模型、协议转换策略、里程碑与风险。
+- 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。

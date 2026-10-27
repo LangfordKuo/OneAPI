@@ -6,6 +6,7 @@ use reqwest::{Client, RequestBuilder};
 use crate::{models::channel::Channel, security::Crypto};
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 600_000;
+pub const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 120_000;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 pub fn build_client(channel: &Channel) -> Result<Client> {
@@ -29,6 +30,35 @@ pub fn build_client(channel: &Channel) -> Result<Client> {
     builder
         .build()
         .context("failed to build upstream HTTP client")
+}
+
+/// Streaming requests must not carry reqwest's total request timeout, otherwise
+/// a long-lived SSE response is cut off. The idle timeout is enforced per chunk
+/// by the gateway instead.
+pub fn build_stream_client(channel: &Channel) -> Result<Client> {
+    let mut builder = Client::builder()
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .user_agent(format!("OneAPI/{}", env!("CARGO_PKG_VERSION")));
+
+    if let Some(proxy) = &channel.proxy_url {
+        builder = builder.proxy(
+            reqwest::Proxy::all(proxy)
+                .with_context(|| format!("invalid proxy URL for channel {}", channel.name))?,
+        );
+    }
+
+    builder
+        .build()
+        .context("failed to build upstream streaming HTTP client")
+}
+
+pub fn stream_idle_timeout(channel: &Channel) -> Duration {
+    Duration::from_millis(
+        channel
+            .timeout_ms
+            .map(|value| value.max(1) as u64)
+            .unwrap_or(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+    )
 }
 
 pub fn endpoint_path(kind: &str) -> &'static str {

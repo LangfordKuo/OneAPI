@@ -5,6 +5,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::Response,
 };
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -21,6 +22,7 @@ use super::{
     error,
     responses_state::{self, ExpandError},
     select,
+    stream::{self, ByteStream, StreamJob},
     usage::{self, UsageRecord},
 };
 
@@ -61,25 +63,12 @@ pub async fn proxy(
         attempts: 0,
     };
 
-    if body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
-        let message = "streaming is not implemented yet";
-        ctx.record(
-            state,
-            None,
-            None,
-            inbound,
-            StatusCode::BAD_REQUEST,
-            Some(("invalid_request_error", message)),
-            Usage::default(),
-        )
-        .await;
-        return Ok(error::client_error(
-            inbound,
-            StatusCode::BAD_REQUEST,
-            message,
-            "invalid_request_error",
-        ));
-    }
+    let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let client_wants_usage = body
+        .get("stream_options")
+        .and_then(|value| value.get("include_usage"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     let mut client_request: Option<Value> = None;
     let mut response_id: Option<String> = None;
@@ -139,6 +128,24 @@ pub async fn proxy(
             message,
             "invalid_request_error",
         ));
+    }
+
+    if streaming {
+        return proxy_stream(
+            state,
+            auth,
+            inbound,
+            &request_id,
+            &model,
+            body,
+            candidates,
+            should_store,
+            response_id,
+            client_request,
+            started,
+            client_wants_usage,
+        )
+        .await;
     }
 
     let mut last_channel: Option<Channel> = None;
@@ -529,6 +536,355 @@ pub async fn proxy(
         format!("all upstream channels failed: {last_message}"),
         &last_error_type,
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn proxy_stream(
+    state: &AppState,
+    auth: &ApiKeyAuth,
+    inbound: Protocol,
+    request_id: &str,
+    model: &str,
+    body: Value,
+    candidates: Vec<select::Candidate>,
+    should_store: bool,
+    response_id: Option<String>,
+    client_request: Option<Value>,
+    started: Instant,
+    client_wants_usage: bool,
+) -> Result<Response, AppError> {
+    let mut attempts = 0u32;
+    let mut last_channel: Option<Channel> = None;
+    let mut last_upstream_model: Option<String> = None;
+    let mut last_upstream = inbound;
+    let mut last_error_type = "upstream_error".to_string();
+    let mut last_message = "no upstream channel succeeded".to_string();
+
+    for candidate in candidates {
+        attempts += 1;
+        let channel = &candidate.channel;
+        let upstream = protocol_for_kind(&channel.kind);
+        last_channel = Some(channel.clone());
+        last_upstream_model = Some(candidate.upstream_model.clone());
+        last_upstream = upstream;
+
+        let mut request_body = if upstream == inbound {
+            let mut value = body.clone();
+            if let Some(object) = value.as_object_mut() {
+                object.insert("model".into(), json!(candidate.upstream_model));
+            }
+            value
+        } else {
+            let mut ir = match inbound.parse_request(&body) {
+                Ok(ir) => ir,
+                Err(error) => {
+                    let message = error.to_string();
+                    record_stream_attempt(
+                        state,
+                        request_id,
+                        auth,
+                        model,
+                        Some(channel),
+                        Some(&candidate.upstream_model),
+                        inbound,
+                        upstream,
+                        StatusCode::BAD_REQUEST,
+                        attempts,
+                        started,
+                        Some(("invalid_request_error", message.as_str())),
+                        Usage::default(),
+                    )
+                    .await;
+                    return Ok(error::client_error(
+                        inbound,
+                        StatusCode::BAD_REQUEST,
+                        message,
+                        "invalid_request_error",
+                    ));
+                }
+            };
+            ir.model = candidate.upstream_model.clone();
+            match upstream.encode_request(&ir) {
+                Ok(value) => value,
+                Err(error) => {
+                    let message = error.to_string();
+                    record_stream_attempt(
+                        state,
+                        request_id,
+                        auth,
+                        model,
+                        Some(channel),
+                        Some(&candidate.upstream_model),
+                        inbound,
+                        upstream,
+                        StatusCode::BAD_REQUEST,
+                        attempts,
+                        started,
+                        Some(("invalid_request_error", message.as_str())),
+                        Usage::default(),
+                    )
+                    .await;
+                    return Ok(error::client_error(
+                        inbound,
+                        StatusCode::BAD_REQUEST,
+                        message,
+                        "invalid_request_error",
+                    ));
+                }
+            }
+        };
+
+        if let Some(object) = request_body.as_object_mut() {
+            object.insert("stream".into(), json!(true));
+            if upstream == Protocol::Chat {
+                let mut options = object
+                    .get("stream_options")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                options.insert("include_usage".into(), json!(true));
+                object.insert("stream_options".into(), Value::Object(options));
+            }
+            if upstream == Protocol::Responses {
+                object.insert("store".into(), json!(false));
+            }
+        }
+
+        let client = match upstream::build_stream_client(channel) {
+            Ok(client) => client,
+            Err(error) => {
+                last_message = error.to_string();
+                last_error_type = "upstream_configuration_error".to_string();
+                let _ = models::channel::mark_failure(
+                    &state.db,
+                    channel.id,
+                    &last_message,
+                    now_ms(),
+                    60_000,
+                )
+                .await;
+                continue;
+            }
+        };
+
+        let request = match upstream::build_request(&client, channel, &state.crypto, &request_body)
+        {
+            Ok(request) => request.header(header::ACCEPT, "text/event-stream"),
+            Err(error) => {
+                last_message = error.to_string();
+                last_error_type = "upstream_configuration_error".to_string();
+                let _ = models::channel::mark_failure(
+                    &state.db,
+                    channel.id,
+                    &last_message,
+                    now_ms(),
+                    60_000,
+                )
+                .await;
+                continue;
+            }
+        };
+
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                last_message = error.to_string();
+                last_error_type = "upstream_unreachable".to_string();
+                let _ = models::channel::mark_failure(
+                    &state.db,
+                    channel.id,
+                    &last_message,
+                    now_ms(),
+                    60_000,
+                )
+                .await;
+                continue;
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            let upstream_value = serde_json::from_str::<Value>(&text).ok();
+            let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
+
+            if is_retryable(status) {
+                let _ = models::channel::mark_failure(
+                    &state.db,
+                    channel.id,
+                    &message,
+                    now_ms(),
+                    60_000,
+                )
+                .await;
+                last_error_type = error_type;
+                last_message = message;
+                continue;
+            }
+
+            record_stream_attempt(
+                state,
+                request_id,
+                auth,
+                model,
+                Some(channel),
+                Some(&candidate.upstream_model),
+                inbound,
+                upstream,
+                status,
+                attempts,
+                started,
+                Some((error_type.as_str(), message.as_str())),
+                Usage::default(),
+            )
+            .await;
+
+            return Ok(match upstream_value {
+                Some(value) => error::upstream_error(inbound, status, &value),
+                None => error::client_error(inbound, status, message, error_type.as_str()),
+            });
+        }
+
+        let byte_stream: ByteStream = Box::pin(
+            response
+                .bytes_stream()
+                .map(|item| item.map_err(std::io::Error::other)),
+        );
+
+        let job = StreamJob {
+            state: state.clone(),
+            request_id: request_id.to_string(),
+            api_key_id: auth.key.id,
+            client_model: model.to_string(),
+            inbound,
+            upstream,
+            channel_id: channel.id,
+            upstream_model: candidate.upstream_model.clone(),
+            started,
+            attempts,
+            idle_timeout: upstream::stream_idle_timeout(channel),
+            passthrough: upstream == inbound,
+            client_wants_usage,
+            response_id: response_id.clone(),
+            store_response: should_store,
+            stored_request: client_request.clone(),
+            stream: byte_stream,
+        };
+
+        match stream::start(job).await {
+            Ok(response) => return Ok(response),
+            Err(failure) => {
+                let retryable = failure.retryable;
+                let _ = models::channel::mark_failure(
+                    &state.db,
+                    channel.id,
+                    &failure.message,
+                    now_ms(),
+                    60_000,
+                )
+                .await;
+                last_error_type = failure.error_type.clone();
+                last_message = failure.message.clone();
+
+                if retryable {
+                    continue;
+                }
+
+                record_stream_attempt(
+                    state,
+                    request_id,
+                    auth,
+                    model,
+                    Some(channel),
+                    Some(&candidate.upstream_model),
+                    inbound,
+                    upstream,
+                    StatusCode::BAD_GATEWAY,
+                    attempts,
+                    started,
+                    Some((failure.error_type.as_str(), failure.message.as_str())),
+                    Usage::default(),
+                )
+                .await;
+
+                return Ok(error::client_error(
+                    inbound,
+                    StatusCode::BAD_GATEWAY,
+                    failure.message,
+                    &failure.error_type,
+                ));
+            }
+        }
+    }
+
+    record_stream_attempt(
+        state,
+        request_id,
+        auth,
+        model,
+        last_channel.as_ref(),
+        last_upstream_model.as_deref(),
+        inbound,
+        last_upstream,
+        StatusCode::BAD_GATEWAY,
+        attempts,
+        started,
+        Some((last_error_type.as_str(), last_message.as_str())),
+        Usage::default(),
+    )
+    .await;
+
+    Ok(error::client_error(
+        inbound,
+        StatusCode::BAD_GATEWAY,
+        format!("all upstream channels failed: {last_message}"),
+        &last_error_type,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_stream_attempt(
+    state: &AppState,
+    request_id: &str,
+    auth: &ApiKeyAuth,
+    model: &str,
+    channel: Option<&Channel>,
+    upstream_model: Option<&str>,
+    inbound: Protocol,
+    upstream: Protocol,
+    status: StatusCode,
+    attempts: u32,
+    started: Instant,
+    error: Option<(&str, &str)>,
+    tokens: Usage,
+) {
+    let record = UsageRecord {
+        request_id,
+        source: "gateway",
+        api_key_id: Some(auth.key.id),
+        channel_id: channel.map(|channel| channel.id),
+        model,
+        upstream_model,
+        inbound_protocol: inbound.as_str(),
+        upstream_protocol: upstream.as_str(),
+        stream: true,
+        status_code: status.as_u16(),
+        attempts,
+        error_type: error.map(|(error_type, _)| error_type),
+        error_message: error.map(|(_, message)| message),
+        usage: &tokens,
+        latency_ms: started.elapsed().as_millis() as i64,
+        first_token_ms: None,
+        created_at: now_ms(),
+    };
+
+    if let Err(error) = usage::insert(&state.db, &record).await {
+        tracing::error!(
+            error = %error,
+            request_id = %request_id,
+            "failed to write streaming usage log"
+        );
+    }
 }
 
 struct RequestContext<'a> {

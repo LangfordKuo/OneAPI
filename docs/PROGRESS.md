@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：M4 Responses 状态已完成，准备进入 M5
+- 当前阶段：M5 流式已完成，准备进入 M6
 - 当前分支：`main`
-- 最近提交：`8f3b2c8 Initial commit`
+- 最近提交：`46b3687 feat: 实现 Responses 本地状态与历史续接`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -13,7 +13,7 @@
 - [x] **M2 协议层（非流式）**：统一 IR、三协议请求/响应编解码、同协议 fast path、6 条跨协议组合单测。
 - [x] **M3 网关（非流式）**：路由/加权/故障转移、上游 client（代理/请求头/超时）、用量日志、错误映射。
 - [x] **M4 Responses 状态**：落库、`previous_response_id` 展开、GET/DELETE、Key 归属校验。
-- [ ] **M5 流式**：SSE 解码/编码状态机、tee 透传、首 event 失败切换、断连记 499。
+- [x] **M5 流式**：SSE 解码/编码状态机、tee 透传、首 event 失败切换、断连记 499。
 - [ ] **M6 前端**：登录、仪表盘、渠道、Key、日志、设置、Playground。
 - [ ] **M7 收尾**：Docker、README/部署文档、CI、保留期清理任务、`reset-password`、clippy/fmt 全绿。
 
@@ -26,7 +26,8 @@
 - M2 已完成：统一 IR、三协议请求/响应编解码、同协议往返与跨协议转换。
 - M3 已完成：网关 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`；API Key 鉴权、渠道优先级/权重选择、失败重试与冷却、上游代理/自定义头/超时、用量日志、同协议透传与跨协议转换；后台渠道测试与模型拉取。
 - M4 已完成：Responses 本地落库、`previous_response_id` 历史展开、GET/DELETE、Key 归属校验；`store=false` 不落库且后续引用返回 400。
-- 流式尚未实现，M5 处理。
+- M5 已完成：三协议 SSE 解码/编码、同协议 tee 透传、跨协议 6 条流路径、首 event 失败切换、逐 chunk 空闲超时、断连 499、Responses 流式落库与回读。
+- 下一步进入 M6 前端：登录/仪表盘/渠道/Key/设置已就绪，日志页与 Playground 仍为占位。
 - 已确认的产品决策见 `docs/IMPLEMENTATION_PLAN.md` 第 1 节。
 
 ## M0 验证记录
@@ -80,18 +81,28 @@
 - `cargo build --release`：通过，二进制约 9.9 MB。
 - AOCI 增量维护后索引总计 70 条 Entry。
 
+## M5 验证记录
+
+- `cargo fmt --all`：通过。
+- `cargo clippy --all-targets -- -D warnings`：通过。
+- `cargo test`：56 个测试通过（新增 21 个流式相关用例）。
+- 流式覆盖：SSE 增量解析（跨 chunk/CRLF/多行 data/未闭合帧）、三协议解码器与编码器、Chat→Anthropic、Chat→Responses、Anthropic→Chat、Anthropic→Responses、Responses→Chat、Responses→Anthropic、工具调用分片与 id 映射、同协议透传与 usage 尾块过滤、首 event error 失败切换、客户端断开记录 499、Responses 流式落库与 GET 回读。
+- `cargo build --release`：通过，二进制约 11 MB。
+- 进程级端到端：release 二进制 + 本地 mock SSE 上游；Chat 流式透传返回上游分片与 `[DONE]`；Responses 流式请求经跨协议转换生成本地 `resp_...` id、落库后可 GET 回读；两条 usage_logs 均为 `stream=1`、`status_code=200`、tokens 5/2、`first_token_ms` 非空，`responses` 表存在对应记录。
+- 流式空闲超时默认 120s，渠道配置了 `timeout_ms` 时以该值作为逐 chunk 空闲超时；非流式仍使用渠道总超时（默认 600s）。
+
 ## AOCI 状态
 
 - 版本：`0.1.0-rc22`，二进制 `/usr/local/bin/aoci`。
 - ZCode workspace MCP 已配置：`.zcode/config.json`（该文件为机器相关路径，已在 `.git/info/exclude` 中排除）。
 - 已完成 `init --locale zh-CN` 与 `scan`。
-- 首次完整索引（M0）已完成；M1–M4 完成后做增量维护，当前索引覆盖 70 个受管理文件。
+- 首次完整索引（M0）已完成；M1–M5 完成后持续做增量维护，当前索引覆盖后端、前端与文档受管理文件。
 - 每个里程碑结束调用 `aoci_maintain` 做增量维护，完成后执行 verify/check/guide。
 
 ## 下一步
 
-1. 进入 M5：SSE 解码/编码状态机、tee 透传、首 event 失败切换、断连记 499、完整流测试。
-2. M5 完成后更新本文件，标记 M5 为已完成，并记录验证结果。
+1. 进入 M6：请求日志页、Playground、仪表盘统计与路由级代码分割。
+2. M6 完成后更新本文件，标记 M6 为已完成，并记录验证结果。
 3. 每个里程碑结束按 AOCI Guide 做增量维护。
 
 ## 交接约定

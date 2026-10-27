@@ -660,7 +660,7 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
     })
 }
 
-fn parse_finish_reason(value: &str) -> StopReason {
+pub(crate) fn parse_finish_reason(value: &str) -> StopReason {
     match value {
         "stop" => StopReason::EndTurn,
         "length" => StopReason::MaxTokens,
@@ -670,7 +670,7 @@ fn parse_finish_reason(value: &str) -> StopReason {
     }
 }
 
-fn parse_usage(usage: &Map<String, Value>) -> Usage {
+pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
     let prompt = get_u64(usage, "prompt_tokens");
     let output = get_u64(usage, "completion_tokens");
     let cached = usage

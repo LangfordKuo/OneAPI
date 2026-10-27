@@ -5,9 +5,12 @@ pub mod chat;
 pub mod error;
 pub mod ir;
 pub mod responses;
+pub mod sse;
+pub mod stream;
 
 pub use error::ProtocolError;
 pub use ir::*;
+pub use stream::{StreamDecoder, StreamEncodeOptions, StreamEncoder};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {

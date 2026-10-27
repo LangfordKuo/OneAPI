@@ -19,6 +19,7 @@ pub mod error;
 pub mod execute;
 pub mod responses_state;
 pub mod select;
+pub mod stream;
 pub mod usage;
 
 pub fn routes() -> Router<AppState> {
@@ -332,6 +333,27 @@ mod tests {
             .expect("body");
         let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value)
+    }
+
+    async fn send_stream(
+        router: axum::Router,
+        path: &str,
+        key: &str,
+        body: Value,
+    ) -> (StatusCode, String) {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {key}"))
+            .body(Body::from(serde_json::to_vec(&body).expect("request json")))
+            .expect("request");
+        let response = router.oneshot(request).await.expect("response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&bytes).to_string())
     }
 
     fn chat_success_body(content: &str) -> Value {
@@ -655,23 +677,243 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_is_rejected_until_m5() {
+    async fn streaming_is_passed_through_and_logged() {
         let (_temp, state) = test_state().await;
         let key = seed_key(&state).await;
-        let router = app::router(state);
+        let server = MockServer::start().await;
 
-        let (status, body) = send(
-            router,
-            "/v1/chat/completions",
-            Some(&key),
-            json!({"model": "gpt-test", "stream": true, "messages": []}),
+        let sse = concat!(
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,",
+            "\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},",
+            "\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,",
+            "\"model\":\"gpt-test\",\"choices\":[],",
+            "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+            .mount(&server)
+            .await;
+
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
         )
         .await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let router = app::router(state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {key}"))
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "model": "gpt-test",
+                    "stream": true,
+                    "messages": [{"role": "user", "content": "hi"}],
+                }))
+                .expect("request json"),
+            ))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("\"content\":\"hello\""));
+        assert!(body.contains("data: [DONE]"));
+        // The usage-only chunk was injected upstream but filtered for the client.
+        assert!(!body.contains("\"usage\""));
+
+        let (stream, attempts, prompt): (i64, i64, Option<i64>) = sqlx::query_as(
+            "SELECT stream, attempts, prompt_tokens FROM usage_logs
+             ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&state.db)
+        .await
+        .expect("usage row");
+        assert_eq!(stream, 1);
+        assert_eq!(attempts, 1);
+        assert_eq!(prompt, Some(3));
+
+        let requests = server.received_requests().await.expect("requests");
+        let upstream: Value = serde_json::from_slice(&requests[0].body).expect("upstream json");
+        assert_eq!(upstream["stream"], json!(true));
+        assert_eq!(upstream["stream_options"]["include_usage"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn streaming_failover_after_first_error_event() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+
+        let failing = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "event: error\ndata: {\"error\":{\"message\":\"busy\",\"type\":\"overloaded_error\"}}\n\n",
+                "text/event-stream",
+            ))
+            .mount(&failing)
+            .await;
+
+        let healthy = MockServer::start().await;
+        let sse = concat!(
+            "data: {\"id\":\"chatcmpl-2\",\"object\":\"chat.completion.chunk\",\"created\":1,",
+            "\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"recovered\"},",
+            "\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-2\",\"object\":\"chat.completion.chunk\",\"created\":1,",
+            "\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{},",
+            "\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+            .mount(&healthy)
+            .await;
+
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", failing.uri()),
+            &["gpt-test"],
+            100,
+            "bad-key",
+        )
+        .await;
+        let healthy_id = seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", healthy.uri()),
+            &["gpt-test"],
+            10,
+            "good-key",
+        )
+        .await;
+
+        let router = app::router(state.clone());
+        let (status, body) = send_stream(
+            router,
+            "/v1/chat/completions",
+            &key,
+            json!({
+                "model": "gpt-test",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"content\":\"recovered\""));
+        assert!(body.contains("data: [DONE]"));
+
+        let (attempts, channel, stream): (i64, Option<i64>, i64) = sqlx::query_as(
+            "SELECT attempts, channel_id, stream FROM usage_logs
+             ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&state.db)
+        .await
+        .expect("usage row");
+        assert_eq!(attempts, 2);
+        assert_eq!(channel, Some(healthy_id));
+        assert_eq!(stream, 1);
+    }
+
+    #[tokio::test]
+    async fn responses_streaming_is_stored_and_fetchable() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        let sse = concat!(
+            "data: {\"id\":\"chatcmpl-3\",\"object\":\"chat.completion.chunk\",\"created\":1,",
+            "\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"streamed answer\"},",
+            "\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-3\",\"object\":\"chat.completion.chunk\",\"created\":1,",
+            "\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{},",
+            "\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+            .mount(&server)
+            .await;
+
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let router = app::router(state.clone());
+        let (status, body) = send_stream(
+            router.clone(),
+            "/v1/responses",
+            &key,
+            json!({"model": "gpt-test", "input": "hello", "stream": true}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("event: response.created"));
+        assert!(body.contains("event: response.output_text.delta"));
+        assert!(body.contains("event: response.completed"));
+        assert!(body.contains("\"text\":\"streamed answer\""));
+
+        let mut response_id = None;
+        for line in body.lines() {
+            let Some(data) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            if let Some(id) = value
+                .get("response")
+                .and_then(|response| response.get("id"))
+                .and_then(Value::as_str)
+                .filter(|id| id.starts_with("resp_"))
+            {
+                response_id = Some(id.to_string());
+            }
+        }
+        let response_id = response_id.expect("local response id");
+
+        let stored: (String, String) = sqlx::query_as(
+            "SELECT id, status FROM responses WHERE id = ? AND api_key_id IS NOT NULL",
+        )
+        .bind(&response_id)
+        .fetch_one(&state.db)
+        .await
+        .expect("stored response");
+        assert_eq!(stored.0, response_id);
+        assert_eq!(stored.1, "completed");
+
+        let (status, stored_body) =
+            send_get(router, &format!("/v1/responses/{response_id}"), &key).await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            body["error"]["message"],
-            json!("streaming is not implemented yet")
+            stored_body["output"][0]["content"][0]["text"],
+            json!("streamed answer")
         );
     }
 

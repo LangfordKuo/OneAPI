@@ -719,7 +719,7 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
     })
 }
 
-fn parse_usage(usage: &Map<String, Value>) -> Usage {
+pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
     let input_total = get_u64(usage, "input_tokens");
     let output = get_u64(usage, "output_tokens");
     let cached = usage

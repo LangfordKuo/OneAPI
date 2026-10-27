@@ -155,6 +155,91 @@ impl Usage {
             }
         }
     }
+
+    /// Later stream events carry more complete counters than earlier ones, so a
+    /// field is only replaced when the newer event actually reports it.
+    pub fn merge(&mut self, other: &Usage) {
+        if other.input_tokens.is_some() {
+            self.input_tokens = other.input_tokens;
+        }
+        if other.output_tokens.is_some() {
+            self.output_tokens = other.output_tokens;
+        }
+        if other.total_tokens.is_some() {
+            self.total_tokens = other.total_tokens;
+        }
+        if other.cached_tokens.is_some() {
+            self.cached_tokens = other.cached_tokens;
+        }
+        if other.cache_creation_tokens.is_some() {
+            self.cache_creation_tokens = other.cache_creation_tokens;
+        }
+        if other.reasoning_tokens.is_some() {
+            self.reasoning_tokens = other.reasoning_tokens;
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens.is_none()
+            && self.output_tokens.is_none()
+            && self.total_tokens.is_none()
+            && self.cached_tokens.is_none()
+            && self.cache_creation_tokens.is_none()
+            && self.reasoning_tokens.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    Text,
+    Reasoning,
+    ToolUse,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamBlock {
+    pub index: usize,
+    pub kind: BlockKind,
+    pub id: Option<String>,
+    pub name: Option<String>,
+}
+
+/// Protocol-neutral streaming events. Decoders are responsible for allocating a
+/// stable `index` per content block; encoders map those indexes to their own
+/// protocol-specific block numbering.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamEvent {
+    Start {
+        id: String,
+        model: String,
+        created_at: i64,
+    },
+    BlockStart(StreamBlock),
+    TextDelta {
+        index: usize,
+        text: String,
+    },
+    ReasoningDelta {
+        index: usize,
+        text: String,
+    },
+    ToolInputDelta {
+        index: usize,
+        partial_json: String,
+    },
+    BlockStop {
+        index: usize,
+    },
+    Usage(Usage),
+    Stop {
+        reason: Option<StopReason>,
+        stop_sequence: Option<String>,
+    },
+    Done,
+    Error {
+        error_type: String,
+        message: String,
+    },
 }
 
 pub fn text_content(parts: &[ContentPart]) -> String {
