@@ -49,7 +49,8 @@ impl StreamFailure {
 pub struct StreamJob {
     pub state: AppState,
     pub request_id: String,
-    pub api_key_id: i64,
+    pub api_key_id: Option<i64>,
+    pub source: &'static str,
     pub client_model: String,
     pub inbound: Protocol,
     pub upstream: Protocol,
@@ -285,7 +286,11 @@ async fn run(
         }
     }
 
-    if job.inbound == Protocol::Responses && job.store_response && stream_error.is_none() {
+    if job.inbound == Protocol::Responses
+        && job.store_response
+        && job.api_key_id.is_some()
+        && stream_error.is_none()
+    {
         let final_response = if job.passthrough {
             decoder.final_response()
         } else {
@@ -305,10 +310,10 @@ async fn run(
                 }
             }
 
-            if let Some(request) = &job.stored_request {
+            if let (Some(api_key_id), Some(request)) = (job.api_key_id, &job.stored_request) {
                 if let Err(error) = responses_state::store(
                     &job.state,
-                    job.api_key_id,
+                    api_key_id,
                     &job.client_model,
                     request,
                     &value,
@@ -358,8 +363,8 @@ async fn run(
 
     let record = UsageRecord {
         request_id: &job.request_id,
-        source: "gateway",
-        api_key_id: Some(job.api_key_id),
+        source: job.source,
+        api_key_id: job.api_key_id,
         channel_id: Some(job.channel_id),
         model: &job.client_model,
         upstream_model: Some(&job.upstream_model),
@@ -782,7 +787,8 @@ mod tests {
         StreamJob {
             state,
             request_id: "req-test".to_string(),
-            api_key_id,
+            api_key_id: Some(api_key_id),
+            source: "gateway",
             client_model: "gpt".to_string(),
             inbound: Protocol::Chat,
             upstream: Protocol::Chat,

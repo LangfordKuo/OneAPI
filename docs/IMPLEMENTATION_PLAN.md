@@ -47,7 +47,7 @@ OneAPI/
 │   ├── state.rs  error.rs  telemetry.rs  security.rs
 │   ├── db.rs               # pool、migrations、WAL/busy_timeout
 │   ├── models/             # admin, channel, api_key, usage_log, response, setting
-│   ├── admin/              # auth, channels, keys, settings, csrf
+│   ├── admin/              # auth, channels, keys, settings, csrf, logs, dashboard, playground, catalog
 │   ├── gateway/
 │   │   ├── mod.rs  auth.rs  select.rs  execute.rs  error.rs
 │   │   ├── stream.rs       # 同协议 tee、跨协议流转换、首 event 切换、499
@@ -228,3 +228,4 @@ GET /healthz  /readyz
 
 - 2026-10-27：创建本文档，记录已确认决策、架构、数据模型、协议转换策略、里程碑与风险。
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
+- 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。

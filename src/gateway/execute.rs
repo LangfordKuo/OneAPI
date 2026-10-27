@@ -26,9 +26,48 @@ use super::{
     usage::{self, UsageRecord},
 };
 
+#[derive(Debug, Clone, Copy)]
+pub struct ProxyIdentity {
+    pub api_key_id: Option<i64>,
+    pub source: &'static str,
+}
+
+impl ProxyIdentity {
+    pub fn gateway(api_key_id: i64) -> Self {
+        Self {
+            api_key_id: Some(api_key_id),
+            source: "gateway",
+        }
+    }
+
+    pub fn playground() -> Self {
+        Self {
+            api_key_id: None,
+            source: "playground",
+        }
+    }
+}
+
 pub async fn proxy(
     state: &AppState,
     auth: &ApiKeyAuth,
+    inbound: Protocol,
+    headers: &HeaderMap,
+    body: Value,
+) -> Result<Response, AppError> {
+    proxy_with_identity(
+        state,
+        ProxyIdentity::gateway(auth.key.id),
+        inbound,
+        headers,
+        body,
+    )
+    .await
+}
+
+pub async fn proxy_with_identity(
+    state: &AppState,
+    identity: ProxyIdentity,
     inbound: Protocol,
     headers: &HeaderMap,
     mut body: Value,
@@ -56,7 +95,8 @@ pub async fn proxy(
     let started = Instant::now();
     let mut ctx = RequestContext {
         request_id: &request_id,
-        api_key_id: auth.key.id,
+        api_key_id: identity.api_key_id,
+        source: identity.source,
         client_model: &model,
         inbound,
         started,
@@ -73,30 +113,55 @@ pub async fn proxy(
     let mut client_request: Option<Value> = None;
     let mut response_id: Option<String> = None;
     let should_store = if inbound == Protocol::Responses {
-        let should_store = body.get("store").and_then(Value::as_bool).unwrap_or(true);
+        let requested_store = body.get("store").and_then(Value::as_bool).unwrap_or(true);
+        let should_store = requested_store && identity.api_key_id.is_some();
 
-        body = match responses_state::expand_previous(state, auth.key.id, body).await {
-            Ok(value) => value,
-            Err(ExpandError::Invalid(message)) => {
-                ctx.record(
-                    state,
-                    None,
-                    None,
-                    inbound,
-                    StatusCode::BAD_REQUEST,
-                    Some(("invalid_request_error", message.as_str())),
-                    Usage::default(),
-                )
-                .await;
-                return Ok(error::client_error(
-                    inbound,
-                    StatusCode::BAD_REQUEST,
-                    message,
-                    "invalid_request_error",
-                ));
-            }
-            Err(ExpandError::Database(error)) => return Err(AppError::Database(error)),
-        };
+        if let Some(api_key_id) = identity.api_key_id {
+            body = match responses_state::expand_previous(state, api_key_id, body).await {
+                Ok(value) => value,
+                Err(ExpandError::Invalid(message)) => {
+                    ctx.record(
+                        state,
+                        None,
+                        None,
+                        inbound,
+                        StatusCode::BAD_REQUEST,
+                        Some(("invalid_request_error", message.as_str())),
+                        Usage::default(),
+                    )
+                    .await;
+                    return Ok(error::client_error(
+                        inbound,
+                        StatusCode::BAD_REQUEST,
+                        message,
+                        "invalid_request_error",
+                    ));
+                }
+                Err(ExpandError::Database(error)) => return Err(AppError::Database(error)),
+            };
+        } else if body
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            let message = "previous_response_id is not supported in the playground";
+            ctx.record(
+                state,
+                None,
+                None,
+                inbound,
+                StatusCode::BAD_REQUEST,
+                Some(("invalid_request_error", message)),
+                Usage::default(),
+            )
+            .await;
+            return Ok(error::client_error(
+                inbound,
+                StatusCode::BAD_REQUEST,
+                message,
+                "invalid_request_error",
+            ));
+        }
 
         response_id = Some(responses_state::new_response_id());
         if let Some(object) = body.as_object_mut() {
@@ -133,7 +198,7 @@ pub async fn proxy(
     if streaming {
         return proxy_stream(
             state,
-            auth,
+            identity,
             inbound,
             &request_id,
             &model,
@@ -449,10 +514,11 @@ pub async fn proxy(
                 }
 
                 if should_store {
-                    if let Some(request) = &client_request {
+                    if let (Some(api_key_id), Some(request)) =
+                        (identity.api_key_id, &client_request)
+                    {
                         if let Err(error) =
-                            responses_state::store(state, auth.key.id, &model, request, &value)
-                                .await
+                            responses_state::store(state, api_key_id, &model, request, &value).await
                         {
                             tracing::warn!(
                                 error = %error,
@@ -485,11 +551,16 @@ pub async fn proxy(
             )
             .await;
 
-            return Response::builder()
+            let response = Response::builder()
                 .status(status)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(client_body)
-                .map_err(|error| AppError::Internal(error.into()));
+                .map_err(|error| AppError::Internal(error.into()))?;
+            return Ok(with_route_headers(
+                response,
+                channel,
+                &candidate.upstream_model,
+            ));
         }
 
         let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
@@ -541,7 +612,7 @@ pub async fn proxy(
 #[allow(clippy::too_many_arguments)]
 async fn proxy_stream(
     state: &AppState,
-    auth: &ApiKeyAuth,
+    identity: ProxyIdentity,
     inbound: Protocol,
     request_id: &str,
     model: &str,
@@ -582,7 +653,7 @@ async fn proxy_stream(
                     record_stream_attempt(
                         state,
                         request_id,
-                        auth,
+                        identity,
                         model,
                         Some(channel),
                         Some(&candidate.upstream_model),
@@ -611,7 +682,7 @@ async fn proxy_stream(
                     record_stream_attempt(
                         state,
                         request_id,
-                        auth,
+                        identity,
                         model,
                         Some(channel),
                         Some(&candidate.upstream_model),
@@ -725,7 +796,7 @@ async fn proxy_stream(
             record_stream_attempt(
                 state,
                 request_id,
-                auth,
+                identity,
                 model,
                 Some(channel),
                 Some(&candidate.upstream_model),
@@ -754,7 +825,8 @@ async fn proxy_stream(
         let job = StreamJob {
             state: state.clone(),
             request_id: request_id.to_string(),
-            api_key_id: auth.key.id,
+            api_key_id: identity.api_key_id,
+            source: identity.source,
             client_model: model.to_string(),
             inbound,
             upstream,
@@ -772,7 +844,10 @@ async fn proxy_stream(
         };
 
         match stream::start(job).await {
-            Ok(response) => return Ok(response),
+            Ok(mut response) => {
+                add_route_headers(&mut response, channel, &candidate.upstream_model);
+                return Ok(response);
+            }
             Err(failure) => {
                 let retryable = failure.retryable;
                 let _ = models::channel::mark_failure(
@@ -793,7 +868,7 @@ async fn proxy_stream(
                 record_stream_attempt(
                     state,
                     request_id,
-                    auth,
+                    identity,
                     model,
                     Some(channel),
                     Some(&candidate.upstream_model),
@@ -820,7 +895,7 @@ async fn proxy_stream(
     record_stream_attempt(
         state,
         request_id,
-        auth,
+        identity,
         model,
         last_channel.as_ref(),
         last_upstream_model.as_deref(),
@@ -846,7 +921,7 @@ async fn proxy_stream(
 async fn record_stream_attempt(
     state: &AppState,
     request_id: &str,
-    auth: &ApiKeyAuth,
+    identity: ProxyIdentity,
     model: &str,
     channel: Option<&Channel>,
     upstream_model: Option<&str>,
@@ -860,8 +935,8 @@ async fn record_stream_attempt(
 ) {
     let record = UsageRecord {
         request_id,
-        source: "gateway",
-        api_key_id: Some(auth.key.id),
+        source: identity.source,
+        api_key_id: identity.api_key_id,
         channel_id: channel.map(|channel| channel.id),
         model,
         upstream_model,
@@ -889,7 +964,8 @@ async fn record_stream_attempt(
 
 struct RequestContext<'a> {
     request_id: &'a str,
-    api_key_id: i64,
+    api_key_id: Option<i64>,
+    source: &'a str,
     client_model: &'a str,
     inbound: Protocol,
     started: Instant,
@@ -910,8 +986,8 @@ impl RequestContext<'_> {
     ) {
         let record = UsageRecord {
             request_id: self.request_id,
-            source: "gateway",
-            api_key_id: Some(self.api_key_id),
+            source: self.source,
+            api_key_id: self.api_key_id,
             channel_id: channel.map(|channel| channel.id),
             model: self.client_model,
             upstream_model,
@@ -936,6 +1012,24 @@ impl RequestContext<'_> {
             );
         }
     }
+}
+
+fn add_route_headers(response: &mut Response, channel: &Channel, upstream_model: &str) {
+    use axum::http::HeaderValue;
+
+    if let Ok(value) = HeaderValue::from_str(&channel.name) {
+        response.headers_mut().insert("x-oneapi-channel", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(upstream_model) {
+        response
+            .headers_mut()
+            .insert("x-oneapi-upstream-model", value);
+    }
+}
+
+fn with_route_headers(mut response: Response, channel: &Channel, upstream_model: &str) -> Response {
+    add_route_headers(&mut response, channel, upstream_model);
+    response
 }
 
 fn protocol_for_kind(kind: &str) -> Protocol {

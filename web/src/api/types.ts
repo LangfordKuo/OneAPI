@@ -1,4 +1,5 @@
 export type ChannelKind = 'openai_chat' | 'openai_responses' | 'anthropic';
+export type ProtocolName = 'chat' | 'responses' | 'anthropic';
 
 export interface Channel {
   id: number;
@@ -62,4 +63,92 @@ export interface ModelFetchResult {
   latency_ms: number;
   models: string[];
   message: string;
+}
+
+export interface LogEntry {
+  id: number;
+  request_id: string;
+  source: 'gateway' | 'playground';
+  api_key_id: number | null;
+  channel_id: number | null;
+  model: string;
+  upstream_model: string | null;
+  inbound_protocol: ProtocolName;
+  upstream_protocol: ProtocolName;
+  stream: boolean;
+  status_code: number;
+  attempts: number;
+  error_type: string | null;
+  error_message: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+  latency_ms: number;
+  first_token_ms: number | null;
+  created_at: number;
+  api_key_name: string | null;
+  channel_name: string | null;
+}
+
+export interface LogList {
+  items: LogEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface LogDetail extends LogEntry {
+  request_body: string | null;
+  response_body: string | null;
+}
+
+export interface DashboardSummary {
+  range: string;
+  requests: number;
+  successes: number;
+  errors: number;
+  success_rate: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  reasoning_tokens: number;
+  avg_latency_ms: number;
+  avg_first_token_ms: number | null;
+  active_channels: number;
+  active_keys: number;
+}
+
+export interface TimeseriesPoint {
+  timestamp: number;
+  requests: number;
+  errors: number;
+  total_tokens: number;
+  avg_latency_ms: number;
+}
+
+export interface Timeseries {
+  range: string;
+  bucket_seconds: number;
+  points: TimeseriesPoint[];
+}
+
+export interface BreakdownItem {
+  key: string;
+  label: string;
+  requests: number;
+  total_tokens: number;
+  errors: number;
+  avg_latency_ms: number;
+}
+
+export interface Breakdown {
+  dimension: string;
+  items: BreakdownItem[];
+}
+
+export interface ModelsOutput {
+  models: string[];
 }

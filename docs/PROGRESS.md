@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：M5 流式已完成，准备进入 M6
+- 当前阶段：M6 前端已完成，准备进入 M7
 - 当前分支：`main`
-- 最近提交：`46b3687 feat: 实现 Responses 本地状态与历史续接`
+- 最近提交：`4b4ad92 feat: 实现三协议流式网关与 Responses 流式状态`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -14,7 +14,7 @@
 - [x] **M3 网关（非流式）**：路由/加权/故障转移、上游 client（代理/请求头/超时）、用量日志、错误映射。
 - [x] **M4 Responses 状态**：落库、`previous_response_id` 展开、GET/DELETE、Key 归属校验。
 - [x] **M5 流式**：SSE 解码/编码状态机、tee 透传、首 event 失败切换、断连记 499。
-- [ ] **M6 前端**：登录、仪表盘、渠道、Key、日志、设置、Playground。
+- [x] **M6 前端**：登录、仪表盘、渠道、Key、日志、设置、Playground。
 - [ ] **M7 收尾**：Docker、README/部署文档、CI、保留期清理任务、`reset-password`、clippy/fmt 全绿。
 
 ## 当前状态
@@ -27,7 +27,8 @@
 - M3 已完成：网关 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`；API Key 鉴权、渠道优先级/权重选择、失败重试与冷却、上游代理/自定义头/超时、用量日志、同协议透传与跨协议转换；后台渠道测试与模型拉取。
 - M4 已完成：Responses 本地落库、`previous_response_id` 历史展开、GET/DELETE、Key 归属校验；`store=false` 不落库且后续引用返回 400。
 - M5 已完成：三协议 SSE 解码/编码、同协议 tee 透传、跨协议 6 条流路径、首 event 失败切换、逐 chunk 空闲超时、断连 499、Responses 流式落库与回读。
-- 下一步进入 M6 前端：登录/仪表盘/渠道/Key/设置已就绪，日志页与 Playground 仍为占位。
+- M6 已完成：请求日志页与详情抽屉、仪表盘统计/时序/占比/最近错误、Playground 三协议（含流式）、`/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`、路由级懒加载与暗色模式。
+- 下一步进入 M7：Docker/部署文档、CI、保留期清理、`reset-password`、请求体记录开关落地与最终验收。
 - 已确认的产品决策见 `docs/IMPLEMENTATION_PLAN.md` 第 1 节。
 
 ## M0 验证记录
@@ -91,18 +92,30 @@
 - 进程级端到端：release 二进制 + 本地 mock SSE 上游；Chat 流式透传返回上游分片与 `[DONE]`；Responses 流式请求经跨协议转换生成本地 `resp_...` id、落库后可 GET 回读；两条 usage_logs 均为 `stream=1`、`status_code=200`、tokens 5/2、`first_token_ms` 非空，`responses` 表存在对应记录。
 - 流式空闲超时默认 120s，渠道配置了 `timeout_ms` 时以该值作为逐 chunk 空闲超时；非流式仍使用渠道总超时（默认 600s）。
 
+## M6 验证记录
+
+- `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`：通过。
+- `cargo test`：58 个测试通过（新增 2 个后台集成测试，覆盖日志/仪表盘/模型列表与 Playground 非流式/流式）。
+- 前端 `npm run build`：通过；路由按页面拆分为独立 chunk，图表组件 `DashboardCharts` 单独懒加载（约 1.47 MB / gzip 434 KB），主包约 790 KB（gzip 253 KB）。
+- 新增后台接口：`GET /api/logs`、`GET /api/logs/{request_id}`、`GET /api/dashboard/summary|timeseries|breakdown`、`GET /api/models`、`POST /api/playground`。
+- Playground 复用网关选路/故障转移/协议转换/日志链路，身份为 `source=playground` 且 `api_key_id=NULL`；Responses 在 Playground 中强制 `store=false` 并拒绝 `previous_response_id`。
+- `cargo build --release`：通过，二进制约 12 MB。
+- 进程级端到端：release 二进制 + mock 上游；网关非流式/流式各 1 次、Playground Chat 非流式 1 次、Responses 流式 1 次、Anthropic 流式 1 次；`/api/logs` 返回 5 条、Playground 3 条且 `api_key_id=NULL`；summary 统计 requests=5/tokens=30；timeseries 25 个 bucket 合计 5；breakdown 按模型返回 gpt-test；`/api/models` 返回 gpt-test；SPA `/` 与 `/logs` 均返回 200。
+- 新增暗色模式切换（localStorage 记忆）；`api` 客户端对非 auth 请求的 401 会回到登录态。
+- 请求/响应正文记录仍未接入网关（日志详情会显示“未记录”）；保留期清理任务仍在 M7。
+
 ## AOCI 状态
 
 - 版本：`0.1.0-rc22`，二进制 `/usr/local/bin/aoci`。
 - ZCode workspace MCP 已配置：`.zcode/config.json`（该文件为机器相关路径，已在 `.git/info/exclude` 中排除）。
 - 已完成 `init --locale zh-CN` 与 `scan`。
-- 首次完整索引（M0）已完成；M1–M5 完成后持续做增量维护，当前索引覆盖后端、前端与文档受管理文件。
+- 首次完整索引（M0）已完成；M1–M6 完成后持续做增量维护，当前索引覆盖后端、前端与文档受管理文件。
 - 每个里程碑结束调用 `aoci_maintain` 做增量维护，完成后执行 verify/check/guide。
 
 ## 下一步
 
-1. 进入 M6：请求日志页、Playground、仪表盘统计与路由级代码分割。
-2. M6 完成后更新本文件，标记 M6 为已完成，并记录验证结果。
+1. 进入 M7：Docker/部署文档、CI、日志与 Responses 保留期清理、`reset-password` 子命令、请求体记录开关落地、最终验收。
+2. M7 完成后更新本文件，标记 M7 为已完成，并记录验证结果。
 3. 每个里程碑结束按 AOCI Guide 做增量维护。
 
 ## 交接约定

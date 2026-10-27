@@ -1,14 +1,27 @@
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Layout, Menu, Space, Spin, Typography } from 'antd';
+import {
+  Button,
+  ConfigProvider,
+  Layout,
+  Menu,
+  Space,
+  Spin,
+  Switch,
+  theme,
+  Typography,
+} from 'antd';
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { api } from './api/client';
 import type { Admin } from './api/types';
-import Channels from './pages/Channels';
-import Dashboard from './pages/Dashboard';
-import Keys from './pages/Keys';
 import Login from './pages/Login';
-import Placeholder from './pages/Placeholder';
-import SettingsPage from './pages/Settings';
+
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Channels = lazy(() => import('./pages/Channels'));
+const Keys = lazy(() => import('./pages/Keys'));
+const Logs = lazy(() => import('./pages/Logs'));
+const Playground = lazy(() => import('./pages/Playground'));
+const SettingsPage = lazy(() => import('./pages/Settings'));
 
 const { Content, Header, Sider } = Layout;
 
@@ -34,11 +47,19 @@ function selectedKey(pathname: string) {
 export default function App() {
   const location = useLocation();
   const queryClient = useQueryClient();
+  const [dark, setDark] = useState(
+    () => window.localStorage.getItem('oneapi-theme') === 'dark',
+  );
   const meQuery = useQuery({
     queryKey: ['me'],
     queryFn: () => api.get<Admin>('/api/auth/me'),
     retry: false,
   });
+
+  useEffect(() => {
+    window.localStorage.setItem('oneapi-theme', dark ? 'dark' : 'light');
+    document.body.style.background = dark ? '#000' : '';
+  }, [dark]);
 
   const logout = useMutation({
     mutationFn: () => api.post('/api/auth/logout'),
@@ -47,21 +68,29 @@ export default function App() {
     },
   });
 
+  const themed = (content: ReactNode) => (
+    <ConfigProvider
+      theme={{ algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm }}
+    >
+      {content}
+    </ConfigProvider>
+  );
+
   if (meQuery.isLoading) {
-    return (
+    return themed(
       <div className="center-shell">
         <Spin size="large" />
-      </div>
+      </div>,
     );
   }
 
   if (meQuery.isError) {
-    return <Login onSuccess={() => void meQuery.refetch()} />;
+    return themed(<Login onSuccess={() => void meQuery.refetch()} />);
   }
 
-  return (
+  return themed(
     <Layout style={{ minHeight: '100vh' }}>
-      <Sider theme="light" width={220}>
+      <Sider theme={dark ? 'dark' : 'light'} width={220}>
         <div style={{ padding: '20px 16px', fontSize: 18, fontWeight: 600 }}>OneAPI</div>
         <Menu
           mode="inline"
@@ -74,7 +103,7 @@ export default function App() {
         <Header
           style={{
             alignItems: 'center',
-            background: '#fff',
+            background: dark ? '#141414' : '#fff',
             display: 'flex',
             justifyContent: 'space-between',
             paddingInline: 24,
@@ -82,6 +111,12 @@ export default function App() {
         >
           <Typography.Text type="secondary">统一 AI API 网关</Typography.Text>
           <Space>
+            <Switch
+              checked={dark}
+              checkedChildren="暗色"
+              unCheckedChildren="亮色"
+              onChange={setDark}
+            />
             <Typography.Text>{meQuery.data?.username}</Typography.Text>
             <Button size="small" onClick={() => logout.mutate()} loading={logout.isPending}>
               退出
@@ -89,17 +124,25 @@ export default function App() {
           </Space>
         </Header>
         <Content style={{ padding: 24 }}>
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/channels" element={<Channels />} />
-            <Route path="/keys" element={<Keys />} />
-            <Route path="/logs" element={<Placeholder title="请求日志" milestone="M6" />} />
-            <Route path="/playground" element={<Placeholder title="Playground" milestone="M6" />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
+          <Suspense
+            fallback={
+              <div className="center-shell">
+                <Spin size="large" />
+              </div>
+            }
+          >
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/channels" element={<Channels />} />
+              <Route path="/keys" element={<Keys />} />
+              <Route path="/logs" element={<Logs />} />
+              <Route path="/playground" element={<Playground />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Suspense>
         </Content>
       </Layout>
-    </Layout>
+    </Layout>,
   );
 }

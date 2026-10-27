@@ -1,8 +1,16 @@
 mod auth;
+mod catalog;
 mod channels;
 mod csrf;
+mod dashboard;
 mod keys;
+mod logs;
+mod playground;
+mod query;
 mod settings;
+
+#[cfg(test)]
+mod tests;
 
 pub use auth::bootstrap;
 
@@ -35,5 +43,12 @@ pub fn routes() -> Router<AppState> {
         .route("/api/keys", get(keys::list).post(keys::create))
         .route("/api/keys/{id}", put(keys::update).delete(keys::delete))
         .route("/api/settings", get(settings::get).put(settings::update))
+        .route("/api/logs", get(logs::list))
+        .route("/api/logs/{request_id}", get(logs::detail))
+        .route("/api/dashboard/summary", get(dashboard::summary))
+        .route("/api/dashboard/timeseries", get(dashboard::timeseries))
+        .route("/api/dashboard/breakdown", get(dashboard::breakdown))
+        .route("/api/models", get(catalog::list))
+        .route("/api/playground", post(playground::proxy))
         .layer(middleware::from_fn(csrf::guard))
 }

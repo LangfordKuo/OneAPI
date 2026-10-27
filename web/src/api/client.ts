@@ -21,6 +21,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
+    if (
+      response.status === 401 &&
+      !path.startsWith('/api/auth/login') &&
+      !path.startsWith('/api/auth/me')
+    ) {
+      window.location.assign('/');
+    }
+
     let message = response.statusText || `HTTP ${response.status}`;
     try {
       const body = (await response.json()) as { error?: { message?: string } };
