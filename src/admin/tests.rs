@@ -393,9 +393,46 @@ async fn logs_and_dashboard_read_usage() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(breakdown["items"][0]["label"], json!("gpt-test"));
 
-    let (status, models) = admin_get(router, "/api/models", &token).await;
+    let (status, models) = admin_get(router.clone(), "/api/models", &token).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models["models"], json!(["gpt-test"]));
+
+    let (status, _) = send_gateway(
+        router.clone(),
+        "/v1/chat/completions",
+        &key,
+        json!({"model": "missing-model", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, errors) =
+        admin_get(router.clone(), "/api/logs?range=24h&status=error", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(errors["total"], json!(1));
+    assert_eq!(errors["items"][0]["status_code"], json!(404));
+
+    let (status, successes) =
+        admin_get(router.clone(), "/api/logs?range=24h&status=success", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(successes["total"], json!(1));
+    assert_eq!(successes["items"][0]["status_code"], json!(200));
+
+    let (status, filtered) = admin_get(
+        router.clone(),
+        "/api/logs?range=24h&model=missing-model",
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(filtered["total"], json!(1));
+    assert_eq!(filtered["items"][0]["model"], json!("missing-model"));
+
+    let (status, none) =
+        admin_get(router, "/api/logs?range=24h&model=does-not-exist", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(none["total"], json!(0));
+    assert_eq!(none["items"].as_array().map(Vec::len), Some(0));
 }
 
 #[tokio::test]

@@ -132,7 +132,11 @@ pub async fn list(
     limit: i64,
     offset: i64,
 ) -> sqlx::Result<(Vec<UsageLogRow>, i64)> {
+    // The WHERE keeps push_filters' " AND ..." clauses attached to the base
+    // table; without it they bind to the last JOIN's ON clause and stop
+    // filtering rows.
     let mut query = QueryBuilder::<Sqlite>::new(SELECT);
+    query.push(" WHERE 1=1");
     push_filters(&mut query, filters);
     query
         .push(" ORDER BY l.created_at DESC, l.id DESC LIMIT ")

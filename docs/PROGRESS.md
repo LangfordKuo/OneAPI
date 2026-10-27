@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：审查计划阶段 A–D 与 E3 已完成，v0.1.2 全量实测通过（分支 `review-plan`）
-- 当前分支：`review-plan`
-- 最近发布：`v0.1.2`
+- 当前阶段：阶段 A–E3 已发布 v0.1.2，v0.1.3 为日志筛选修复补丁（分支 `fix/log-filters`）
+- 当前分支：`fix/log-filters`
+- 最近发布：`v0.1.3`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -173,6 +173,12 @@
 - 验证：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（89 个测试）、`npm run lint`、`npm run build` 全部通过。
 - 发布前全量实测：release 二进制 + 本地 mock 上游 + 真实 HTTP 流程，51 项断言全部通过，覆盖安装向导/登录/Key/渠道 CRUD、同协议与跨协议（Chat↔Anthropic/Responses）非流式与流式、故障转移、首次失败不冷却、第二次失败进入冷却、冷却期跳过、并发半开探测仅放行一个请求、探测成功清零、探测占用时返回 `503 channel_recovering`、Responses 落库与 `previous_response_id`、401/404 错误形状、仪表盘/日志聚合与内嵌前端。
 
+## v0.1.3 发布记录
+
+- 修复日志列表筛选只作用于 `total`、不作用于返回行的问题：`usage_logs` 行查询缺少 WHERE 入口，筛选片段被并入最后一个 `LEFT JOIN` 的 ON 子句，导致仪表盘“最近错误”混入 200 请求，日志页切换筛选后当前页内容不变。
+- 补充筛选回归测试：`status=error` 仅返回 `>=400`、`status=success` 仅返回 `<400`、`model` 过滤与不存在的模型返回空列表。
+- 验证：89 个测试通过，clippy/fmt/lint/build 通过；release 二进制实测筛选结果与 `total` 一致（错误 2 行、成功 13 行、不存在的模型 0 行）。
+
 ## 审查计划阶段 A（v0.1.2 修复与一致性）
 
 - 新增 `docs/REVIEW_PLAN.md`，按阶段记录审查结论与验收标准。
@@ -235,7 +241,7 @@
 
 ## 下一步
 
-1. 审查计划阶段 A–D 与 E3 已合并回 `main` 并发布 `v0.1.2`。
+1. 审查计划阶段 A–D 与 E3 已合并回 `main` 并发布 `v0.1.2`；`v0.1.3` 为日志筛选修复补丁。
 2. 阶段 E 剩余项（速率限制与额度、Prometheus `/metrics`、日志导出/重放、备份恢复、Playground 增强、多管理员/RBAC 与 PostgreSQL）仍是路线图。
 3. 后续版本按 `Cargo.toml` 版本打标签，保留数据目录升级。
 
