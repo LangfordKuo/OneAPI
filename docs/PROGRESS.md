@@ -179,6 +179,17 @@
 - 后端校验渠道 `weight`（1–1000）与 `priority`（-10000–10000）；日志页空态文案修正。
 - 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（79 个测试）、`npm run build` 全部通过。
 
+## 审查计划阶段 B（安全与稳定性）
+
+- `/api/system` 改为需要管理员会话，未登录不再暴露数据目录。
+- 管理员登录新增失败限速：按客户端 IP + 用户名计数，5/10/15 次失败分别锁定 30s/5min/15min，返回 429；服务启动改为携带 ConnectInfo。
+- 新增 `ONEAPI_TRUST_PROXY`：受信反代后可改用 `X-Forwarded-Host` 做 CSRF 同源判断；安装向导同步写入该配置。
+- Responses `previous_response_id` 展开增加 2000 条 / 16MB 上限，超限返回 400。
+- 保留期清理任务顺带删除过期会话（启动与每 6 小时）。
+- 在线更新完成后清理临时二进制；README 补充“GitHub 账号 + HTTPS”信任模型说明。
+- 前端实时指标改用 fetch + SSE 解析，401 时停止重连；网关 SSE 在等待上游时每 15 秒发送心跳注释，且心跳不会延长上游空闲超时。
+- 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（82 个测试）、`npm run build` 全部通过。
+
 ## AOCI 状态
 
 - 版本：`0.1.0-rc22`，二进制 `/usr/local/bin/aoci`。

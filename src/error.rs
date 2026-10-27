@@ -13,6 +13,8 @@ pub enum AppError {
     Unauthorized,
     #[error("{0}")]
     NotFound(String),
+    #[error("{0}")]
+    TooManyRequests(String),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     #[error(transparent)]
@@ -31,6 +33,9 @@ impl IntoResponse for AppError {
                 "unauthorized".to_string(),
             ),
             AppError::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
+            AppError::TooManyRequests(message) => {
+                (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", message)
+            }
             AppError::Database(error) => {
                 tracing::error!(error = %error, "database error");
                 (

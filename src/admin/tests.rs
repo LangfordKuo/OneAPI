@@ -31,6 +31,7 @@ async fn test_state() -> (TempDir, AppState) {
         database_path: data_dir.join("test.db"),
         log_level: "error".to_string(),
         cookie_secure: false,
+        trust_proxy: false,
     };
     let db = db::connect(&config).await.expect("database");
     let crypto = Arc::new(security::Crypto::load_or_create(&config.data_dir).expect("master key"));
@@ -42,6 +43,7 @@ async fn test_state() -> (TempDir, AppState) {
             crypto,
             live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
             updates: std::sync::Arc::new(crate::state::UpdateState::default()),
+            login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
             started_at: chrono::Utc::now(),
         },
     )
@@ -464,6 +466,33 @@ async fn playground_proxies_and_logs_both_modes() {
     assert_eq!(rows[0].1, None);
     assert_eq!(rows[1].0, "playground");
     assert_eq!(rows[1].1, None);
+}
+
+#[tokio::test]
+async fn login_is_rate_limited_after_repeated_failures() {
+    let (_temp, state) = test_state().await;
+    admin_token(&state).await;
+    let router = app::router(state);
+
+    for _ in 0..5 {
+        let (status, _) = admin_post(
+            router.clone(),
+            "/api/auth/login",
+            "",
+            json!({"username": "admin", "password": "wrong-password"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    let (status, _) = admin_post(
+        router,
+        "/api/auth/login",
+        "",
+        json!({"username": "admin", "password": "password123"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]

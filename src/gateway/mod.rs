@@ -326,6 +326,7 @@ mod tests {
             database_path: data_dir.join("test.db"),
             log_level: "error".to_string(),
             cookie_secure: false,
+            trust_proxy: false,
         }
     }
 
@@ -341,6 +342,7 @@ mod tests {
             crypto,
             live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
             updates: std::sync::Arc::new(crate::state::UpdateState::default()),
+            login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
             started_at: chrono::Utc::now(),
         };
         (temp, state)
@@ -1454,5 +1456,52 @@ mod tests {
         let upstream: Value =
             serde_json::from_slice(&requests[0].body).expect("upstream request json");
         assert_eq!(upstream["max_tokens"], json!(2048));
+    }
+
+    #[tokio::test]
+    async fn responses_expansion_rejects_oversized_history() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let key_id = models::api_key::find_by_hash(&state.db, &security::api_key_hash(&key))
+            .await
+            .expect("api key lookup")
+            .expect("api key")
+            .id;
+
+        let items: Vec<Value> = (0..2_001)
+            .map(|index| json!({"type": "message", "role": "user", "content": index.to_string()}))
+            .collect();
+        let request_json = json!({"model": "gpt-test", "input": items}).to_string();
+
+        sqlx::query(
+            "INSERT INTO responses
+             (id, api_key_id, model, request_json, response_json, status, created_at)
+             VALUES ('resp_big', ?, 'gpt-test', ?, '{\"output\":[]}', 'completed', ?)",
+        )
+        .bind(key_id)
+        .bind(&request_json)
+        .bind(models::now_ms())
+        .execute(&state.db)
+        .await
+        .expect("stored response");
+
+        let router = app::router(state);
+        let (status, body) = send(
+            router,
+            "/v1/responses",
+            Some(&key),
+            json!({
+                "model": "gpt-test",
+                "previous_response_id": "resp_big",
+                "input": "again",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("expanded conversation"));
     }
 }

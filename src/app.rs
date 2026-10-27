@@ -15,7 +15,7 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(readyz))
         .route("/api/system", get(system_info))
         .route("/api/site", get(site_info))
-        .merge(admin::routes())
+        .merge(admin::routes(state.config.trust_proxy))
         .merge(gateway::routes())
         .fallback(web::fallback)
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
@@ -64,7 +64,10 @@ struct SystemInfo {
     data_dir: String,
 }
 
-async fn system_info(State(state): State<AppState>) -> Result<Json<SystemInfo>, AppError> {
+async fn system_info(
+    _session: crate::admin::AdminSession,
+    State(state): State<AppState>,
+) -> Result<Json<SystemInfo>, AppError> {
     let _: i64 = sqlx::query_scalar("SELECT 1").fetch_one(&state.db).await?;
     let uptime_seconds = (chrono::Utc::now() - state.started_at).num_seconds().max(0);
 

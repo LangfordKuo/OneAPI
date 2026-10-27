@@ -109,6 +109,46 @@ enum FrameOutcome {
     Failed(String, String),
 }
 
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const HEARTBEAT_FRAME: &[u8] = b": keep-alive\n\n";
+
+enum WaitOutcome {
+    Next(Option<Result<Bytes, std::io::Error>>),
+    TimedOut,
+    Disconnected,
+}
+
+/// Wait for the next upstream chunk while emitting SSE heartbeat comments. The
+/// idle deadline is absolute, so heartbeats do not extend the upstream timeout.
+async fn wait_for_upstream(
+    upstream: &mut ByteStream,
+    tx: &mpsc::Sender<Bytes>,
+    idle_timeout: Duration,
+) -> WaitOutcome {
+    let deadline = Instant::now() + idle_timeout;
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return WaitOutcome::TimedOut;
+        }
+        let wait = (deadline - now).min(HEARTBEAT_INTERVAL);
+
+        tokio::select! {
+            _ = tx.closed() => return WaitOutcome::Disconnected,
+            _ = tokio::time::sleep(wait) => {
+                if Instant::now() >= deadline {
+                    return WaitOutcome::TimedOut;
+                }
+                if tx.send(Bytes::from_static(HEARTBEAT_FRAME)).await.is_err() {
+                    return WaitOutcome::Disconnected;
+                }
+            }
+            result = upstream.next() => return WaitOutcome::Next(result),
+        }
+    }
+}
+
 async fn run(
     job: StreamJob,
     tx: mpsc::Sender<Bytes>,
@@ -197,35 +237,32 @@ async fn run(
         } else if stream_done {
             break;
         } else {
-            let next = tokio::select! {
-                _ = tx.closed() => {
+            match wait_for_upstream(&mut upstream, &tx, job.idle_timeout).await {
+                WaitOutcome::Disconnected => {
                     client_disconnected = true;
                     break;
                 }
-                result = timeout(job.idle_timeout, upstream.next()) => result,
-            };
-            match next {
-                Ok(Some(Ok(chunk))) => {
-                    pending.extend(parser.push(&chunk));
-                    continue;
-                }
-                Ok(Some(Err(error))) => {
-                    stream_error = Some(("upstream_unreachable".to_string(), error.to_string()));
-                    synthesize_error = true;
-                    break;
-                }
-                Ok(None) => {
-                    pending.extend(parser.finish());
-                    stream_done = true;
-                    continue;
-                }
-                Err(_) => {
+                WaitOutcome::TimedOut => {
                     stream_error = Some((
                         "upstream_stream_timeout".to_string(),
                         format!("upstream stream was idle for {:?}", job.idle_timeout),
                     ));
                     synthesize_error = true;
                     break;
+                }
+                WaitOutcome::Next(Some(Ok(chunk))) => {
+                    pending.extend(parser.push(&chunk));
+                    continue;
+                }
+                WaitOutcome::Next(Some(Err(error))) => {
+                    stream_error = Some(("upstream_unreachable".to_string(), error.to_string()));
+                    synthesize_error = true;
+                    break;
+                }
+                WaitOutcome::Next(None) => {
+                    pending.extend(parser.finish());
+                    stream_done = true;
+                    continue;
                 }
             }
         };
@@ -816,6 +853,7 @@ mod tests {
             database_path: data_dir.join("test.db"),
             log_level: "error".to_string(),
             cookie_secure: false,
+            trust_proxy: false,
         };
         let db = db::connect(&config).await.expect("database");
         let crypto = std::sync::Arc::new(
@@ -829,6 +867,7 @@ mod tests {
                 crypto,
                 live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
                 updates: std::sync::Arc::new(crate::state::UpdateState::default()),
+                login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
                 started_at: chrono::Utc::now(),
             },
         )

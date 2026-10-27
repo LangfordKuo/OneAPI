@@ -127,6 +127,7 @@ ONEAPI_DATA_DIR=./data ./oneapi serve
 说明：
 
 - 更新只接受 GitHub Release 中符合 `oneapi-<tag>-<platform>` 命名的官方资产，并强制校验 SHA256。
+- 信任模型：更新信任 GitHub Release 账号与 HTTPS 传输，安装包未做代码签名；如需更强保证，请自行下载并校验后再替换二进制。
 - Linux/macOS 使用 `exec` 原进程重启，Windows 在服务退出后启动新进程。
 - 容器部署不建议自更新，程序会拒绝并提示拉取新镜像；可用 `ONEAPI_ALLOW_SELF_UPDATE=1` 强制测试。
 - Windows 更新需要程序所在目录可写；运行目录外的数据目录（SQLite、master.key、.env）不会被修改。

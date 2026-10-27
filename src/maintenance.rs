@@ -13,11 +13,12 @@ pub struct CleanupStats {
     pub usage_logs: u64,
     pub request_details: u64,
     pub responses: u64,
+    pub sessions: u64,
 }
 
 impl CleanupStats {
     fn changed(&self) -> bool {
-        self.usage_logs > 0 || self.request_details > 0 || self.responses > 0
+        self.usage_logs > 0 || self.request_details > 0 || self.responses > 0 || self.sessions > 0
     }
 }
 
@@ -33,12 +34,14 @@ pub async fn cleanup_once(state: &AppState) -> anyhow::Result<CleanupStats> {
     let usage_cutoff = (usage_days > 0).then(|| now - usage_days.saturating_mul(DAY_MS));
     let response_cutoff = (response_days > 0).then(|| now - response_days.saturating_mul(DAY_MS));
 
-    if usage_cutoff.is_none() && response_cutoff.is_none() {
-        return Ok(CleanupStats::default());
-    }
-
     let mut stats = CleanupStats::default();
     let mut tx = state.db.begin().await?;
+
+    stats.sessions = sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
+        .bind(now)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
 
     if let Some(cutoff) = usage_cutoff {
         stats.usage_logs = sqlx::query("DELETE FROM usage_logs WHERE created_at < ?")
@@ -79,6 +82,7 @@ pub fn spawn(state: AppState) {
                         usage_logs = stats.usage_logs,
                         request_details = stats.request_details,
                         responses = stats.responses,
+                        sessions = stats.sessions,
                         "retention cleanup completed"
                     );
                 }
@@ -111,6 +115,7 @@ mod tests {
             database_path: data_dir.join("test.db"),
             log_level: "error".to_string(),
             cookie_secure: false,
+            trust_proxy: false,
         };
         let db = db::connect(&config).await.expect("database");
         let crypto =
@@ -123,6 +128,7 @@ mod tests {
                 crypto,
                 live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
                 updates: std::sync::Arc::new(crate::state::UpdateState::default()),
+                login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
                 started_at: chrono::Utc::now(),
             },
         )
@@ -246,5 +252,34 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(usage, 1);
+    }
+
+    #[tokio::test]
+    async fn removes_expired_sessions() {
+        let (_temp, state) = test_state().await;
+        setting::upsert(&state.db, "usage_log_retention_days", "0")
+            .await
+            .expect("usage setting");
+        setting::upsert(&state.db, "response_retention_days", "0")
+            .await
+            .expect("response setting");
+
+        let hash = security::hash_password("password123").expect("hash");
+        models::admin::create(&state.db, "admin", &hash, now_ms())
+            .await
+            .expect("admin");
+        let expired = now_ms() - 1_000;
+        models::session::create(&state.db, "expired-hash", 1, expired - 1_000, expired)
+            .await
+            .expect("session");
+
+        let stats = cleanup_once(&state).await.expect("cleanup");
+        assert_eq!(stats.sessions, 1);
+
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&state.db)
+            .await
+            .expect("count");
+        assert_eq!(sessions, 0);
     }
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { readSse } from '../api/sse';
 
 export interface LiveChannelRate {
   channel_id: number;
@@ -17,23 +18,63 @@ const EMPTY: LiveMetricsSnapshot = {
   channels: [],
 };
 
+const RECONNECT_DELAY_MS = 3000;
+
 /**
- * Subscribes to /api/metrics/stream. EventSource reconnects automatically and
- * keeps the page updated without a reload.
+ * Subscribes to /api/metrics/stream. Unlike EventSource this can observe the
+ * HTTP status, so an expired session stops reconnecting instead of hammering
+ * the endpoint forever.
  */
 export function useLiveMetrics(): LiveMetricsSnapshot {
   const [snapshot, setSnapshot] = useState<LiveMetricsSnapshot>(EMPTY);
 
   useEffect(() => {
-    const source = new EventSource('/api/metrics/stream');
-    source.onmessage = (event) => {
+    const controller = new AbortController();
+    let timer: number | undefined;
+    let stopped = false;
+
+    const connect = async () => {
       try {
-        setSnapshot(JSON.parse(event.data) as LiveMetricsSnapshot);
+        const response = await fetch('/api/metrics/stream', {
+          credentials: 'include',
+          headers: { Accept: 'text/event-stream' },
+          signal: controller.signal,
+        });
+
+        if (response.status === 401) {
+          stopped = true;
+          return;
+        }
+        if (!response.ok || !response.body) {
+          throw new Error(`metrics stream failed with ${response.status}`);
+        }
+
+        for await (const event of readSse(response)) {
+          try {
+            setSnapshot(JSON.parse(event.data) as LiveMetricsSnapshot);
+          } catch {
+            // Ignore malformed frames; the next tick will replace them.
+          }
+        }
       } catch {
-        // Ignore malformed frames; the next tick will replace them.
+        if (controller.signal.aborted) {
+          return;
+        }
+      }
+
+      if (!stopped && !controller.signal.aborted) {
+        timer = window.setTimeout(() => void connect(), RECONNECT_DELAY_MS);
       }
     };
-    return () => source.close();
+
+    void connect();
+
+    return () => {
+      controller.abort();
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
   }, []);
 
   return snapshot;

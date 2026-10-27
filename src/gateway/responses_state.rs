@@ -4,6 +4,10 @@ use uuid::Uuid;
 use crate::{models, state::AppState};
 
 pub const MAX_STORED_BYTES: usize = 10 * 1024 * 1024;
+/// Guard against unbounded `previous_response_id` chains: the expanded input is
+/// sent upstream, so it needs its own ceiling independent of per-response size.
+const MAX_EXPANDED_ITEMS: usize = 2_000;
+const MAX_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
 
 pub enum ExpandError {
     Invalid(String),
@@ -36,6 +40,12 @@ pub async fn expand_previous(
             ))
         })?;
 
+    if stored.request_json.len() + stored.response_json.len() > MAX_EXPANDED_BYTES {
+        return Err(ExpandError::Invalid(
+            "stored conversation history exceeds the expanded size limit".to_string(),
+        ));
+    }
+
     let previous_request: Value = serde_json::from_str(&stored.request_json)
         .map_err(|_| ExpandError::Invalid("stored previous request is invalid".to_string()))?;
     let previous_response: Value = serde_json::from_str(&stored.response_json)
@@ -51,6 +61,21 @@ pub async fn expand_previous(
         }
     }
     input.extend(normalize_input(body.get("input")));
+
+    if input.len() > MAX_EXPANDED_ITEMS {
+        return Err(ExpandError::Invalid(format!(
+            "expanded conversation has {} items; the limit is {MAX_EXPANDED_ITEMS}",
+            input.len()
+        )));
+    }
+    let expanded_bytes = serde_json::to_string(&input)
+        .map(|value| value.len())
+        .unwrap_or(0);
+    if expanded_bytes > MAX_EXPANDED_BYTES {
+        return Err(ExpandError::Invalid(
+            "expanded conversation exceeds the size limit".to_string(),
+        ));
+    }
 
     let object = body
         .as_object_mut()

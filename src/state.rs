@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use tokio::sync::Notify;
 
-use crate::{config::Config, metrics::LiveMetrics, security::Crypto};
+use crate::{admin::LoginLimiter, config::Config, metrics::LiveMetrics, security::Crypto};
 
 #[derive(Default)]
 pub struct UpdateState {
@@ -24,5 +24,6 @@ pub struct AppState {
     pub crypto: Arc<Crypto>,
     pub live: Arc<LiveMetrics>,
     pub updates: Arc<UpdateState>,
+    pub login_limiter: Arc<LoginLimiter>,
     pub started_at: DateTime<Utc>,
 }

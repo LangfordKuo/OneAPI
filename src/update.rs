@@ -150,6 +150,7 @@ async fn apply_inner(state: &AppState) -> Result<UpdateResult> {
         *slot = Some(executable);
     }
     let _ = fs::remove_file(&archive);
+    let _ = fs::remove_file(&new_binary);
 
     state
         .updates
