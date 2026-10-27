@@ -20,6 +20,7 @@ Dockerfile.release[OV7T]: F:发布镜像装配文件：把 CI 构建的 Linux am
 ===/root/OneAPI/docs/===
 IMPLEMENTATION_PLAN.md[SG7M]: F:记录 OneAPI v1 的目标、已确认决策、架构、数据模型、协议转换/流式/前端策略、里程碑、测试与风险 | R:code:docs/PROGRESS.md,code:README.md,code:migrations/0001_init.sql,code:.github/workflows/release.yml | A:- | S:计划中的产品决策是后续实现的约束；修改范围或关键决策时必须同步更新本文档与 docs/PROGRESS.md；流式、Playground、安装向导、保留期/密码重置、实时 tok/s、在线更新、发布矩阵与 Docker 装配方式以此为准
 PROGRESS.md[SV5S]: F:记录当前阶段、里程碑完成情况、验证结果、AOCI 状态与下一步交接信息 | R:code:docs/IMPLEMENTATION_PLAN.md,code:AGENTS.md,code:.github/workflows/release.yml | A:- | S:每个里程碑结束后必须更新本文件；新会话以本文件和实施计划作为恢复上下文入口；M5 起流式验证需含单元/集成测试与进程级端到端；M6 起记录前端 chunk；M7 起记录 dry-run、musl、安装向导与维护功能验证；Post-v0.1.0 记录实时指标、在线更新、v0.1.1 发布、资产权限与空库仪表盘修复
+REVIEW_PLAN.md[SG7M]: F:记录基于 v0.1.1 全仓审查出的功能缺口、安全稳定性问题、性能优化与工程清理任务，并按阶段划分优先级与验收标准 | R:code:docs/PROGRESS.md,code:docs/IMPLEMENTATION_PLAN.md,code:README.md | A:阶段 A v0.1.2 修复与一致性；阶段 B 安全稳定；阶段 C 性能；阶段 D 工程卫生；阶段 E 后续能力路线 | S:状态为本地草稿且不提交不推送；任务证据位置以审查时 v0.1.1 代码为准，实施前需复核行号；完成项应回填 PROGRESS 并触发 AOCI 维护
 
 ===/root/OneAPI/migrations/===
 0001_init.sql[PD8S]: F:建立 SQLite 初始 schema，覆盖管理员、会话、渠道、API Key、用量日志、Responses 存储、请求详情与设置 | R:code:src/db.rs,code:docs/IMPLEMENTATION_PLAN.md | A:admin/sessions/channels/api_keys/usage_logs/responses/request_details/settings | S:迁移由 sqlx 在启动时执行；已发布迁移不得修改，只能追加新迁移文件；usage_logs 的 api_key_id/channel_id 使用 ON DELETE SET NULL 以保留历史日志
