@@ -115,7 +115,7 @@
   - macOS amd64 `x86_64-apple-darwin`（`macos-15-intel`）
   - macOS arm64 `aarch64-apple-darwin`（`macos-15`）
 - 发布产物命名 `oneapi-<tag>-<platform>.tar.gz|.zip`，包含二进制、`README.md`、`LICENSE`、`.env.example`；Release 同时上传 `SHA256SUMS`。
-- Docker 任务使用 Buildx + QEMU 构建 `linux/amd64,linux/arm64` 多架构镜像并推送 `ghcr.io/langfordkuo/oneapi`，标签包含 semver、`v<tag>`、`sha-<commit>` 与 `latest`。
+- Docker 任务在六个平台构建完成后，下载 Linux amd64/arm64 产物，使用 `Dockerfile.release` 组装并推送 `ghcr.io/langfordkuo/oneapi` 多架构镜像；避免 QEMU 下二次编译 Rust，标签包含 semver、`v<tag>`、`sha-<commit>` 与 `latest`。
 - Dockerfile 升级为 `node:24-alpine` + `rust:1-slim-bookworm` + `debian:bookworm-slim`，SQLite 使用 bundled 构建，运行镜像无需额外 SQLite 库；增加 cargo registry/npm 缓存与 OCI label。
 - 本地校验：两个 workflow 通过 PyYAML 解析；runner 标签、Windows ARM64 Tier 1 host 工具链、`windows-11-arm` 的 VS ARM64 工具与 Rust 预装均已核对。
 - 尚未推送 `v*` 标签，因此 GitHub Actions 实跑与 GHCR 首次推送待首次正式发版时验证。

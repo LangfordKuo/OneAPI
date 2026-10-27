@@ -187,7 +187,7 @@ GET /healthz  /readyz
 - `build.rs` 在 `web/dist` 缺失时生成占位 `index.html`，保证 `cargo check/build` 不因缺前端产物失败（release 正式构建由 Makefile 先跑前端构建）。
 - Makefile：`make dev`（后端 + vite）、`make web`、`make build`（web → `cargo build --release`）、`make test`、`make lint`、`make docker`。
 - Dockerfile 三段：node:24 构建前端 → rust:1-slim-bookworm 构建（rustls，无 OpenSSL，SQLite bundled）→ debian:bookworm-slim 运行（CA 证书、非 root、`/data` 卷、EXPOSE 3000）。附 docker-compose。
-- GitHub Actions：`ci.yml` 在 `main`/PR 上运行 fmt、clippy、test 与前端构建；`release.yml` 在 `v*` 标签上校验版本并构建 Linux/Windows/macOS × amd64/arm64 六个产物，同时用 Buildx 推送 `linux/amd64,linux/arm64` 镜像到 GHCR。
+- GitHub Actions：`ci.yml` 在 `main`/PR 上运行 fmt、clippy、test 与前端构建；`release.yml` 在 `v*` 标签上校验版本并构建 Linux/Windows/macOS × amd64/arm64 六个产物，同时用 `Dockerfile.release` 将 Linux 产物组装为 `linux/amd64,linux/arm64` 镜像并推送 GHCR。
 - 配置全走 env：`ONEAPI_ADDR=0.0.0.0:3000`、`ONEAPI_DATA_DIR`、`ONEAPI_DATABASE_URL`、`ONEAPI_SECRET`、`ONEAPI_ADMIN_USER/PASSWORD`、`ONEAPI_LOG_LEVEL`、`ONEAPI_COOKIE_SECURE`。
 
 ## 11. 测试
@@ -230,4 +230,4 @@ GET /healthz  /readyz
 - 2026-10-27：创建本文档，记录已确认决策、架构、数据模型、协议转换策略、里程碑与风险。
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
-- 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Docker 使用 Buildx 构建并推送 GHCR 多架构镜像。
+- 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。

@@ -21,7 +21,7 @@ M0–M6 已完成：脚手架、管理基础、三协议非流式/流式网关�
 | macOS | amd64 | `macos-15-intel` | `oneapi-<tag>-macos-amd64.tar.gz` |
 | macOS | arm64 | `macos-14` | `oneapi-<tag>-macos-arm64.tar.gz` |
 
-同时构建并推送 `linux/amd64`、`linux/arm64` 多架构 Docker 镜像到 GitHub Container Registry。
+同时构建并推送 `linux/amd64`、`linux/arm64` 多架构 Docker 镜像到 GitHub Container Registry。镜像直接使用同一次构建产出的 Linux 二进制（`Dockerfile.release`），不会在 QEMU 下二次编译；本地源码构建仍使用 `Dockerfile`。
 
 发布产物未做代码签名：macOS 首次运行可能需要执行 `xattr -dr com.apple.quarantine ./oneapi`，Windows 可能出现 SmartScreen 提示。
 

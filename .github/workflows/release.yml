@@ -136,13 +136,30 @@ jobs:
 
   docker:
     name: Docker (linux/amd64, linux/arm64)
-    needs: validate
+    needs:
+      - validate
+      - build
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: oneapi-linux-*
+          path: docker-artifacts
+          merge-multiple: true
+
+      - name: Extract Linux release binaries
+        run: |
+          set -euo pipefail
+          mkdir -p docker-context/amd64 docker-context/arm64
+          tar -xzf docker-artifacts/oneapi-*-linux-amd64.tar.gz -C docker-context/amd64
+          tar -xzf docker-artifacts/oneapi-*-linux-arm64.tar.gz -C docker-context/arm64
+          chmod +x docker-context/amd64/oneapi docker-context/arm64/oneapi
+          file docker-context/amd64/oneapi docker-context/arm64/oneapi
 
       - uses: docker/setup-qemu-action@v3
 
@@ -171,6 +188,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile.release
           platforms: linux/amd64,linux/arm64
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.meta.outputs.tags }}

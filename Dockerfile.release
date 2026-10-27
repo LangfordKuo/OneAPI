@@ -1,0 +1,27 @@
+# Release image assembled from the Linux binaries produced by the GitHub Actions
+# build matrix. Local/source builds should use ./Dockerfile instead.
+FROM debian:bookworm-slim
+
+ARG TARGETARCH
+
+LABEL org.opencontainers.image.title="OneAPI" \
+      org.opencontainers.image.description="Self-hosted AI API gateway" \
+      org.opencontainers.image.licenses="GPL-3.0-only"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 10001 -m oneapi
+
+WORKDIR /app
+COPY docker-context/${TARGETARCH}/oneapi /usr/local/bin/oneapi
+RUN chmod +x /usr/local/bin/oneapi \
+    && mkdir -p /data \
+    && chown -R oneapi:oneapi /data
+
+USER oneapi
+ENV ONEAPI_ADDR=0.0.0.0:3000 \
+    ONEAPI_DATA_DIR=/data
+EXPOSE 3000
+VOLUME ["/data"]
+ENTRYPOINT ["/usr/local/bin/oneapi", "serve"]
