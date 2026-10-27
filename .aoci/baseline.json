@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-27T09:41:35Z",
+  "updated_at": "2026-10-27T09:47:01Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -47,15 +47,15 @@
     },
     "Cargo.lock": {
       "role": "index",
-      "sha256": "d839e76aa97e77b90ae224b2e13f6f18fd42af27781939771806502c59176232",
+      "sha256": "dfddff6bde045a6c1630d056eacf252a1471da1744415dddc5ff5606f5420f05",
       "size": 86720,
-      "normalized_sha256": "d839e76aa97e77b90ae224b2e13f6f18fd42af27781939771806502c59176232"
+      "normalized_sha256": "dfddff6bde045a6c1630d056eacf252a1471da1744415dddc5ff5606f5420f05"
     },
     "Cargo.toml": {
       "role": "index",
-      "sha256": "2cdd88ee0545d20905cf7c1aa1bc3437f788bc4fd94bcbc261c57dda7429a732",
+      "sha256": "ba0a9a910603b54207c6fc45fde647a4fcc91a5cc38fb787b5c6cbc3f58fcddc",
       "size": 1579,
-      "normalized_sha256": "2cdd88ee0545d20905cf7c1aa1bc3437f788bc4fd94bcbc261c57dda7429a732"
+      "normalized_sha256": "ba0a9a910603b54207c6fc45fde647a4fcc91a5cc38fb787b5c6cbc3f58fcddc"
     },
     "Dockerfile": {
       "role": "index",
@@ -83,15 +83,15 @@
     },
     "README.md": {
       "role": "index",
-      "sha256": "82ab3bfcd4009df6e88f1e8ac4e2fff9bcc7ef25df087bd7a5f939d49b8d6b26",
+      "sha256": "f1236043867b283df7a2bd448a3db1b27b95a3116a6d996bed082727be37aba1",
       "size": 9206,
-      "normalized_sha256": "82ab3bfcd4009df6e88f1e8ac4e2fff9bcc7ef25df087bd7a5f939d49b8d6b26"
+      "normalized_sha256": "f1236043867b283df7a2bd448a3db1b27b95a3116a6d996bed082727be37aba1"
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "6ea3d8241fa40ee1bd91b232df91adfdee3e3e8f6b75672f8b7e36c55ba9998c",
-      "size": 47189,
-      "normalized_sha256": "6ea3d8241fa40ee1bd91b232df91adfdee3e3e8f6b75672f8b7e36c55ba9998c"
+      "sha256": "a368b4ec25b12c2f63207ef32541b8e33fdb67133d59354ff08851da75a43e70",
+      "size": 47364,
+      "normalized_sha256": "a368b4ec25b12c2f63207ef32541b8e33fdb67133d59354ff08851da75a43e70"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -119,15 +119,15 @@
     },
     "docs/IMPLEMENTATION_PLAN.md": {
       "role": "index",
-      "sha256": "79c9164e930f9825cebefb7985a6735fb7698cdbcfb1f1e4a383d33769b6566c",
-      "size": 22807,
-      "normalized_sha256": "79c9164e930f9825cebefb7985a6735fb7698cdbcfb1f1e4a383d33769b6566c"
+      "sha256": "e78d420feb889b75a15c6162b59c429ab4822c96b09109931789a8052047ac4b",
+      "size": 23105,
+      "normalized_sha256": "e78d420feb889b75a15c6162b59c429ab4822c96b09109931789a8052047ac4b"
     },
     "docs/PROGRESS.md": {
       "role": "index",
-      "sha256": "3bb432963f817fc9a57ac2c2e789608eca7b42163462b61a2700d48bd9c6e5f1",
-      "size": 24901,
-      "normalized_sha256": "3bb432963f817fc9a57ac2c2e789608eca7b42163462b61a2700d48bd9c6e5f1"
+      "sha256": "08088e7b3f3ba263c15753e4663ec7ec395675848e71b35711615b2611602b4c",
+      "size": 25703,
+      "normalized_sha256": "08088e7b3f3ba263c15753e4663ec7ec395675848e71b35711615b2611602b4c"
     },
     "docs/REVIEW_PLAN.md": {
       "role": "index",
@@ -491,15 +491,15 @@
     },
     "web/package-lock.json": {
       "role": "index",
-      "sha256": "26e110f5e52c4173937af981bbb1ce973573d372d60f6fa9a94b36823fca3acd",
+      "sha256": "037a5bb91b5851b428e12e2d1338ee6b2feb8376275e556e00c6f42d258f8581",
       "size": 183747,
-      "normalized_sha256": "26e110f5e52c4173937af981bbb1ce973573d372d60f6fa9a94b36823fca3acd"
+      "normalized_sha256": "037a5bb91b5851b428e12e2d1338ee6b2feb8376275e556e00c6f42d258f8581"
     },
     "web/package.json": {
       "role": "index",
-      "sha256": "3df37666b2136eedf344fe99326cadbc17ec95ac0932e32a8ebb890df0c241fe",
+      "sha256": "601cf96de316ff856a28ff9864bdc774da479be7e05da90e01aa299b1e1f29c0",
       "size": 880,
-      "normalized_sha256": "3df37666b2136eedf344fe99326cadbc17ec95ac0932e32a8ebb890df0c241fe"
+      "normalized_sha256": "601cf96de316ff856a28ff9864bdc774da479be7e05da90e01aa299b1e1f29c0"
     },
     "web/src/App.tsx": {
       "role": "index",

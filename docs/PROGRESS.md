@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：审查计划阶段 A–D 已完成，阶段 E3（渠道退避）已落地（分支 `review-plan`）
+- 当前阶段：审查计划阶段 A–D 与 E3 已完成，v0.1.2 全量实测通过（分支 `review-plan`）
 - 当前分支：`review-plan`
-- 最近发布：`v0.1.1`
+- 最近发布：`v0.1.2`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -167,6 +167,12 @@
 - 发布后发现 Linux/macOS 归档中的二进制权限为 0644，已重新打包并覆盖 v0.1.1 资产；Release workflow 已补 `chmod +x`，后续版本不会再出现该问题。
 - 修复空数据库仪表盘 500：`COALESCE(AVG(latency_ms), 0)` 在无数据时返回 INTEGER，与 SQLx 的 `f64` 不兼容；改为 `0.0`，并新增空库 summary/timeseries/breakdown 回归测试（72 个测试通过）。
 
+## v0.1.2 发布记录
+
+- 版本号从 `0.1.1` 升至 `0.1.2`，包含审查计划阶段 A–D 与阶段 E3（渠道指数退避 + 半开探测）。
+- 验证：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（89 个测试）、`npm run lint`、`npm run build` 全部通过。
+- 发布前全量实测：release 二进制 + 本地 mock 上游 + 真实 HTTP 流程，51 项断言全部通过，覆盖安装向导/登录/Key/渠道 CRUD、同协议与跨协议（Chat↔Anthropic/Responses）非流式与流式、故障转移、首次失败不冷却、第二次失败进入冷却、冷却期跳过、并发半开探测仅放行一个请求、探测成功清零、探测占用时返回 `503 channel_recovering`、Responses 落库与 `previous_response_id`、401/404 错误形状、仪表盘/日志聚合与内嵌前端。
+
 ## 审查计划阶段 A（v0.1.2 修复与一致性）
 
 - 新增 `docs/REVIEW_PLAN.md`，按阶段记录审查结论与验收标准。
@@ -229,7 +235,7 @@
 
 ## 下一步
 
-1. 审查计划阶段 A–D 与 E3 已在 `review-plan` 分支完成，合并回 `main` 后按 `Cargo.toml` 版本打新标签。
+1. 审查计划阶段 A–D 与 E3 已合并回 `main` 并发布 `v0.1.2`。
 2. 阶段 E 剩余项（速率限制与额度、Prometheus `/metrics`、日志导出/重放、备份恢复、Playground 增强、多管理员/RBAC 与 PostgreSQL）仍是路线图。
 3. 后续版本按 `Cargo.toml` 版本打标签，保留数据目录升级。
 
