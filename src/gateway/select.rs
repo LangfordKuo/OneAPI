@@ -2,16 +2,24 @@ use std::collections::HashMap;
 
 use rand::Rng;
 
-use crate::models::{channel::Channel, now_ms};
+use crate::{
+    models::{
+        channel::{self, Channel},
+        now_ms,
+    },
+    protocol::Protocol,
+};
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub channel: Channel,
     pub upstream_model: String,
+    pub upstream_kind: String,
 }
 
-pub fn candidates(channels: Vec<Channel>, model: &str) -> Vec<Candidate> {
+pub fn candidates(channels: Vec<Channel>, model: &str, inbound: Protocol) -> Vec<Candidate> {
     let now = now_ms();
+    let inbound_kind = channel::kind_for_protocol(inbound.as_str());
     let mut grouped: HashMap<i64, Vec<(Candidate, i64)>> = HashMap::new();
 
     for channel in channels {
@@ -39,10 +47,12 @@ pub fn candidates(channels: Vec<Channel>, model: &str) -> Vec<Candidate> {
             .unwrap_or_else(|| model.to_string());
 
         let weight = channel.weight.max(1);
+        let upstream_kind = channel::upstream_kind(&channel, inbound_kind);
         grouped.entry(channel.priority).or_default().push((
             Candidate {
                 channel,
                 upstream_model,
+                upstream_kind,
             },
             weight,
         ));

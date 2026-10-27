@@ -22,7 +22,7 @@ use crate::{
 
 use super::auth::AdminSession;
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelKind {
     OpenaiChat,
@@ -58,7 +58,12 @@ impl ChannelKind {
 #[derive(Debug, Deserialize)]
 pub struct ChannelInput {
     pub name: String,
-    pub kind: ChannelKind,
+    #[serde(default)]
+    pub kind: Option<ChannelKind>,
+    #[serde(default)]
+    pub kinds: Vec<ChannelKind>,
+    #[serde(default)]
+    pub fallback_kind: Option<ChannelKind>,
     pub base_url: String,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -87,6 +92,8 @@ pub struct ChannelOutput {
     pub id: i64,
     pub name: String,
     pub kind: ChannelKind,
+    pub kinds: Vec<ChannelKind>,
+    pub fallback_kind: ChannelKind,
     pub base_url: String,
     pub auth_header: String,
     pub api_key_masked: String,
@@ -106,11 +113,34 @@ pub struct ChannelOutput {
     pub updated_at: i64,
 }
 
+fn output_kinds(channel: &Channel) -> (Vec<ChannelKind>, ChannelKind) {
+    let stored: Vec<ChannelKind> = serde_json::from_str(&channel.kinds).unwrap_or_default();
+    let mut kinds = Vec::new();
+    for kind in stored {
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    if kinds.is_empty() {
+        kinds.push(ChannelKind::from_db(&channel.kind));
+    }
+    let fallback = channel
+        .fallback_kind
+        .as_deref()
+        .map(ChannelKind::from_db)
+        .filter(|kind| kinds.contains(kind))
+        .unwrap_or(kinds[0]);
+    (kinds, fallback)
+}
+
 fn output(channel: Channel, crypto: &Crypto) -> ChannelOutput {
+    let (kinds, fallback_kind) = output_kinds(&channel);
     ChannelOutput {
         id: channel.id,
         name: channel.name,
-        kind: ChannelKind::from_db(&channel.kind),
+        kind: kinds[0],
+        kinds,
+        fallback_kind,
         base_url: channel.base_url,
         auth_header: channel.auth_header,
         api_key_masked: crypto.mask(&channel.api_key_enc),
@@ -133,7 +163,8 @@ fn output(channel: Channel, crypto: &Crypto) -> ChannelOutput {
 
 struct ValidatedChannel {
     name: String,
-    kind: ChannelKind,
+    kinds: Vec<ChannelKind>,
+    fallback_kind: ChannelKind,
     base_url: String,
     api_key: Option<String>,
     auth_header: String,
@@ -151,6 +182,8 @@ fn validate(input: ChannelInput, creating: bool) -> Result<ValidatedChannel, App
     let ChannelInput {
         name,
         kind,
+        kinds,
+        fallback_kind,
         base_url,
         api_key,
         auth_header,
@@ -168,6 +201,30 @@ fn validate(input: ChannelInput, creating: bool) -> Result<ValidatedChannel, App
     if name.is_empty() {
         return Err(AppError::BadRequest("channel name is required".to_string()));
     }
+
+    let mut unique_kinds = Vec::new();
+    for kind in kinds {
+        if !unique_kinds.contains(&kind) {
+            unique_kinds.push(kind);
+        }
+    }
+    if unique_kinds.is_empty() {
+        if let Some(kind) = kind {
+            unique_kinds.push(kind);
+        }
+    }
+    if unique_kinds.is_empty() {
+        return Err(AppError::BadRequest(
+            "at least one channel protocol is required".to_string(),
+        ));
+    }
+    let fallback_kind = fallback_kind.unwrap_or(unique_kinds[0]);
+    if !unique_kinds.contains(&fallback_kind) {
+        return Err(AppError::BadRequest(
+            "fallback_kind must be one of the configured protocols".to_string(),
+        ));
+    }
+    let primary_kind = unique_kinds[0];
 
     let base_url = base_url.trim().trim_end_matches('/').to_string();
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
@@ -188,7 +245,7 @@ fn validate(input: ChannelInput, creating: bool) -> Result<ValidatedChannel, App
     let auth_header = auth_header
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| kind.default_auth_header().to_string());
+        .unwrap_or_else(|| primary_kind.default_auth_header().to_string());
     if auth_header != "bearer" && auth_header != "x-api-key" {
         return Err(AppError::BadRequest(
             "auth_header must be 'bearer' or 'x-api-key'".to_string(),
@@ -265,7 +322,8 @@ fn validate(input: ChannelInput, creating: bool) -> Result<ValidatedChannel, App
 
     Ok(ValidatedChannel {
         name,
-        kind,
+        kinds: unique_kinds,
+        fallback_kind,
         base_url,
         api_key,
         auth_header,
@@ -283,7 +341,10 @@ fn validate(input: ChannelInput, creating: bool) -> Result<ValidatedChannel, App
 fn to_write(validated: ValidatedChannel, api_key_enc: String) -> Result<ChannelWrite, AppError> {
     Ok(ChannelWrite {
         name: validated.name,
-        kind: validated.kind.as_str().to_string(),
+        kind: validated.kinds[0].as_str().to_string(),
+        kinds: serde_json::to_string(&validated.kinds)
+            .map_err(|error| AppError::Internal(error.into()))?,
+        fallback_kind: validated.fallback_kind.as_str().to_string(),
         base_url: validated.base_url,
         api_key_enc,
         auth_header: validated.auth_header,
@@ -459,7 +520,10 @@ async fn probe_channel(state: &AppState, input: ChannelProbeInput) -> Result<Cha
     Ok(Channel {
         id: input.id.unwrap_or(0),
         name: validated.name,
-        kind: validated.kind.as_str().to_string(),
+        kind: validated.kinds[0].as_str().to_string(),
+        kinds: serde_json::to_string(&validated.kinds)
+            .map_err(|error| AppError::Internal(error.into()))?,
+        fallback_kind: Some(validated.fallback_kind.as_str().to_string()),
         base_url: validated.base_url,
         api_key_enc,
         auth_header: validated.auth_header,
@@ -578,8 +642,14 @@ async fn send_test(
 ) -> anyhow::Result<(StatusCode, String)> {
     let defaults = state.cache.defaults(&state.db).await?;
     let client = upstream::build_client(channel, defaults.nonstream_timeout_ms)?;
-    let request =
-        upstream::build_request(&client, channel, &state.crypto, &body, &HeaderMap::new())?;
+    let request = upstream::build_request(
+        &client,
+        channel,
+        &state.crypto,
+        &channel.kind,
+        &body,
+        &HeaderMap::new(),
+    )?;
     let response = request.send().await?;
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
@@ -593,6 +663,7 @@ async fn send_models(state: &AppState, channel: &Channel) -> anyhow::Result<(Sta
         client.get(upstream::models_url(channel)),
         channel,
         &state.crypto,
+        &channel.kind,
         &HeaderMap::new(),
     )?;
     let response = request.send().await?;

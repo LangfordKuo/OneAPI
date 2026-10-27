@@ -872,6 +872,8 @@ mod tests {
         let write = ChannelWrite {
             name: "stream-test".to_string(),
             kind: "openai_chat".to_string(),
+            kinds: r#"["openai_chat"]"#.to_string(),
+            fallback_kind: "openai_chat".to_string(),
             base_url: "http://example.invalid/v1".to_string(),
             api_key_enc: state.crypto.encrypt("key").expect("encrypt"),
             auth_header: "bearer".to_string(),

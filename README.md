@@ -9,6 +9,7 @@ OneAPI 是一个自托管的 AI API 网关。在后台配置上游渠道后，�
 - **三协议接入**：同时提供 Chat Completions、Responses、Anthropic Messages 接口，并支持三种协议之间的跨协议转换。
 - **流式响应**：支持 SSE 流式输出；跨协议时实时转换事件格式。
 - **多渠道调度**：同一模型可配置多个渠道，按优先级分组、组内按权重随机；上游失败时自动故障转移。
+- **多协议渠道**：单个渠道可同时声明 Chat Completions、Responses 与 Anthropic 上游协议；入站协议匹配时原样转发，不匹配时按渠道配置的转换目标转换。
 - **渠道健康**：失败累计后指数退避冷却，冷却到期仅放行单个探测请求，探测成功自动恢复。
 - **管理后台**：渠道、API Key、请求日志（含每次请求的 tok/s）、用量仪表盘、Playground 与系统设置均可在浏览器中完成。
 - **单文件运行**：前端静态资源内嵌在 Rust 二进制中，无需单独的 Web 服务器；数据存储使用 SQLite。
@@ -49,7 +50,7 @@ docker compose up -d --build
 从 [Releases](https://github.com/LangfordKuo/OneAPI/releases) 下载对应平台的压缩包并解压：
 
 ```bash
-tar xzf oneapi-v0.1.4-linux-amd64.tar.gz
+tar xzf oneapi-v0.1.5-linux-amd64.tar.gz
 ONEAPI_DATA_DIR=./data ./oneapi serve
 ```
 

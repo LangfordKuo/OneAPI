@@ -195,7 +195,9 @@ mod tests {
         Channel {
             id,
             name: "test".to_string(),
-            kind: "openai".to_string(),
+            kind: "openai_chat".to_string(),
+            kinds: r#"["openai_chat"]"#.to_string(),
+            fallback_kind: Some("openai_chat".to_string()),
             base_url: "http://localhost".to_string(),
             api_key_enc: String::new(),
             auth_header: "bearer".to_string(),
