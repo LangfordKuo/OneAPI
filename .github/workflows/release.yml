@@ -223,6 +223,7 @@ jobs:
             mkdir -p "$stage"
             cp "artifacts/oneapi-$platform/$binary" "$stage/"
             cp README.md LICENSE .env.example "$stage/"
+            chmod +x "$stage/$binary"
             if [ "$archive_type" = "zip" ]; then
               python3 -c 'import os,sys,zipfile; stage=sys.argv[1]; dest=sys.argv[2]; z=zipfile.ZipFile(dest,"w",zipfile.ZIP_DEFLATED); [z.write(os.path.join(stage,n),n) for n in sorted(os.listdir(stage))]; z.close()' "$stage" "$GITHUB_WORKSPACE/out/oneapi-${GITHUB_REF_NAME}-$platform.zip"
             else

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-27T08:25:29Z",
+  "updated_at": "2026-10-27T08:35:25Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -29,9 +29,9 @@
     },
     ".github/workflows/release.yml": {
       "role": "index",
-      "sha256": "3aa224991e6b6ca10029beeec8463ebfc5c3347a87f7db773cf978bd635ca724",
-      "size": 7340,
-      "normalized_sha256": "3aa224991e6b6ca10029beeec8463ebfc5c3347a87f7db773cf978bd635ca724"
+      "sha256": "e267ad3a8818d6a50bf96b878ace2cc857c563da12488a7abd58342e652216f5",
+      "size": 7378,
+      "normalized_sha256": "e267ad3a8818d6a50bf96b878ace2cc857c563da12488a7abd58342e652216f5"
     },
     ".gitignore": {
       "role": "index",
@@ -89,9 +89,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "cbb07a7d4f3ee3e2916908b1a29c7a512239e09b2b8b6df3c59df054f433aa8c",
-      "size": 42186,
-      "normalized_sha256": "cbb07a7d4f3ee3e2916908b1a29c7a512239e09b2b8b6df3c59df054f433aa8c"
+      "sha256": "83cf8ed72cd01d18a7bd6ddeac01a7b2bea93be57f973a4b3ece7e0d2ad20914",
+      "size": 42211,
+      "normalized_sha256": "83cf8ed72cd01d18a7bd6ddeac01a7b2bea93be57f973a4b3ece7e0d2ad20914"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -125,9 +125,9 @@
     },
     "docs/PROGRESS.md": {
       "role": "index",
-      "sha256": "9aaa2ec0cacd9f400bc891e92b2eaa71b612c6dface2390b182189e5cf3c6fe1",
-      "size": 18659,
-      "normalized_sha256": "9aaa2ec0cacd9f400bc891e92b2eaa71b612c6dface2390b182189e5cf3c6fe1"
+      "sha256": "9b07dc7afa6fd5145018bfde0a824cad64592534de4da88b5685053479cb5e8e",
+      "size": 18845,
+      "normalized_sha256": "9b07dc7afa6fd5145018bfde0a824cad64592534de4da88b5685053479cb5e8e"
     },
     "migrations/0001_init.sql": {
       "role": "index",

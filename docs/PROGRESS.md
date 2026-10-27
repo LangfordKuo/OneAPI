@@ -164,6 +164,7 @@
 - 版本号从 `0.1.0` 升至 `0.1.1`，包含实时 tok/s 与后台在线更新功能。
 - 发布流程仍为六平台构建 + GitHub Release + GHCR 多架构镜像；Linux 使用 musl 静态链接。
 - 安装包命名 `oneapi-v0.1.1-<platform>`，`SHA256SUMS` 可供在线更新校验。
+- 发布后发现 Linux/macOS 归档中的二进制权限为 0644，已重新打包并覆盖 v0.1.1 资产；Release workflow 已补 `chmod +x`，后续版本不会再出现该问题。
 
 ## AOCI 状态
 

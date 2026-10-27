@@ -19,7 +19,7 @@ Dockerfile.release[OV7T]: F:发布镜像装配文件：把 CI 构建的 Linux am
 
 ===/root/OneAPI/docs/===
 IMPLEMENTATION_PLAN.md[SG7M]: F:记录 OneAPI v1 的目标、已确认决策、架构、数据模型、协议转换/流式/前端策略、里程碑、测试与风险 | R:code:docs/PROGRESS.md,code:README.md,code:migrations/0001_init.sql,code:.github/workflows/release.yml | A:- | S:计划中的产品决策是后续实现的约束；修改范围或关键决策时必须同步更新本文档与 docs/PROGRESS.md；流式、Playground、安装向导、保留期/密码重置、实时 tok/s、在线更新、发布矩阵与 Docker 装配方式以此为准
-PROGRESS.md[SV5S]: F:记录当前阶段、里程碑完成情况、验证结果、AOCI 状态与下一步交接信息 | R:code:docs/IMPLEMENTATION_PLAN.md,code:AGENTS.md,code:.github/workflows/release.yml | A:- | S:每个里程碑结束后必须更新本文件；新会话以本文件和实施计划作为恢复上下文入口；M5 起流式验证需含单元/集成测试与进程级端到端；M6 起记录前端 chunk；M7 起记录 dry-run、musl、安装向导与维护功能验证；Post-v0.1.0 记录实时指标、在线更新与 v0.1.1 发布
+PROGRESS.md[SV5S]: F:记录当前阶段、里程碑完成情况、验证结果、AOCI 状态与下一步交接信息 | R:code:docs/IMPLEMENTATION_PLAN.md,code:AGENTS.md,code:.github/workflows/release.yml | A:- | S:每个里程碑结束后必须更新本文件；新会话以本文件和实施计划作为恢复上下文入口；M5 起流式验证需含单元/集成测试与进程级端到端；M6 起记录前端 chunk；M7 起记录 dry-run、musl、安装向导与维护功能验证；Post-v0.1.0 记录实时指标、在线更新、v0.1.1 发布与资产权限修复
 
 ===/root/OneAPI/migrations/===
 0001_init.sql[PD8S]: F:建立 SQLite 初始 schema，覆盖管理员、会话、渠道、API Key、用量日志、Responses 存储、请求详情与设置 | R:code:src/db.rs,code:docs/IMPLEMENTATION_PLAN.md | A:admin/sessions/channels/api_keys/usage_logs/responses/request_details/settings | S:迁移由 sqlx 在启动时执行；已发布迁移不得修改，只能追加新迁移文件；usage_logs 的 api_key_id/channel_id 使用 ON DELETE SET NULL 以保留历史日志
@@ -123,7 +123,7 @@ stream.rs[AN9L]: F:流式提交与转发任务：缓冲首帧判定 error 后回
 
 ===/root/OneAPI/.github/workflows/===
 ci.yml[OV7T]: F:GitHub Actions CI：在 main/PR 上执行 Rust fmt、Clippy、测试与前端 typecheck/build | R:code:Cargo.toml,code:web/package.json,code:.github/workflows/release.yml | A:backend,frontend | S:使用 Node 24 与 npm cache；Rust job 先 fmt --check 再 clippy -D warnings 再 cargo test --locked；前端 build 先 tsc --noEmit；runner 固定 ubuntu-24.04；所有 Action 使用 Node 24 版本
-release.yml[OV8M]: F:Tag 发布流水线：校验版本后在六个原生 runner 构建原始二进制，Release 统一打包、生成校验和，并组装双架构 Docker 镜像 | R:code:.github/workflows/ci.yml,code:Dockerfile.release,code:Dockerfile,code:Cargo.toml,code:README.md | A:validate,web,build,docker,release | S:仅 v* 标签触发；标签必须与 Cargo.toml version 一致；矩阵固定 6 个目标并固定 runner；Linux 使用 x86_64/aarch64-unknown-linux-musl，安装 musl-tools/musl-dev 并设置 CC_* 与 linker，产物无 glibc 依赖；构建任务上传原始二进制，Release 任务只打包一次；Docker 使用 Dockerfile.release 和 Linux 原始二进制；手动 workflow_dispatch 只 dry-run；精确下载 oneapi-* / oneapi-linux-*；DOCKER_BUILD_RECORD_UPLOAD=false；GHCR 名必须小写
+release.yml[OV8M]: F:Tag 发布流水线：校验版本后在六个原生 runner 构建原始二进制，Release 统一打包、生成校验和，并组装双架构 Docker 镜像 | R:code:.github/workflows/ci.yml,code:Dockerfile.release,code:Dockerfile,code:Cargo.toml,code:README.md | A:validate,web,build,docker,release | S:仅 v* 标签触发；标签必须与 Cargo.toml version 一致；矩阵固定 6 个目标并固定 runner；Linux 使用 x86_64/aarch64-unknown-linux-musl，安装 musl-tools/musl-dev 并设置 CC_* 与 linker；构建任务上传原始二进制，Release 任务只打包一次并对 Unix 二进制 chmod +x；Docker 使用 Dockerfile.release 和 Linux 原始二进制；手动 workflow_dispatch 只 dry-run；精确下载 oneapi-* / oneapi-linux-*；DOCKER_BUILD_RECORD_UPLOAD=false；GHCR 名必须小写
 
 ===/root/OneAPI/web/src/hooks/===
 useLiveMetrics.ts[CG5T]: F:前端实时指标 hook：通过 EventSource 订阅 /api/metrics/stream 并返回最新快照 | R:code:web/src/pages/Channels.tsx,code:web/src/pages/Dashboard.tsx | A:useLiveMetrics,LiveMetricsSnapshot | S:EventSource 自动重连；组件卸载时关闭连接；忽略无效 JSON；每个页面只应挂载一次
