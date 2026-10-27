@@ -18,7 +18,7 @@ rust-toolchain.toml[FV4T]: F:固定使用 stable Rust 工具链并声明 rustfmt
 
 ===/root/OneAPI/docs/===
 IMPLEMENTATION_PLAN.md[SG7M]: F:记录 OneAPI v1 的目标、已确认决策、架构、数据模型、协议转换策略、里程碑、测试与风险 | R:code:docs/PROGRESS.md,code:README.md,code:migrations/0001_init.sql | A:- | S:计划中的产品决策是后续实现的约束；修改范围或关键决策时必须同步更新本文档与 docs/PROGRESS.md
-PROGRESS.md[SV5T]: F:记录当前阶段、里程碑完成情况、验证结果、AOCI 状态与下一步交接信息 | R:code:docs/IMPLEMENTATION_PLAN.md,code:AGENTS.md | A:- | S:每个里程碑结束后必须更新本文件；新会话以本文件和实施计划作为恢复上下文入口
+PROGRESS.md[SV5S]: F:记录当前阶段、里程碑完成情况、验证结果、AOCI 状态与下一步交接信息 | R:code:docs/IMPLEMENTATION_PLAN.md,code:AGENTS.md | A:- | S:每个里程碑结束后必须更新本文件；新会话以本文件和实施计划作为恢复上下文入口
 
 ===/root/OneAPI/migrations/===
 0001_init.sql[PD8S]: F:建立 SQLite 初始 schema，覆盖管理员、会话、渠道、API Key、用量日志、Responses 存储、请求详情与设置 | R:code:src/db.rs,code:docs/IMPLEMENTATION_PLAN.md | A:admin/sessions/channels/api_keys/usage_logs/responses/request_details/settings | S:迁移由 sqlx 在启动时执行；已发布迁移不得修改，只能追加新迁移文件；usage_logs 的 api_key_id/channel_id 使用 ON DELETE SET NULL 以保留历史日志
@@ -73,9 +73,10 @@ settings.rs[DC6S]: F:读取和更新站点名称、默认 token、超时、日�
 admin.rs[PI7T]: F:管理员表的查询与写入：统计、按用户名查找、创建唯一管理员、更新密码哈希 | R:code:migrations/0001_init.sql,code:src/admin/auth.rs | A:count,find_by_username,create,update_password | S:admin 表通过 CHECK(id=1) 只允许一个管理员；password_hash 不参与序列化输出
 api_key.rs[PI7T]: F:API Key 表的列表、按 ID/哈希查询、创建、更新启用状态与过期时间、删除，以及节流更新最后使用时间 | R:code:migrations/0001_init.sql,code:src/admin/keys.rs,code:src/gateway/auth.rs | A:list,find_by_hash,create,update,delete,touch_last_used | S:key_hash 有唯一约束；删除 Key 会级联删除其 responses，但 usage_logs 的 api_key_id 置空
 channel.rs[PD8S]: F:渠道表的完整读写、上游配置字段映射，以及失败累计/冷却与成功清零 | R:code:migrations/0001_init.sql,code:src/admin/channels.rs,code:src/gateway/select.rs | A:list,get,create,update,delete,mark_failure | S:enabled 以 0/1 存储；api_key_enc 只保存密文；更新使用全字段覆盖；连续失败 3 次会设置 disabled_until 冷却 60 秒
-mod.rs[CG6T]: F:声明数据访问子模块并提供统一的毫秒时间戳工具 | R:code:src/models/admin.rs,code:src/models/api_key.rs,code:src/models/channel.rs,code:src/models/session.rs,code:src/models/setting.rs | A:now_ms | S:所有持久化时间统一使用 Unix 毫秒 INTEGER，避免 SQLite 文本时间排序问题
+mod.rs[CG6T]: F:声明数据访问子模块并提供统一的毫秒时间戳工具 | R:code:src/models/admin.rs,code:src/models/api_key.rs,code:src/models/channel.rs,code:src/models/response.rs,code:src/models/session.rs,code:src/models/setting.rs | A:now_ms | S:所有持久化时间统一使用 Unix 毫秒 INTEGER，避免 SQLite 文本时间排序问题
 session.rs[PI7T]: F:管理后台会话表的创建、按 token 哈希查管理员、删除单条/全部/过期会话 | R:code:migrations/0001_init.sql,code:src/admin/auth.rs,code:src/models/admin.rs | A:create,find_admin,delete,delete_all_for_admin,delete_expired | S:只存 token 的 SHA-256；查询同时校验 expires_at，过期会话在登录时批量清理
 setting.rs[PC5T]: F:读取全部设置项并按 key 执行插入或更新 | R:code:migrations/0001_init.sql,code:src/admin/settings.rs | A:all,upsert | S:设置值统一以 TEXT 存储，类型转换由调用方负责
+response.rs[PD8T]: F:Responses 持久化表：按 id+api_key_id 查询/删除，以及插入或替换请求/响应 JSON | R:code:migrations/0001_init.sql,code:src/gateway/responses_state.rs | A:insert,get,delete,StoredResponse | S:查询和删除都强制带 api_key_id，防止跨 Key 读取；request_json/response_json 为完整 JSON 文本
 
 ===/root/OneAPI/web/src/components/===
 KeyValueList.tsx[CU5T]: F:可复用的 Ant Design Form.List 键值对编辑器，用于模型映射与自定义请求头 | R:code:web/src/pages/Channels.tsx | A:KeyValueList | S:行内键和值都必填；提交前由调用方把数组转换为对象并过滤空键
@@ -91,7 +92,8 @@ responses.rs[IN9L]: F:Responses API 请求/响应与 IR 的双向编解码，覆
 ===/root/OneAPI/src/gateway/===
 auth.rs[MI8S]: F:从 Authorization Bearer 或 x-api-key 提取 Key，校验启用/过期并节流更新 last_used_at | R:code:src/models/api_key.rs,code:src/security.rs,code:src/gateway/error.rs,code:src/state.rs | A:ApiKeyAuth | S:认证失败按请求路径返回对应协议的 401 错误形状；last_used_at 最多每 60 秒更新一次
 error.rs[CN7T]: F:生成 Chat/Responses/Anthropic 三种形状的客户端错误响应，并从上游错误体提取 message/type | R:code:src/gateway/execute.rs,code:src/gateway/auth.rs,code:src/protocol/mod.rs | A:client_error,upstream_error,protocol_for_path | S:Anthropic 错误必须包含 type=error 与 error.type；上游非 JSON 错误截断为 300 字符
-execute.rs[AN9L]: F:网关代理核心：模型→渠道选择、同协议透传、跨协议编解码、故障转移、渠道健康更新与用量日志 | R:code:src/gateway/select.rs,code:src/gateway/usage.rs,code:src/gateway/auth.rs,code:src/gateway/error.rs,code:src/protocol/mod.rs,code:src/upstream.rs | A:proxy | S:只向客户端写字节前允许切换渠道；401/403/404/408/409/425/429/5xx 可重试，400 等不重试；同协议透传保留未知字段；流式请求在 M5 前拒绝
-mod.rs[AN9L]: F:定义 /v1 网关路由：Chat/Responses/Anthropic 三类代理与 /v1/models 聚合，配置 CORS 与请求体上限 | R:code:src/gateway/execute.rs,code:src/gateway/auth.rs,code:src/gateway/error.rs,code:src/protocol/mod.rs,code:src/state.rs | A:routes,chat,responses,messages,list_models,get_model | S:/v1/* 使用 Bearer/x-api-key 鉴权并允许任意 Origin；流式请求在 M5 前显式拒绝；模型列表只聚合启用的非通配模型
+execute.rs[AN9L]: F:网关代理核心：模型→渠道选择、同协议透传、跨协议编解码、故障转移、渠道健康更新、用量日志与 Responses 历史展开/落库 | R:code:src/gateway/select.rs,code:src/gateway/usage.rs,code:src/gateway/auth.rs,code:src/gateway/error.rs,code:src/gateway/responses_state.rs,code:src/protocol/mod.rs,code:src/upstream.rs | A:proxy | S:只向客户端写字节前允许切换渠道；401/403/404/408/409/425/429/5xx 可重试，400 等不重试；同协议透传保留未知字段；Responses 默认落库，store=false 不落库；流式请求在 M5 前拒绝
+mod.rs[AN9L]: F:定义 /v1 网关路由：Chat/Responses/Anthropic 代理、Responses GET/DELETE 与 /v1/models 聚合，配置 CORS 与请求体上限 | R:code:src/gateway/execute.rs,code:src/gateway/auth.rs,code:src/gateway/error.rs,code:src/gateway/responses_state.rs,code:src/protocol/mod.rs,code:src/state.rs | A:routes,chat,responses,messages,list_models,get_response | S:/v1/* 使用 Bearer/x-api-key 鉴权并允许任意 Origin；流式请求在 M5 前显式拒绝；模型列表只聚合启用的非通配模型；Responses GET/DELETE 按 Key 隔离
 select.rs[AN8T]: F:按模型过滤启用且未冷却的渠道，按优先级分组并在组内按权重随机排序 | R:code:src/models/channel.rs | A:Candidate,candidates | S:models 中的 * 接受任意模型；model_mapping 优先于客户端模型名；同优先级按 weight 加权随机
 usage.rs[PO8T]: F:把一次网关请求的渠道、协议、状态、token、耗时与错误写入 usage_logs | R:code:src/gateway/execute.rs,code:src/protocol/ir.rs,code:src/models/mod.rs | A:UsageRecord,insert | S:每次请求只写一行；attempts 记录尝试过的渠道数；first_token_ms 在非流式为 null
+responses_state.rs[PN8S]: F:Responses 本地状态：生成 resp_ id、按 previous_response_id 展开历史、落库与按 Key 查询/删除 | R:code:src/models/response.rs,code:src/gateway/execute.rs,code:src/gateway/mod.rs | A:new_response_id,expand_previous,store,get,delete | S:展开时把上一轮 request.input + response.output + 本轮 input 拼接；过滤 reasoning item；存储上限 10MB，超限跳过并告警

@@ -17,6 +17,7 @@ use auth::ApiKeyAuth;
 pub mod auth;
 pub mod error;
 pub mod execute;
+pub mod responses_state;
 pub mod select;
 pub mod usage;
 
@@ -24,6 +25,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat))
         .route("/v1/responses", post(responses))
+        .route(
+            "/v1/responses/{id}",
+            get(get_response).delete(delete_response),
+        )
         .route("/v1/messages", post(messages))
         .route("/v1/models", get(list_models))
         .route("/v1/models/{id}", get(get_model))
@@ -56,6 +61,48 @@ async fn messages(
     Json(body): Json<Value>,
 ) -> Result<Response, AppError> {
     execute::proxy(&state, &auth, Protocol::Anthropic, &headers, body).await
+}
+
+async fn get_response(
+    State(state): State<AppState>,
+    auth: ApiKeyAuth,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    match responses_state::get(&state, auth.key.id, &id).await? {
+        Some(stored) => {
+            let value: Value = serde_json::from_str(&stored.response_json)
+                .map_err(|error| AppError::Internal(error.into()))?;
+            Ok(Json(value).into_response())
+        }
+        None => Ok(error::client_error(
+            Protocol::Responses,
+            StatusCode::NOT_FOUND,
+            "response not found",
+            "not_found",
+        )),
+    }
+}
+
+async fn delete_response(
+    State(state): State<AppState>,
+    auth: ApiKeyAuth,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    if responses_state::delete(&state, auth.key.id, &id).await? {
+        Ok(Json(json!({
+            "id": id,
+            "object": "response.deleted",
+            "deleted": true,
+        }))
+        .into_response())
+    } else {
+        Ok(error::client_error(
+            Protocol::Responses,
+            StatusCode::NOT_FOUND,
+            "response not found",
+            "not_found",
+        ))
+    }
 }
 
 async fn list_models(
@@ -258,6 +305,22 @@ mod tests {
     async fn send_get(router: axum::Router, path: &str, key: &str) -> (StatusCode, Value) {
         let request = Request::builder()
             .method("GET")
+            .uri(path)
+            .header("authorization", format!("Bearer {key}"))
+            .body(Body::empty())
+            .expect("request");
+        let response = router.oneshot(request).await.expect("response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    async fn send_delete(router: axum::Router, path: &str, key: &str) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("DELETE")
             .uri(path)
             .header("authorization", format!("Bearer {key}"))
             .body(Body::empty())
@@ -647,5 +710,181 @@ mod tests {
             .filter_map(|item| item["id"].as_str())
             .collect();
         assert_eq!(ids, vec!["claude-c", "gpt-a", "gpt-b"]);
+    }
+
+    #[tokio::test]
+    async fn responses_history_is_expanded_and_scoped() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let other_key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(chat_success_body("first answer")),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(chat_success_body("second answer")),
+            )
+            .mount(&server)
+            .await;
+
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let router = app::router(state.clone());
+        let (status, first) = send(
+            router.clone(),
+            "/v1/responses",
+            Some(&key),
+            json!({"model": "gpt-test", "input": "hello"}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["object"], json!("response"));
+        assert_eq!(first["store"], json!(true));
+        assert_eq!(
+            first["output"][0]["content"][0]["text"],
+            json!("first answer")
+        );
+        let first_id = first["id"].as_str().expect("response id").to_string();
+        assert!(first_id.starts_with("resp_"));
+
+        let (status, second) = send(
+            router.clone(),
+            "/v1/responses",
+            Some(&key),
+            json!({
+                "model": "gpt-test",
+                "previous_response_id": first_id.clone(),
+                "input": "and again",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            second["output"][0]["content"][0]["text"],
+            json!("second answer")
+        );
+
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 2);
+        let second_request: Value =
+            serde_json::from_slice(&requests[1].body).expect("second upstream request");
+        let messages = second_request["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], json!("user"));
+        assert_eq!(messages[0]["content"], json!("hello"));
+        assert_eq!(messages[1]["role"], json!("assistant"));
+        assert_eq!(messages[1]["content"], json!("first answer"));
+        assert_eq!(messages[2]["role"], json!("user"));
+        assert_eq!(messages[2]["content"], json!("and again"));
+
+        let (status, stored) =
+            send_get(router.clone(), &format!("/v1/responses/{first_id}"), &key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stored["id"], json!(first_id.as_str()));
+
+        let (status, _) = send_get(
+            router.clone(),
+            &format!("/v1/responses/{first_id}"),
+            &other_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = send(
+            router.clone(),
+            "/v1/responses",
+            Some(&other_key),
+            json!({
+                "model": "gpt-test",
+                "previous_response_id": first_id.clone(),
+                "input": "steal",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, deleted) =
+            send_delete(router.clone(), &format!("/v1/responses/{first_id}"), &key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deleted["deleted"], json!(true));
+
+        let (status, _) = send_get(router, &format!("/v1/responses/{first_id}"), &key).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn responses_store_false_cannot_be_referenced() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_success_body("temporary")))
+            .mount(&server)
+            .await;
+
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let router = app::router(state);
+        let (status, first) = send(
+            router.clone(),
+            "/v1/responses",
+            Some(&key),
+            json!({"model": "gpt-test", "input": "hello", "store": false}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["store"], json!(false));
+        let first_id = first["id"].as_str().expect("response id").to_string();
+
+        let (status, body) = send(
+            router,
+            "/v1/responses",
+            Some(&key),
+            json!({
+                "model": "gpt-test",
+                "previous_response_id": first_id,
+                "input": "again",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not found"));
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1
+        );
     }
 }

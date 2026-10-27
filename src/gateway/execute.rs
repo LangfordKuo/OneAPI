@@ -18,7 +18,9 @@ use crate::{
 
 use super::{
     auth::ApiKeyAuth,
-    error, select,
+    error,
+    responses_state::{self, ExpandError},
+    select,
     usage::{self, UsageRecord},
 };
 
@@ -27,7 +29,7 @@ pub async fn proxy(
     auth: &ApiKeyAuth,
     inbound: Protocol,
     headers: &HeaderMap,
-    body: Value,
+    mut body: Value,
 ) -> Result<Response, AppError> {
     let request_id = headers
         .get("x-request-id")
@@ -79,30 +81,43 @@ pub async fn proxy(
         ));
     }
 
-    if inbound == Protocol::Responses
-        && body
-            .get("previous_response_id")
-            .and_then(Value::as_str)
-            .is_some()
-    {
-        let message = "previous_response_id is not implemented yet";
-        ctx.record(
-            state,
-            None,
-            None,
-            inbound,
-            StatusCode::BAD_REQUEST,
-            Some(("invalid_request_error", message)),
-            Usage::default(),
-        )
-        .await;
-        return Ok(error::client_error(
-            inbound,
-            StatusCode::BAD_REQUEST,
-            message,
-            "invalid_request_error",
-        ));
-    }
+    let mut client_request: Option<Value> = None;
+    let mut response_id: Option<String> = None;
+    let should_store = if inbound == Protocol::Responses {
+        let should_store = body.get("store").and_then(Value::as_bool).unwrap_or(true);
+
+        body = match responses_state::expand_previous(state, auth.key.id, body).await {
+            Ok(value) => value,
+            Err(ExpandError::Invalid(message)) => {
+                ctx.record(
+                    state,
+                    None,
+                    None,
+                    inbound,
+                    StatusCode::BAD_REQUEST,
+                    Some(("invalid_request_error", message.as_str())),
+                    Usage::default(),
+                )
+                .await;
+                return Ok(error::client_error(
+                    inbound,
+                    StatusCode::BAD_REQUEST,
+                    message,
+                    "invalid_request_error",
+                ));
+            }
+            Err(ExpandError::Database(error)) => return Err(AppError::Database(error)),
+        };
+
+        response_id = Some(responses_state::new_response_id());
+        if let Some(object) = body.as_object_mut() {
+            object.insert("store".into(), json!(false));
+        }
+        client_request = Some(body.clone());
+        should_store
+    } else {
+        false
+    };
 
     let channels = models::channel::list(&state.db).await?;
     let candidates = select::candidates(channels, &model);
@@ -268,13 +283,46 @@ pub async fn proxy(
         if status.is_success() {
             let _ = models::channel::mark_success(&state.db, channel.id).await;
 
-            let (client_body, usage) = if upstream == inbound {
+            let mut client_json: Option<Value> = None;
+            let usage = if upstream == inbound {
                 let usage = upstream_value
                     .as_ref()
                     .and_then(|value| upstream.parse_response(value).ok())
                     .map(|response| response.usage)
                     .unwrap_or_default();
-                (Body::from(text), usage)
+
+                if inbound == Protocol::Responses {
+                    client_json = upstream_value.clone();
+                    if client_json.is_none() {
+                        let message = "upstream returned a non-JSON response";
+                        let _ = models::channel::mark_failure(
+                            &state.db,
+                            channel.id,
+                            message,
+                            now_ms(),
+                            60_000,
+                        )
+                        .await;
+                        ctx.record(
+                            state,
+                            Some(channel),
+                            Some(&candidate.upstream_model),
+                            upstream,
+                            StatusCode::BAD_GATEWAY,
+                            Some(("upstream_error", message)),
+                            Usage::default(),
+                        )
+                        .await;
+                        return Ok(error::client_error(
+                            inbound,
+                            StatusCode::BAD_GATEWAY,
+                            message,
+                            "upstream_error",
+                        ));
+                    }
+                }
+
+                usage
             } else {
                 let Some(value) = upstream_value.as_ref() else {
                     let message = "upstream returned a non-JSON response";
@@ -353,9 +401,70 @@ pub async fn proxy(
                         ));
                     }
                 };
-                let bytes = serde_json::to_vec(&client_value)
-                    .map_err(|error| AppError::Internal(error.into()))?;
-                (Body::from(bytes), usage)
+                client_json = Some(client_value);
+                usage
+            };
+
+            let client_body = if inbound == Protocol::Responses {
+                let mut value = client_json.unwrap_or(Value::Null);
+                if !value.is_object() {
+                    let message = "failed to build a Responses response";
+                    ctx.record(
+                        state,
+                        Some(channel),
+                        Some(&candidate.upstream_model),
+                        upstream,
+                        StatusCode::BAD_GATEWAY,
+                        Some(("upstream_error", message)),
+                        Usage::default(),
+                    )
+                    .await;
+                    return Ok(error::client_error(
+                        inbound,
+                        StatusCode::BAD_GATEWAY,
+                        message,
+                        "upstream_error",
+                    ));
+                }
+
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "id".into(),
+                        json!(response_id
+                            .as_ref()
+                            .expect("responses request has a response id")),
+                    );
+                    object.insert("object".into(), json!("response"));
+                    object.insert("store".into(), json!(should_store));
+                    if !object.contains_key("created_at") {
+                        object.insert("created_at".into(), json!(chrono::Utc::now().timestamp()));
+                    }
+                }
+
+                if should_store {
+                    if let Some(request) = &client_request {
+                        if let Err(error) =
+                            responses_state::store(state, auth.key.id, &model, request, &value)
+                                .await
+                        {
+                            tracing::warn!(
+                                error = %error,
+                                request_id = %request_id,
+                                "failed to persist Responses state"
+                            );
+                        }
+                    }
+                }
+
+                Body::from(
+                    serde_json::to_vec(&value).map_err(|error| AppError::Internal(error.into()))?,
+                )
+            } else if let Some(value) = client_json {
+                Body::from(
+                    serde_json::to_vec(&value).map_err(|error| AppError::Internal(error.into()))?,
+                )
+            } else {
+                Body::from(text)
             };
 
             ctx.record(
