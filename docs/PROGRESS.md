@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：v0.1.0 已发布；新增实时 tok/s 与在线更新
+- 当前阶段：v0.1.1 已发布；新增实时 tok/s 与在线更新
 - 当前分支：`main`
-- 最近发布：`v0.1.0`（`18ec45f`）
+- 最近发布：`v0.1.1`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -158,6 +158,12 @@
 - 更新流程：按平台选择 `oneapi-<tag>-<platform>.tar.gz|.zip` → 下载 `SHA256SUMS` → 校验 → 解压出二进制 → `self-replace` 替换 → 优雅关闭服务 → Linux/macOS `exec` 新二进制，Windows 启动新进程。
 - 安全检查：仅管理员可调用；只接受 GitHub/proxy 官方资产命名；强制 SHA256SUMS；容器环境默认拒绝；更新进行中拒绝并发。
 - 验证：真实 GitHub 与 gh-proxy 的检查接口均返回 v0.1.0；本地 mock 发布 v9.9.9 完成“检查→下载→校验→替换→重启”，重启标记文件写入成功；71 个测试通过。
+
+## v0.1.1 发布记录
+
+- 版本号从 `0.1.0` 升至 `0.1.1`，包含实时 tok/s 与后台在线更新功能。
+- 发布流程仍为六平台构建 + GitHub Release + GHCR 多架构镜像；Linux 使用 musl 静态链接。
+- 安装包命名 `oneapi-v0.1.1-<platform>`，`SHA256SUMS` 可供在线更新校验。
 
 ## AOCI 状态
 

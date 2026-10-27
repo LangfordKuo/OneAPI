@@ -7,7 +7,7 @@
 .gitignore[FV4T]: F:声明构建产物、本地数据、前端依赖目录与环境文件不进入版本控制 | R:code:Makefile,code:Cargo.toml,code:web/package.json | A:- | S:web/dist 被忽略，但 release 构建依赖它；全新检出需先 make web
 AGENTS.md[SG7S]: F:汇总 AOCI 仓库认知规则与项目文档入口，供每个新会话自动加载 | R:code:docs/IMPLEMENTATION_PLAN.md,code:docs/PROGRESS.md | A:- | S:aoci 区块由 AOCI 维护，project 区块必须在 aoci:end 之外，避免被索引工具覆盖
 Cargo.lock[FV5L]: F:锁定 OneAPI 后端全部 Rust 依赖的精确版本与校验和 | R:code:Cargo.toml | A:- | S:由 Cargo 自动维护，禁止手工编辑；二进制发布必须提交此文件；包含 updater 的 self-replace/semver 与平台相关 flate2/tar/zip
-Cargo.toml[FV8T]: F:定义 oneapi 二进制 crate 的元数据、运行时/测试依赖与 release 优化策略 | R:code:Cargo.lock,code:build.rs,code:src/main.rs,code:web/package.json,code:src/update.rs | A:- | S:release 使用 thin LTO、strip 与单 codegen unit；在线更新依赖 self-replace/semver，Unix 使用 flate2+tar，Windows 使用 zip；修改依赖特性会影响二进制体积与 TLS/SQLite 能力
+Cargo.toml[FV8T]: F:定义 oneapi 二进制 crate 的版本元数据、运行时/测试依赖与 release 优化策略 | R:code:Cargo.lock,code:build.rs,code:src/main.rs,code:web/package.json,code:src/update.rs | A:- | S:当前版本为 0.1.1，发布标签必须与 version 一致；release 使用 thin LTO、strip 与单 codegen unit；在线更新依赖 self-replace/semver，Unix 使用 flate2+tar，Windows 使用 zip；依赖特性影响二进制体积与 TLS/SQLite 能力
 Dockerfile[OV6T]: F:三阶段源码构建 OneAPI 镜像：构建前端静态资源、编译内嵌前端的 Rust 二进制、生成最小运行镜像 | R:code:Cargo.toml,code:web/package.json,code:docker-compose.yml,code:Dockerfile.release | A:镜像入口 oneapi serve | S:构建阶段必须先复制 web/dist，否则 rust-embed 会嵌入占位页；SQLite 使用 bundled，无需运行镜像额外库；使用 cargo registry/npm cache mount；运行镜像非 root 并依赖 /data 卷
 LICENSE[SG3L]: F:声明 OneAPI 以 GNU General Public License v3.0 发布 | R:code:README.md | A:- | S:-
 Makefile[XV6T]: F:提供前端安装/构建、release 编译、开发、测试、lint 与 Docker 构建入口 | R:code:Cargo.toml,code:web/package.json,code:build.rs,code:Dockerfile | A:make web/build/run/dev/test/lint/docker | S:构建目标先把 vite-plus 的 Node 目录前置到 PATH；make build 必须在 cargo build 前完成 web/dist 构建
@@ -19,7 +19,7 @@ Dockerfile.release[OV7T]: F:发布镜像装配文件：把 CI 构建的 Linux am
 
 ===/root/OneAPI/docs/===
 IMPLEMENTATION_PLAN.md[SG7M]: F:记录 OneAPI v1 的目标、已确认决策、架构、数据模型、协议转换/流式/前端策略、里程碑、测试与风险 | R:code:docs/PROGRESS.md,code:README.md,code:migrations/0001_init.sql,code:.github/workflows/release.yml | A:- | S:计划中的产品决策是后续实现的约束；修改范围或关键决策时必须同步更新本文档与 docs/PROGRESS.md；流式、Playground、安装向导、保留期/密码重置、实时 tok/s、在线更新、发布矩阵与 Docker 装配方式以此为准
-PROGRESS.md[SV5S]: F:记录当前阶段、里程碑完成情况、验证结果、AOCI 状态与下一步交接信息 | R:code:docs/IMPLEMENTATION_PLAN.md,code:AGENTS.md,code:.github/workflows/release.yml | A:- | S:每个里程碑结束后必须更新本文件；新会话以本文件和实施计划作为恢复上下文入口；M5 起流式验证需含单元/集成测试与进程级端到端；M6 起记录前端 chunk；M7 起记录 dry-run、musl、安装向导与维护功能验证；Post-v0.1.0 记录实时指标与在线更新验证
+PROGRESS.md[SV5S]: F:记录当前阶段、里程碑完成情况、验证结果、AOCI 状态与下一步交接信息 | R:code:docs/IMPLEMENTATION_PLAN.md,code:AGENTS.md,code:.github/workflows/release.yml | A:- | S:每个里程碑结束后必须更新本文件；新会话以本文件和实施计划作为恢复上下文入口；M5 起流式验证需含单元/集成测试与进程级端到端；M6 起记录前端 chunk；M7 起记录 dry-run、musl、安装向导与维护功能验证；Post-v0.1.0 记录实时指标、在线更新与 v0.1.1 发布
 
 ===/root/OneAPI/migrations/===
 0001_init.sql[PD8S]: F:建立 SQLite 初始 schema，覆盖管理员、会话、渠道、API Key、用量日志、Responses 存储、请求详情与设置 | R:code:src/db.rs,code:docs/IMPLEMENTATION_PLAN.md | A:admin/sessions/channels/api_keys/usage_logs/responses/request_details/settings | S:迁移由 sqlx 在启动时执行；已发布迁移不得修改，只能追加新迁移文件；usage_logs 的 api_key_id/channel_id 使用 ON DELETE SET NULL 以保留历史日志

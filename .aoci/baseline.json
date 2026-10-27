@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-27T08:19:13Z",
+  "updated_at": "2026-10-27T08:25:29Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -47,15 +47,15 @@
     },
     "Cargo.lock": {
       "role": "index",
-      "sha256": "62ab261d853d4f2e8093e1dd9573d67031646d1df8f4d84ede0a619bdc86ddaa",
+      "sha256": "19e0ebd76d190dcdf123213077a54c2674e6a5cc72117c9fd3780f69d32b2e4a",
       "size": 87465,
-      "normalized_sha256": "62ab261d853d4f2e8093e1dd9573d67031646d1df8f4d84ede0a619bdc86ddaa"
+      "normalized_sha256": "19e0ebd76d190dcdf123213077a54c2674e6a5cc72117c9fd3780f69d32b2e4a"
     },
     "Cargo.toml": {
       "role": "index",
-      "sha256": "bb425a2e44b685f4ed69be26f2cc71dea2d72fdfbc9e0ea8ebb83841eaa230b5",
+      "sha256": "7543e8b40920c10ce05df609ee1f65ab969db7f4ff6c12b9dd90884c3eac9c0f",
       "size": 1626,
-      "normalized_sha256": "bb425a2e44b685f4ed69be26f2cc71dea2d72fdfbc9e0ea8ebb83841eaa230b5"
+      "normalized_sha256": "7543e8b40920c10ce05df609ee1f65ab969db7f4ff6c12b9dd90884c3eac9c0f"
     },
     "Dockerfile": {
       "role": "index",
@@ -89,9 +89,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "0c27aab949e83bc5d6147ae2eeea64dd74166d8d3a0355dfc10bb81f9c0f2dea",
-      "size": 42115,
-      "normalized_sha256": "0c27aab949e83bc5d6147ae2eeea64dd74166d8d3a0355dfc10bb81f9c0f2dea"
+      "sha256": "cbb07a7d4f3ee3e2916908b1a29c7a512239e09b2b8b6df3c59df054f433aa8c",
+      "size": 42186,
+      "normalized_sha256": "cbb07a7d4f3ee3e2916908b1a29c7a512239e09b2b8b6df3c59df054f433aa8c"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -125,9 +125,9 @@
     },
     "docs/PROGRESS.md": {
       "role": "index",
-      "sha256": "bada77649ed62d2303eff40ba348311a7c959cb428530bf0af3d3b1a38ceb789",
-      "size": 18359,
-      "normalized_sha256": "bada77649ed62d2303eff40ba348311a7c959cb428530bf0af3d3b1a38ceb789"
+      "sha256": "9aaa2ec0cacd9f400bc891e92b2eaa71b612c6dface2390b182189e5cf3c6fe1",
+      "size": 18659,
+      "normalized_sha256": "9aaa2ec0cacd9f400bc891e92b2eaa71b612c6dface2390b182189e5cf3c6fe1"
     },
     "migrations/0001_init.sql": {
       "role": "index",
