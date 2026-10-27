@@ -1,0 +1,97 @@
+#AOCI-CODE-VOLUME: 1
+
+===/root/OneAPI/===
+.dockerignore[OV3T]: F:排除 Docker 构建上下文中的本地依赖、构建产物与认知运行时资产 | R:code:Dockerfile,code:.gitignore | A:- | S:保留 Cargo.lock 和 web/package-lock.json，否则无法复现依赖
+.env.example[FC4T]: F:列出 OneAPI 服务端支持的环境变量及默认值示例 | R:code:src/config.rs,code:docker-compose.yml,code:README.md | A:- | S:仅作部署参考，不参与运行时加载；实际配置必须通过进程环境变量注入
+.gitattributes[FV3T]: F:统一仓库文本文件的 LF 行尾，避免跨平台检出产生格式漂移 | R:- | A:- | S:AOCI 依赖稳定的行尾归一化判断认知漂移
+.gitignore[FV4T]: F:声明构建产物、本地数据、前端依赖目录与环境文件不进入版本控制 | R:code:Makefile,code:Cargo.toml,code:web/package.json | A:- | S:web/dist 被忽略，但 release 构建依赖它；全新检出需先 make web
+AGENTS.md[SG7S]: F:汇总 AOCI 仓库认知规则与项目文档入口，供每个新会话自动加载 | R:code:docs/IMPLEMENTATION_PLAN.md,code:docs/PROGRESS.md | A:- | S:aoci 区块由 AOCI 维护，project 区块必须在 aoci:end 之外，避免被索引工具覆盖
+Cargo.lock[FV5L]: F:锁定 OneAPI 后端全部 Rust 依赖的精确版本与校验和 | R:code:Cargo.toml | A:- | S:由 Cargo 自动维护，禁止手工编辑；二进制发布必须提交此文件以保证可复现构建
+Cargo.toml[FV8T]: F:定义 oneapi 二进制 crate 的元数据、运行时依赖、测试依赖与 release 优化策略 | R:code:Cargo.lock,code:build.rs,code:src/main.rs,code:web/package.json | A:- | S:release 使用 thin LTO、strip 与单 codegen unit；修改依赖特性会直接影响单文件二进制的体积和 TLS/SQLite 能力
+Dockerfile[OV6T]: F:三阶段构建 OneAPI 镜像：构建前端静态资源、编译内嵌前端的 Rust 二进制、生成最小运行镜像 | R:code:Cargo.toml,code:web/package.json,code:docker-compose.yml | A:镜像入口 oneapi serve | S:构建阶段必须先复制 web/dist，否则 rust-embed 会嵌入占位页；运行镜像以非 root 启动并依赖 /data 卷
+LICENSE[SG3L]: F:声明 OneAPI 以 GNU General Public License v3.0 发布 | R:code:README.md | A:- | S:-
+Makefile[XV6T]: F:提供前端安装/构建、release 编译、开发、测试、lint 与 Docker 构建入口 | R:code:Cargo.toml,code:web/package.json,code:build.rs,code:Dockerfile | A:make web/build/run/dev/test/lint/docker | S:构建目标先把 vite-plus 的 Node 目录前置到 PATH；make build 必须在 cargo build 前完成 web/dist 构建
+README.md[SG6T]: F:说明 OneAPI 的定位、当前进度、技术栈、开发与构建命令、环境变量和 Docker 用法 | R:code:docs/IMPLEMENTATION_PLAN.md,code:docs/PROGRESS.md,code:.env.example | A:- | S:当前进度必须与 docs/PROGRESS.md 保持一致，构建命令需同时覆盖分步构建与 make build
+build.rs[XV5T]: F:编译前确保 web/dist/index.html 存在，缺失时写入占位页，并声明前端产物变更触发重编译 | R:code:Cargo.toml,code:web/vite.config.ts,code:src/web.rs | A:- | S:占位页只保证 cargo check/build 可用，不能替代真实前端构建；release 构建前必须运行 make web
+docker-compose.yml[OV4T]: F:提供 OneAPI 单服务 Compose 部署示例，映射 3000 端口并持久化 /data | R:code:Dockerfile,code:docs/IMPLEMENTATION_PLAN.md | A:- | S:示例密码与 ONEAPI_SECRET 为占位值，部署前必须替换
+rust-toolchain.toml[FV4T]: F:固定使用 stable Rust 工具链并声明 rustfmt 与 clippy 组件 | R:code:Cargo.toml | A:- | S:构建机需 rustup 能解析 stable 通道；CI 与本地应使用同一工具链
+
+===/root/OneAPI/docs/===
+IMPLEMENTATION_PLAN.md[SG7M]: F:记录 OneAPI v1 的目标、已确认决策、架构、数据模型、协议转换策略、里程碑、测试与风险 | R:code:docs/PROGRESS.md,code:README.md,code:migrations/0001_init.sql | A:- | S:计划中的产品决策是后续实现的约束；修改范围或关键决策时必须同步更新本文档与 docs/PROGRESS.md
+PROGRESS.md[SV5T]: F:记录当前阶段、里程碑完成情况、验证结果、AOCI 状态与下一步交接信息 | R:code:docs/IMPLEMENTATION_PLAN.md,code:AGENTS.md | A:- | S:每个里程碑结束后必须更新本文件；新会话以本文件和实施计划作为恢复上下文入口
+
+===/root/OneAPI/migrations/===
+0001_init.sql[PD8S]: F:建立 SQLite 初始 schema，覆盖管理员、会话、渠道、API Key、用量日志、Responses 存储、请求详情与设置 | R:code:src/db.rs,code:docs/IMPLEMENTATION_PLAN.md | A:admin/sessions/channels/api_keys/usage_logs/responses/request_details/settings | S:迁移由 sqlx 在启动时执行；已发布迁移不得修改，只能追加新迁移文件；usage_logs 的 api_key_id/channel_id 使用 ON DELETE SET NULL 以保留历史日志
+
+===/root/OneAPI/src/===
+app.rs[AN7T]: F:组装 Axum Router，注册健康检查、系统信息、管理后台与网关路由、SPA fallback、请求 ID 与 HTTP trace 中间件 | R:code:src/admin/mod.rs,code:src/gateway/mod.rs,code:src/error.rs,code:src/state.rs,code:src/web.rs | A:GET /healthz,GET /readyz,GET /api/system,管理后台 /api/*,/v1/* 网关 | S:fallback 必须放在所有 API 路由之后；/api 与 /v1 的未命中路径返回 JSON 404，其余路径回落 index.html
+config.rs[FC6T]: F:从环境变量和可选 --data-dir 解析监听地址、数据目录、SQLite 路径、日志级别与 Cookie 安全开关 | R:code:src/main.rs,code:src/db.rs | A:Config::from_env,Config::data_dir_display | S:数据目录会在启动时自动创建；ONEAPI_DATABASE_URL 为空时回退到 data_dir/oneapi.db
+db.rs[PD8T]: F:创建 SQLite 连接池，启用 WAL、外键与 busy_timeout，并执行内嵌迁移 | R:code:src/config.rs,code:migrations/0001_init.sql | A:connect | S:连接池上限为 5；迁移在每次启动时自动执行；SQLite 写并发受 WAL 与单写者模型约束
+error.rs[CG6T]: F:定义统一应用错误类型，并把错误映射为带 error.message/type 的 JSON HTTP 响应 | R:code:src/app.rs | A:AppError | S:数据库与内部错误只记录日志，不把底层错误文本返回给客户端
+main.rs[EG8S]: F:进程入口，解析 serve 子命令，初始化配置、日志、数据库、主密钥与管理员引导，构建路由并启动优雅关闭的 HTTP 服务 | R:code:src/admin/auth.rs,code:src/app.rs,code:src/config.rs,code:src/db.rs,code:src/gateway/mod.rs,code:src/security.rs,code:src/state.rs,code:src/upstream.rs | A:oneapi serve | S:未指定子命令时默认 serve；首次启动会生成管理员与 master.key；忽略 Ctrl+C/SIGTERM 会导致流式请求与 SQLite 连接无法优雅收尾
+state.rs[CG6T]: F:定义在 Axum handler 间共享的应用状态，包含配置、SQLite 连接池、主密钥工具与启动时间 | R:code:src/config.rs,code:src/db.rs,code:src/security.rs | A:AppState | S:AppState 通过 Clone 共享 Arc<Config>、Arc<Crypto> 与连接池；不要在请求内重新构造连接池或主密钥
+telemetry.rs[OO5T]: F:初始化 tracing subscriber，支持环境变量过滤与可选 JSON 日志格式 | R:code:src/main.rs | A:init | S:ONEAPI_LOG_JSON=1/true/yes 时输出 JSON；初始化失败必须阻止进程继续启动
+web.rs[IU6T]: F:通过 rust-embed 提供内嵌前端资源、SPA 路由回退、MIME 与缓存头，并对未命中的 API 路径返回 JSON 404 | R:code:build.rs,code:web/index.html | A:fallback | S:assets/ 哈希文件用一年 immutable 缓存，index.html 用 no-cache；带扩展名但缺失的文件返回 404
+security.rs[CS9M]: F:提供密码 Argon2id 哈希、API Key/会话 token 生成与 SHA-256、AES-256-GCM 上游密钥加解密与掩码 | R:code:src/config.rs,code:src/admin/auth.rs,code:src/admin/channels.rs,code:src/admin/keys.rs | A:Crypto,hash_password,verify_password,generate_api_key,generate_session_token,sha256_hex | S:上游密钥用 v1:nonce:ciphertext 格式加密；ONEAPI_SECRET 优先，否则读取或生成 data/master.key（0600）；密钥文件长度必须为 32 字节
+upstream.rs[IN8T]: F:构建每渠道的 reqwest 客户端与上游请求：base_url 路径、鉴权头、自定义头、Anthropic 版本头、代理与超时 | R:code:src/models/channel.rs,code:src/security.rs,code:src/gateway/execute.rs | A:build_client,build_request,apply_auth,endpoint_url,models_url | S:渠道 timeout_ms 覆盖默认 600 秒；连接超时固定 10 秒；Anthropic 默认补 anthropic-version: 2023-06-01；不关闭 TLS 校验
+
+===/root/OneAPI/web/===
+index.html[EU5T]: F:Vite 的 HTML 入口，挂载 React 根节点并加载 /src/main.tsx | R:code:web/src/main.tsx,code:web/vite.config.ts | A:- | S:生产构建时 Vite 会改写资源引用；不要在此手工引用带哈希的 assets 路径
+package-lock.json[FV3L]: F:锁定 OneAPI 前端依赖树的精确版本与完整性哈希 | R:code:web/package.json | A:- | S:由 npm 自动维护；更新依赖后需重新生成并提交，Docker 使用 npm ci 依赖此文件
+package.json[FV6T]: F:声明 OneAPI 前端的包名、脚本与 React/Ant Design/Vite 依赖版本 | R:code:web/package-lock.json,code:web/vite.config.ts,code:web/src/main.tsx | A:npm run dev/build/typecheck | S:构建脚本先执行 tsc --noEmit 再运行 vite build；依赖升级需同步更新 package-lock.json
+tsconfig.json[FV4T]: F:配置前端 TypeScript 严格模式、React JSX、bundler 解析与仅类型检查 | R:code:web/src/main.tsx,code:web/package.json | A:- | S:noEmit 为 true，构建时用 tsc --noEmit；不要移除 strict 或 noUnusedLocals
+vite.config.ts[FV5T]: F:配置 Vite React 插件、5173 开发端口、后端代理与 dist 构建输出 | R:code:web/package.json,code:web/index.html,code:src/app.rs | A:- | S:开发代理必须覆盖 /api、/v1、/healthz、/readyz 到 127.0.0.1:3000，否则前端无法联调
+
+===/root/OneAPI/web/src/===
+App.tsx[AU6S]: F:管理后台入口：查询当前会话，未登录时显示登录页，登录后提供侧边栏布局、导航与页面路由 | R:code:web/src/pages/Dashboard.tsx,code:web/src/pages/Channels.tsx,code:web/src/pages/Keys.tsx,code:web/src/pages/Settings.tsx,code:web/src/pages/Login.tsx,code:web/src/api/client.ts | A:App | S:用 /api/auth/me 的 401 判断登录态；退出后必须使 me 查询失效并回到登录页；新增页面要同时注册菜单与 Route
+main.tsx[EU5T]: F:前端入口，创建 React 根节点并挂载 Ant Design、TanStack Query 与 React Router 提供器 | R:code:web/src/App.tsx,code:web/index.html | A:- | S:QueryClient 关闭窗口聚焦自动刷新并只重试一次；ConfigProvider 使用 zh_CN locale
+
+===/root/OneAPI/web/src/api/===
+client.ts[IU6T]: F:封装前端 JSON 请求、错误解析与 credentials 携带，并提供 get/post/put/delete 方法 | R:code:web/src/pages/Dashboard.tsx | A:api,ApiError | S:所有请求必须携带 credentials: include；非 2xx 响应优先读取后端 error.message，204 返回 undefined
+types.ts[CG5T]: F:定义管理后台前端共享的 Channel、ApiKey、Settings、Admin 与渠道测试/模型拉取结果类型 | R:code:web/src/api/client.ts,code:web/src/pages/Channels.tsx,code:web/src/pages/Keys.tsx,code:web/src/pages/Settings.tsx | A:Channel,ApiKey,Settings,Admin,ChannelTestResult,ModelFetchResult | S:字段名必须与后端 JSON 保持一致；时间字段是 Unix 毫秒数字，不是字符串
+
+===/root/OneAPI/web/src/pages/===
+Dashboard.tsx[EU5T]: F:仪表盘页面，轮询 /api/system 并展示服务状态、运行时长、版本、数据库与数据目录 | R:code:web/src/api/client.ts,code:web/src/App.tsx | A:Dashboard | S:每 30 秒轮询一次；后端不可达时显示错误 Alert 而不是空白页
+Placeholder.tsx[EU4T]: F:为尚未实现的页面提供带里程碑说明的占位卡片 | R:code:web/src/App.tsx | A:Placeholder | S:-
+Channels.tsx[DU7L]: F:渠道管理页：列表、创建、编辑、删除、连通性测试与模型拉取，编辑模型映射/请求头/优先级/权重/代理与启用状态 | R:code:web/src/api/client.ts,code:web/src/api/types.ts,code:web/src/components/KeyValueList.tsx,code:web/src/App.tsx | A:Channels | S:编辑时 api_key 留空表示保持原值；models 必填；测试/拉取仅对已保存渠道可用，拉取结果需填入表单并保存
+Keys.tsx[DU7M]: F:API Key 管理页：列表、创建、启用/禁用、删除，并在创建后一次性展示完整 Key | R:code:web/src/api/client.ts,code:web/src/api/types.ts,code:web/src/App.tsx | A:Keys | S:完整 Key 只在创建成功的模态框显示；更新启用状态与删除后使 keys 查询失效
+Login.tsx[EU5T]: F:登录页，提交用户名/密码并在成功后触发当前会话重新查询 | R:code:web/src/App.tsx,code:web/src/api/client.ts | A:Login | S:登录失败显示后端 error.message；成功后由 App 重新拉取 /api/auth/me 切换布局
+Settings.tsx[DC6S]: F:设置页：编辑站点名称、默认 token、超时、保留期与请求体开关，并提供修改密码表单 | R:code:web/src/api/client.ts,code:web/src/api/types.ts,code:web/src/App.tsx | A:SettingsPage | S:设置读取后回填表单；修改密码成功后清空表单，后端会使其他会话下线
+
+===/root/OneAPI/web/src/styles/===
+global.css[CU4T]: F:设置前端根节点全高、页面背景、中文字体栈，以及登录页/加载页的居中布局 | R:code:web/src/main.tsx,code:web/src/pages/Login.tsx | A:- | S:html、body、#root 必须保持 100% 高度，否则 Ant Design Layout 无法铺满视口
+
+===/root/OneAPI/src/admin/===
+auth.rs[EI8M]: F:管理员登录、登出、当前用户、修改密码与会话签发，含首次启动的管理员引导 | R:code:src/models/admin.rs,code:src/models/session.rs,code:src/security.rs,code:src/state.rs | A:POST /api/auth/login,POST /api/auth/logout,GET /api/auth/me,PUT /api/auth/password | S:会话用 HttpOnly + SameSite=Lax Cookie，数据库只存 token 的 SHA-256；修改密码会删除该管理员全部会话并重新签发
+channels.rs[DB7L]: F:渠道 CRUD 接口：校验配置、加密上游 Key、序列化模型/映射/请求头并返回掩码，另提供已保存渠道的连通性测试与模型拉取 | R:code:src/models/channel.rs,code:src/security.rs,code:src/state.rs,code:src/admin/auth.rs,code:src/upstream.rs | A:GET|POST /api/channels,GET|PUT|DELETE /api/channels/{id},POST /api/channels/{id}/test,POST /api/channels/{id}/fetch-models | S:更新时 api_key 留空表示保留原密文；models 至少一项，* 表示通配；测试/拉取使用已保存配置并返回结果对象而不是把上游错误当 HTTP 错误
+csrf.rs[MS7T]: F:对 /api 写请求校验 Origin 与 Host 同源，降低 Cookie 会话的 CSRF 风险 | R:code:src/admin/mod.rs,code:src/admin/auth.rs | A:middleware::from_fn(csrf::guard) | S:只校验带 Origin 的 POST/PUT/PATCH/DELETE；无 Origin 的命令行请求放行
+keys.rs[DI7S]: F:API Key 的创建、列表、启用/禁用、过期时间更新与删除，创建时返回一次完整明文 | R:code:src/models/api_key.rs,code:src/security.rs | A:GET|POST /api/keys,PUT|DELETE /api/keys/{id} | S:数据库只保存 SHA-256 与展示前缀；完整 Key 仅在创建响应中返回一次，之后无法恢复
+mod.rs[AG6T]: F:组装管理后台 /api 路由，把认证、渠道、Key、设置子模块挂到同一 Router 并启用 CSRF 中间件 | R:code:src/admin/auth.rs,code:src/admin/channels.rs,code:src/admin/keys.rs,code:src/admin/settings.rs,code:src/admin/csrf.rs | A:admin::routes | S:子路由返回 Router<AppState>，状态由 app.rs 统一注入；CSRF 层覆盖所有 /api 路由
+settings.rs[DC6S]: F:读取和更新站点名称、默认 token、超时、日志/Responses 保留期与请求体记录开关 | R:code:src/models/setting.rs,code:src/admin/auth.rs | A:GET|PUT /api/settings | S:设置以字符串键值存储，读取时按类型解析并回退默认值；数值字段在写入前校验范围
+
+===/root/OneAPI/src/models/===
+admin.rs[PI7T]: F:管理员表的查询与写入：统计、按用户名查找、创建唯一管理员、更新密码哈希 | R:code:migrations/0001_init.sql,code:src/admin/auth.rs | A:count,find_by_username,create,update_password | S:admin 表通过 CHECK(id=1) 只允许一个管理员；password_hash 不参与序列化输出
+api_key.rs[PI7T]: F:API Key 表的列表、按 ID/哈希查询、创建、更新启用状态与过期时间、删除，以及节流更新最后使用时间 | R:code:migrations/0001_init.sql,code:src/admin/keys.rs,code:src/gateway/auth.rs | A:list,find_by_hash,create,update,delete,touch_last_used | S:key_hash 有唯一约束；删除 Key 会级联删除其 responses，但 usage_logs 的 api_key_id 置空
+channel.rs[PD8S]: F:渠道表的完整读写、上游配置字段映射，以及失败累计/冷却与成功清零 | R:code:migrations/0001_init.sql,code:src/admin/channels.rs,code:src/gateway/select.rs | A:list,get,create,update,delete,mark_failure | S:enabled 以 0/1 存储；api_key_enc 只保存密文；更新使用全字段覆盖；连续失败 3 次会设置 disabled_until 冷却 60 秒
+mod.rs[CG6T]: F:声明数据访问子模块并提供统一的毫秒时间戳工具 | R:code:src/models/admin.rs,code:src/models/api_key.rs,code:src/models/channel.rs,code:src/models/session.rs,code:src/models/setting.rs | A:now_ms | S:所有持久化时间统一使用 Unix 毫秒 INTEGER，避免 SQLite 文本时间排序问题
+session.rs[PI7T]: F:管理后台会话表的创建、按 token 哈希查管理员、删除单条/全部/过期会话 | R:code:migrations/0001_init.sql,code:src/admin/auth.rs,code:src/models/admin.rs | A:create,find_admin,delete,delete_all_for_admin,delete_expired | S:只存 token 的 SHA-256；查询同时校验 expires_at，过期会话在登录时批量清理
+setting.rs[PC5T]: F:读取全部设置项并按 key 执行插入或更新 | R:code:migrations/0001_init.sql,code:src/admin/settings.rs | A:all,upsert | S:设置值统一以 TEXT 存储，类型转换由调用方负责
+
+===/root/OneAPI/web/src/components/===
+KeyValueList.tsx[CU5T]: F:可复用的 Ant Design Form.List 键值对编辑器，用于模型映射与自定义请求头 | R:code:web/src/pages/Channels.tsx | A:KeyValueList | S:行内键和值都必填；提交前由调用方把数组转换为对象并过滤空键
+
+===/root/OneAPI/src/protocol/===
+anthropic.rs[IN9L]: F:Anthropic Messages 请求/响应与 IR 的双向编解码，覆盖 system、messages、thinking、tool_use/result、图片、tool_choice 与用量 | R:code:src/protocol/ir.rs,code:src/protocol/mod.rs,code:src/protocol/error.rs | A:parse_request,encode_request,parse_response,encode_response | S:user 消息中的 tool_result 解析时转为 Tool 角色；无签名 thinking 不写入请求；max_tokens 缺失时默认 4096；thinking budget 必须小于 max_tokens
+chat.rs[IN9L]: F:Chat Completions 请求/响应与 IR 的双向编解码，覆盖文本、图片、工具调用、推理、JSON 输出与用量 | R:code:src/protocol/ir.rs,code:src/protocol/mod.rs,code:src/protocol/error.rs | A:parse_request,encode_request,parse_response,encode_response | S:top_k 无法表示时显式拒绝；tool 消息内容只支持文本；跨协议 assistant reasoning 会丢失签名，Responses 目标会丢弃 reasoning item
+error.rs[CN7T]: F:定义协议解析/编码错误类型，并把不可表示字段映射为 400 BadRequest | R:code:src/protocol/mod.rs,code:src/error.rs | A:ProtocolError,invalid_request,invalid_response,unsupported,invalid_field | S:UnsupportedField 用于跨协议语义无法表达，不允许静默丢弃；进入网关后统一转 400
+ir.rs[CN9M]: F:定义三种协议共享的统一请求/响应 IR，包括消息内容块、工具、推理、响应格式、停止原因与用量 | R:code:src/protocol/chat.rs,code:src/protocol/responses.rs,code:src/protocol/anthropic.rs | A:UnifiedRequest,UnifiedResponse,ContentPart,ToolDef,ToolChoice,Usage | S:Usage.input_tokens 统一为不含缓存的输入 token，total_tokens 为含缓存与输出的总量；Chat/Responses 编码时必须加回 cached 与 cache_creation
+mod.rs[CN9L]: F:定义协议枚举、请求/响应转换入口与 JSON/错误/推理等共享辅助函数 | R:code:src/protocol/ir.rs,code:src/protocol/chat.rs,code:src/protocol/responses.rs,code:src/protocol/anthropic.rs,code:src/protocol/error.rs | A:Protocol,convert_request,convert_response | S:同一协议也可走 IR 往返，但不保证保留未知字段；跨协议不可表示字段必须由编码器返回 ProtocolError；所有入口共享同一套 IR 与辅助函数
+responses.rs[IN9L]: F:Responses API 请求/响应与 IR 的双向编解码，覆盖 instructions、input items、function_call/output、reasoning、JSON 输出与用量 | R:code:src/protocol/ir.rs,code:src/protocol/mod.rs,code:src/protocol/error.rs | A:parse_request,encode_request,parse_response,encode_response | S:stop/n>1/top_k 等不可表示字段显式拒绝；编码时始终 store=false；输入中的 reasoning item 需要上游 id，跨协议编码会丢弃
+
+===/root/OneAPI/src/gateway/===
+auth.rs[MI8S]: F:从 Authorization Bearer 或 x-api-key 提取 Key，校验启用/过期并节流更新 last_used_at | R:code:src/models/api_key.rs,code:src/security.rs,code:src/gateway/error.rs,code:src/state.rs | A:ApiKeyAuth | S:认证失败按请求路径返回对应协议的 401 错误形状；last_used_at 最多每 60 秒更新一次
+error.rs[CN7T]: F:生成 Chat/Responses/Anthropic 三种形状的客户端错误响应，并从上游错误体提取 message/type | R:code:src/gateway/execute.rs,code:src/gateway/auth.rs,code:src/protocol/mod.rs | A:client_error,upstream_error,protocol_for_path | S:Anthropic 错误必须包含 type=error 与 error.type；上游非 JSON 错误截断为 300 字符
+execute.rs[AN9L]: F:网关代理核心：模型→渠道选择、同协议透传、跨协议编解码、故障转移、渠道健康更新与用量日志 | R:code:src/gateway/select.rs,code:src/gateway/usage.rs,code:src/gateway/auth.rs,code:src/gateway/error.rs,code:src/protocol/mod.rs,code:src/upstream.rs | A:proxy | S:只向客户端写字节前允许切换渠道；401/403/404/408/409/425/429/5xx 可重试，400 等不重试；同协议透传保留未知字段；流式请求在 M5 前拒绝
+mod.rs[AN9L]: F:定义 /v1 网关路由：Chat/Responses/Anthropic 三类代理与 /v1/models 聚合，配置 CORS 与请求体上限 | R:code:src/gateway/execute.rs,code:src/gateway/auth.rs,code:src/gateway/error.rs,code:src/protocol/mod.rs,code:src/state.rs | A:routes,chat,responses,messages,list_models,get_model | S:/v1/* 使用 Bearer/x-api-key 鉴权并允许任意 Origin；流式请求在 M5 前显式拒绝；模型列表只聚合启用的非通配模型
+select.rs[AN8T]: F:按模型过滤启用且未冷却的渠道，按优先级分组并在组内按权重随机排序 | R:code:src/models/channel.rs | A:Candidate,candidates | S:models 中的 * 接受任意模型；model_mapping 优先于客户端模型名；同优先级按 weight 加权随机
+usage.rs[PO8T]: F:把一次网关请求的渠道、协议、状态、token、耗时与错误写入 usage_logs | R:code:src/gateway/execute.rs,code:src/protocol/ir.rs,code:src/models/mod.rs | A:UsageRecord,insert | S:每次请求只写一行；attempts 记录尝试过的渠道数；first_token_ms 在非流式为 null

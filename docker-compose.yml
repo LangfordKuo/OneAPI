@@ -1,0 +1,13 @@
+services:
+  oneapi:
+    build: .
+    image: oneapi:latest
+    ports:
+      - "3000:3000"
+    environment:
+      ONEAPI_ADMIN_USER: admin
+      ONEAPI_ADMIN_PASSWORD: change-me
+      ONEAPI_SECRET: change-me-to-a-long-random-string
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

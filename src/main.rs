@@ -1,0 +1,106 @@
+mod admin;
+mod app;
+mod config;
+mod db;
+mod error;
+mod gateway;
+mod models;
+#[allow(dead_code)]
+mod protocol;
+mod security;
+mod state;
+mod telemetry;
+mod upstream;
+mod web;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::Context;
+use clap::{Parser, Subcommand};
+use config::Config;
+use state::AppState;
+
+#[derive(Debug, Parser)]
+#[command(name = "oneapi", version, about = "Self-hosted AI API gateway")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Data directory (overrides ONEAPI_DATA_DIR)
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Start the HTTP server
+    Serve,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Command::Serve) {
+        Command::Serve => serve(cli.data_dir).await,
+    }
+}
+
+async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let config = Config::from_env(data_dir)?;
+    telemetry::init(&config.log_level)?;
+
+    let db = db::connect(&config).await?;
+    let crypto = Arc::new(security::Crypto::load_or_create(&config.data_dir)?);
+    admin::bootstrap(&db).await?;
+
+    let state = AppState {
+        config: Arc::new(config.clone()),
+        db,
+        crypto,
+        started_at: chrono::Utc::now(),
+    };
+
+    let app = app::router(state);
+    let listener = tokio::net::TcpListener::bind(config.addr)
+        .await
+        .with_context(|| format!("failed to bind {}", config.addr))?;
+
+    tracing::info!(
+        addr = %config.addr,
+        version = env!("CARGO_PKG_VERSION"),
+        data_dir = %config.data_dir.display(),
+        "OneAPI listening"
+    );
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("HTTP server failed")
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!("shutdown signal received");
+}
