@@ -13,7 +13,7 @@ use crate::{
     error::AppError,
     models::{self, channel::Channel, now_ms},
     protocol::{Protocol, UnifiedRequest, Usage},
-    state::AppState,
+    state::{AppState, ProbeAttempt},
     upstream,
 };
 
@@ -261,8 +261,17 @@ pub async fn proxy_with_identity(
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
     let mut unified_request: Option<UnifiedRequest> = None;
+    let mut probe_deferred = false;
 
     for candidate in candidates {
+        let _probe = match state.probes.acquire(&candidate.channel, now_ms()) {
+            ProbeAttempt::NotNeeded => None,
+            ProbeAttempt::Acquired(lease) => Some(lease),
+            ProbeAttempt::Busy => {
+                probe_deferred = true;
+                continue;
+            }
+        };
         ctx.attempts += 1;
         let channel = &candidate.channel;
         let upstream = protocol_for_kind(&channel.kind);
@@ -338,14 +347,7 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
@@ -361,14 +363,7 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
@@ -378,14 +373,7 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_unreachable".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
@@ -396,21 +384,14 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_unreachable".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
         let upstream_value = serde_json::from_str::<Value>(&text).ok();
 
         if status.is_success() {
-            let _ = models::channel::mark_success(&state.db, channel.id).await;
+            state.mark_channel_success(channel.id).await;
 
             let mut client_json: Option<Value> = None;
             let usage = if upstream == inbound {
@@ -424,14 +405,7 @@ pub async fn proxy_with_identity(
                     client_json = upstream_value.clone();
                     if client_json.is_none() {
                         let message = "upstream returned a non-JSON response";
-                        let _ = models::channel::mark_failure(
-                            &state.db,
-                            channel.id,
-                            message,
-                            now_ms(),
-                            60_000,
-                        )
-                        .await;
+                        state.mark_channel_failure(channel.id, message).await;
                         ctx.record(
                             state,
                             Some(channel),
@@ -455,14 +429,7 @@ pub async fn proxy_with_identity(
             } else {
                 let Some(value) = upstream_value.as_ref() else {
                     let message = "upstream returned a non-JSON response";
-                    let _ = models::channel::mark_failure(
-                        &state.db,
-                        channel.id,
-                        message,
-                        now_ms(),
-                        60_000,
-                    )
-                    .await;
+                    state.mark_channel_failure(channel.id, message).await;
                     ctx.record(
                         state,
                         Some(channel),
@@ -635,9 +602,7 @@ pub async fn proxy_with_identity(
 
         let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
         if is_retryable(status) {
-            let _ =
-                models::channel::mark_failure(&state.db, channel.id, &message, now_ms(), 60_000)
-                    .await;
+            state.mark_channel_failure(channel.id, &message).await;
             last_error_type = error_type;
             last_message = message;
             continue;
@@ -660,6 +625,33 @@ pub async fn proxy_with_identity(
             Some(value) => error::upstream_error(inbound, status, &value),
             None => error::client_error(inbound, status, message, error_type.as_str()),
         });
+    }
+
+    if ctx.attempts == 0 && probe_deferred {
+        let message = "upstream channels are recovering; retry shortly";
+        ctx.record(
+            state,
+            None,
+            None,
+            inbound,
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(("channel_recovering", message)),
+            Usage::default(),
+        )
+        .await;
+        store_request_detail(
+            state,
+            &request_id,
+            detail_request.as_deref(),
+            &error::client_error_value(inbound, message, "channel_recovering").to_string(),
+        )
+        .await;
+        return Ok(error::client_error(
+            inbound,
+            StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            "channel_recovering",
+        ));
     }
 
     ctx.record(
@@ -716,8 +708,17 @@ async fn proxy_stream(
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
     let mut unified_request: Option<UnifiedRequest> = None;
+    let mut probe_deferred = false;
 
     for candidate in candidates {
+        let probe = match state.probes.acquire(&candidate.channel, now_ms()) {
+            ProbeAttempt::NotNeeded => None,
+            ProbeAttempt::Acquired(lease) => Some(lease),
+            ProbeAttempt::Busy => {
+                probe_deferred = true;
+                continue;
+            }
+        };
         attempts += 1;
         let channel = &candidate.channel;
         let upstream = protocol_for_kind(&channel.kind);
@@ -821,14 +822,7 @@ async fn proxy_stream(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
@@ -844,14 +838,7 @@ async fn proxy_stream(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
@@ -861,14 +848,7 @@ async fn proxy_stream(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_unreachable".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
@@ -880,14 +860,7 @@ async fn proxy_stream(
             let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
 
             if is_retryable(status) {
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &message).await;
                 last_error_type = error_type;
                 last_message = message;
                 continue;
@@ -943,6 +916,7 @@ async fn proxy_stream(
             store_response: should_store,
             stored_request: client_request.clone(),
             stream: byte_stream,
+            _probe: probe,
         };
 
         match stream::start(job).await {
@@ -952,14 +926,9 @@ async fn proxy_stream(
             }
             Err(failure) => {
                 let retryable = failure.retryable;
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &failure.message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state
+                    .mark_channel_failure(channel.id, &failure.message)
+                    .await;
                 last_error_type = failure.error_type.clone();
                 last_message = failure.message.clone();
 
@@ -992,6 +961,39 @@ async fn proxy_stream(
                 ));
             }
         }
+    }
+
+    if attempts == 0 && probe_deferred {
+        let message = "upstream channels are recovering; retry shortly";
+        record_stream_attempt(
+            state,
+            request_id,
+            identity,
+            model,
+            None,
+            None,
+            inbound,
+            inbound,
+            StatusCode::SERVICE_UNAVAILABLE,
+            attempts,
+            started,
+            Some(("channel_recovering", message)),
+            Usage::default(),
+        )
+        .await;
+        store_request_detail(
+            state,
+            request_id,
+            detail_request.as_deref(),
+            &error::client_error_value(inbound, message, "channel_recovering").to_string(),
+        )
+        .await;
+        return Ok(error::client_error(
+            inbound,
+            StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            "channel_recovering",
+        ));
     }
 
     record_stream_attempt(

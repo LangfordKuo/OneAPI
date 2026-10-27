@@ -46,6 +46,7 @@ async fn test_state() -> (TempDir, AppState) {
             login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
             clients: std::sync::Arc::new(crate::upstream::ClientCache::default()),
             cache: std::sync::Arc::new(crate::state::RuntimeCache::default()),
+            probes: std::sync::Arc::new(crate::state::ChannelProbes::default()),
             usage_writer: None,
             started_at: chrono::Utc::now(),
         },

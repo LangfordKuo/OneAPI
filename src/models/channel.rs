@@ -127,13 +127,11 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> sqlx::Result<bool> {
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn mark_failure(
-    pool: &SqlitePool,
-    id: i64,
-    error: &str,
-    now: i64,
-    cooldown_ms: i64,
-) -> sqlx::Result<()> {
+/// Record a failed attempt. Once a channel has failed twice in a row it enters
+/// cooldown; each further consecutive failure doubles the previous cooldown,
+/// capped at 30 minutes. A single failure only records the error so a transient
+/// upstream hiccup does not remove a channel from rotation.
+pub async fn mark_failure(pool: &SqlitePool, id: i64, error: &str, now: i64) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE channels SET
             consecutive_failures = consecutive_failures + 1,
@@ -141,7 +139,8 @@ pub async fn mark_failure(
             last_error_at = ?,
             updated_at = ?,
             disabled_until = CASE
-                WHEN consecutive_failures >= 2 THEN ?
+                WHEN consecutive_failures + 1 >= 2 THEN
+                    ? + min(1800000, 60000 * (1 << min(consecutive_failures - 1, 5)))
                 ELSE disabled_until
             END
          WHERE id = ?",
@@ -149,24 +148,111 @@ pub async fn mark_failure(
     .bind(error)
     .bind(now)
     .bind(now)
-    .bind(now + cooldown_ms)
+    .bind(now)
     .bind(id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-pub async fn mark_success(pool: &SqlitePool, id: i64) -> sqlx::Result<()> {
-    sqlx::query(
+/// Clear failure state after a successful attempt. Returns whether a row was
+/// changed so callers can skip cache invalidation for healthy channels.
+pub async fn mark_success(pool: &SqlitePool, id: i64) -> sqlx::Result<bool> {
+    let result = sqlx::query(
         "UPDATE channels SET
             consecutive_failures = 0,
             last_error = NULL,
             last_error_at = NULL,
             disabled_until = NULL
-         WHERE id = ?",
+         WHERE id = ?
+           AND (consecutive_failures <> 0 OR last_error IS NOT NULL OR disabled_until IS NOT NULL)",
     )
     .bind(id)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("memory database");
+        sqlx::query(
+            "CREATE TABLE channels (
+                id INTEGER PRIMARY KEY,
+                last_error TEXT,
+                last_error_at INTEGER,
+                disabled_until INTEGER,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("schema");
+        sqlx::query("INSERT INTO channels (id, updated_at) VALUES (1, 0)")
+            .execute(&pool)
+            .await
+            .expect("seed");
+        pool
+    }
+
+    async fn state(pool: &SqlitePool) -> (i64, Option<i64>, Option<String>) {
+        sqlx::query_as(
+            "SELECT consecutive_failures, disabled_until, last_error FROM channels WHERE id = 1",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("row")
+    }
+
+    #[tokio::test]
+    async fn first_failure_records_error_without_cooldown() {
+        let pool = pool().await;
+        mark_failure(&pool, 1, "boom", 1_000).await.expect("mark");
+
+        let (failures, disabled_until, last_error) = state(&pool).await;
+        assert_eq!(failures, 1);
+        assert_eq!(disabled_until, None);
+        assert_eq!(last_error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn consecutive_failures_back_off_exponentially() {
+        let pool = pool().await;
+        let now = 10_000;
+
+        mark_failure(&pool, 1, "boom", now).await.expect("first");
+        assert_eq!(state(&pool).await.1, None);
+
+        let expected = [
+            60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000, 1_800_000,
+        ];
+        for cooldown in expected {
+            mark_failure(&pool, 1, "boom", now).await.expect("mark");
+            assert_eq!(state(&pool).await.1, Some(now + cooldown));
+        }
+    }
+
+    #[tokio::test]
+    async fn success_clears_failure_state() {
+        let pool = pool().await;
+        mark_failure(&pool, 1, "boom", 1_000).await.expect("first");
+        mark_failure(&pool, 1, "boom", 1_000).await.expect("second");
+
+        assert!(mark_success(&pool, 1).await.expect("clear"));
+        assert!(!mark_success(&pool, 1).await.expect("healthy"));
+
+        let (failures, disabled_until, last_error) = state(&pool).await;
+        assert_eq!(failures, 0);
+        assert_eq!(disabled_until, None);
+        assert_eq!(last_error, None);
+    }
 }

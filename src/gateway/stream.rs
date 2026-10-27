@@ -19,7 +19,7 @@ use crate::{
         sse::{SseFrame, SseParser},
         Protocol, StreamDecoder, StreamEncodeOptions, StreamEncoder, StreamEvent, Usage,
     },
-    state::AppState,
+    state::{AppState, ProbeLease},
 };
 
 use super::{
@@ -67,6 +67,8 @@ pub struct StreamJob {
     pub detail_request: Option<String>,
     pub stored_request: Option<Value>,
     pub stream: ByteStream,
+    /// Half-open trial lease for a recovering channel; held until the stream ends.
+    pub _probe: Option<ProbeLease>,
 }
 
 /// Commit the stream to the client only after the first upstream SSE frame has
@@ -206,7 +208,7 @@ async fn run(
         return;
     }
 
-    let _ = models::channel::mark_success(&job.state.db, job.channel_id).await;
+    job.state.mark_channel_success(job.channel_id).await;
 
     pending.push_front(first);
 
@@ -426,14 +428,9 @@ async fn run(
 
     if let Some((error_type, message)) = &stream_error {
         if !client_disconnected {
-            let _ = models::channel::mark_failure(
-                &job.state.db,
-                job.channel_id,
-                &format!("{error_type}: {message}"),
-                models::now_ms(),
-                60_000,
-            )
-            .await;
+            job.state
+                .mark_channel_failure(job.channel_id, &format!("{error_type}: {message}"))
+                .await;
         }
     }
 
@@ -864,6 +861,7 @@ mod tests {
                 login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
                 clients: std::sync::Arc::new(crate::upstream::ClientCache::default()),
                 cache: std::sync::Arc::new(crate::state::RuntimeCache::default()),
+                probes: std::sync::Arc::new(crate::state::ChannelProbes::default()),
                 usage_writer: None,
                 started_at: chrono::Utc::now(),
             },
@@ -924,6 +922,7 @@ mod tests {
             detail_request: None,
             stored_request: None,
             stream,
+            _probe: None,
         }
     }
 

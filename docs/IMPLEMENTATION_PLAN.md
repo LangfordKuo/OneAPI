@@ -134,7 +134,7 @@ StreamEvent { Start | BlockStart{index,kind} | TextDelta | ReasoningDelta |
 3. Responses 路由先处理 `previous_response_id` 历史展开。
 4. 选渠道：`enabled=1` 且 `disabled_until` 未到；`models` 命中或为 `"*"`；按 priority 降序分组，同组按 weight 加权随机；记录上游模型名。
 5. 逐渠道尝试：构造上游请求（同协议只改 model；跨协议编码），用渠道专属 client（代理、extra_headers、超时）发送。
-6. 失败切换：连接错误/超时/401/403/404/408/409/425/429/5xx 可重试；400/413/422 等客户端错误不重试；**一旦已向客户端写出字节就停止切换**。流式在提交前先缓冲首个 SSE event，若为 error 事件则继续切换。失败累计 `consecutive_failures`，≥3 自动冷却 60s，成功清零。
+6. 失败切换：连接错误/超时/401/403/404/408/409/425/429/5xx 可重试；400/413/422 等客户端错误不重试；**一旦已向客户端写出字节就停止切换**。流式在提交前先缓冲首个 SSE event，若为 error 事件则继续切换。失败累计 `consecutive_failures`：首次失败只记录错误，第二次起进入冷却，时长按 60s × 2^(n-2) 指数增长并在 30 分钟封顶；成功清零。冷却到期后仅放行一个进程内半开探测请求，探测成功即恢复，失败则继续翻倍冷却。
 7. 响应：
    - 同协议：字节透传 + tee 观察者；Chat 流可注入 include_usage 并过滤尾块。
    - 跨协议：解码→IR 事件→编码；非流式先完整解码再编码。

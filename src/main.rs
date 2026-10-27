@@ -74,6 +74,7 @@ async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
         login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
         clients: Arc::new(upstream::ClientCache::default()),
         cache: Arc::new(state::RuntimeCache::default()),
+        probes: Arc::new(state::ChannelProbes::default()),
         usage_writer: Some(usage_writer),
         started_at: chrono::Utc::now(),
     };

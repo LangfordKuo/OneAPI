@@ -1,7 +1,7 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：审查计划阶段 A–D 已完成（分支 `review-plan`）
+- 当前阶段：审查计划阶段 A–D 已完成，阶段 E3（渠道退避）已落地（分支 `review-plan`）
 - 当前分支：`review-plan`
 - 最近发布：`v0.1.1`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
@@ -211,6 +211,14 @@
 - `.env.example` 补齐 `ONEAPI_TRUST_PROXY`、`ONEAPI_ALLOW_SELF_UPDATE`、`ONEAPI_UPDATE_API_BASE` 说明。
 - 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`、`npm run lint`、`npm run build` 全部通过。
 
+## 审查计划阶段 E3（渠道健康与退避）
+
+- 渠道冷却从固定 60s 改为指数退避：首次失败只记录错误；第二次连续失败起冷却 60s，之后按 120s/240s/480s/960s 翻倍，30 分钟封顶；成功清零。
+- 冷却到期后进入半开状态：进程内 `ChannelProbes` 只放行一个探测请求，其余请求跳过该渠道；探测成功立即恢复，失败则继续按指数退避冷却。流式探测期间 lease 随流任务持有，首帧成功后其他请求即可正常进入。
+- 新增 `AppState::mark_channel_failure` / `mark_channel_success`：失败写入后立即失效渠道缓存，冷却不再受 30s 缓存 TTL 影响；健康渠道成功时不产生额外写放大。
+- 当所有候选渠道都处于探测占用状态时，网关返回 `503 channel_recovering`，避免把可恢复状态误报为 502。
+- 新增退避序列与探测闸门单测；验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（89 个测试）、`npm run lint`、`npm run build` 全部通过。
+
 ## AOCI 状态
 
 - 版本：`0.1.0-rc22`，二进制 `/usr/local/bin/aoci`。
@@ -221,8 +229,8 @@
 
 ## 下一步
 
-1. 审查计划阶段 A–D 已在 `review-plan` 分支完成，合并回 `main` 后按 `Cargo.toml` 版本打新标签。
-2. `review-plan` 中的阶段 E（长期演进：多管理员/RBAC、PostgreSQL、插件化协议、审计日志等）仍是路线图，未开始实现。
+1. 审查计划阶段 A–D 与 E3 已在 `review-plan` 分支完成，合并回 `main` 后按 `Cargo.toml` 版本打新标签。
+2. 阶段 E 剩余项（速率限制与额度、Prometheus `/metrics`、日志导出/重放、备份恢复、Playground 增强、多管理员/RBAC 与 PostgreSQL）仍是路线图。
 3. 后续版本按 `Cargo.toml` 版本打标签，保留数据目录升级。
 
 ## 交接约定
