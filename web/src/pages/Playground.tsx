@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   Alert,
@@ -357,12 +357,7 @@ export default function Playground() {
     queryKey: ['models'],
     queryFn: () => api.get<ModelsOutput>('/api/models'),
   });
-
-  useEffect(() => {
-    if (!model && modelsQuery.data?.models.length) {
-      setModel(modelsQuery.data.models[0]);
-    }
-  }, [model, modelsQuery.data]);
+  const effectiveModel = model ?? modelsQuery.data?.models[0];
 
   const updateMessage = (id: number, patch: Partial<MessageDraft>) => {
     setMessages((previous) =>
@@ -383,13 +378,13 @@ export default function Playground() {
       chatMessages.push(
         ...filled.map((message) => ({ role: message.role, content: message.content })),
       );
-      return { protocol: 'chat', model, stream: streaming, messages: chatMessages };
+      return { protocol: 'chat', model: effectiveModel, stream: streaming, messages: chatMessages };
     }
 
     if (protocol === 'responses') {
       return {
         protocol: 'responses',
-        model,
+        model: effectiveModel,
         stream: streaming,
         instructions: system.trim() || undefined,
         input: filled.map((message) => ({
@@ -407,7 +402,7 @@ export default function Playground() {
 
     return {
       protocol: 'anthropic',
-      model,
+      model: effectiveModel,
       stream: streaming,
       max_tokens: maxTokens,
       system: system.trim() || undefined,
@@ -416,7 +411,7 @@ export default function Playground() {
   };
 
   const run = async () => {
-    if (!model) {
+    if (!effectiveModel) {
       setResult({ ...EMPTY_RESULT, error: '请选择模型' });
       return;
     }
@@ -503,7 +498,7 @@ export default function Playground() {
             />
             <AutoComplete
               placeholder="选择或输入模型"
-              value={model}
+              value={effectiveModel}
               options={(modelsQuery.data?.models ?? []).map((item) => ({
                 value: item,
                 label: item,
@@ -603,7 +598,7 @@ export default function Playground() {
             <Descriptions.Item label="上游模型">
               {result.upstreamModel ?? '-'}
             </Descriptions.Item>
-            <Descriptions.Item label="模型">{result.model ?? model ?? '-'}</Descriptions.Item>
+            <Descriptions.Item label="模型">{result.model ?? effectiveModel ?? '-'}</Descriptions.Item>
             <Descriptions.Item label="结束原因">{result.stopReason ?? '-'}</Descriptions.Item>
             <Descriptions.Item label="耗时">
               {elapsedMs == null ? '-' : `${elapsedMs} ms`}

@@ -1,6 +1,6 @@
 # OneAPI 实施计划
 
-- 状态：待确认（计划已落盘，尚未开始实现）
+- 状态：M0–M7 已实现并发布 v0.1.1；后续审查计划的阶段 A–D 已落地
 - 最后更新：2026-10-27
 - 关联文档：`docs/PROGRESS.md`
 - 适用仓库：`/root/OneAPI`
@@ -166,6 +166,7 @@ GET|POST /api/keys            PUT|DELETE /api/keys/:id
 GET /api/logs                 GET /api/logs/:request_id
 GET /api/dashboard/summary|timeseries|breakdown?range=24h|7d|30d
 GET /api/models   GET|PUT /api/settings   POST /api/playground   GET /api/system
+GET /api/site   # 公开站点名称与版本（登录页/安装页使用）
 GET /healthz  /readyz
 ```
 
@@ -191,8 +192,8 @@ GET /healthz  /readyz
 - `build.rs` 在 `web/dist` 缺失时生成占位 `index.html`，保证 `cargo check/build` 不因缺前端产物失败（release 正式构建由 Makefile 先跑前端构建）。
 - Makefile：`make dev`（后端 + vite）、`make web`、`make build`（web → `cargo build --release`）、`make test`、`make lint`、`make docker`。
 - Dockerfile 三段：node:24 构建前端 → rust:1-slim-bookworm 构建（rustls，无 OpenSSL，SQLite bundled）→ debian:bookworm-slim 运行（CA 证书、非 root、`/data` 卷、EXPOSE 3000）。附 docker-compose。
-- GitHub Actions：`ci.yml` 在 `main`/PR 上运行 fmt、clippy、test 与前端构建；`release.yml` 在 `v*` 标签上校验版本并构建 Linux/Windows/macOS × amd64/arm64 六个产物，同时用 `Dockerfile.release` 将 Linux 产物组装为 `linux/amd64,linux/arm64` 镜像并推送 GHCR。
-- 配置全走 env，并支持 `.env`（当前目录与数据目录，进程环境优先）：`ONEAPI_ADDR=0.0.0.0:3000`、`ONEAPI_DATA_DIR`、`ONEAPI_DATABASE_URL`、`ONEAPI_SECRET`、`ONEAPI_ADMIN_USER/PASSWORD`、`ONEAPI_LOG_LEVEL`、`ONEAPI_COOKIE_SECURE`。安装向导会生成 `<data_dir>/.env`。
+- GitHub Actions：`ci.yml` 在 `main`/PR 上运行 fmt、clippy、test 以及前端 ESLint、typecheck 与构建；`release.yml` 在 `v*` 标签上校验版本并构建 Linux/Windows/macOS × amd64/arm64 六个产物，同时用 `Dockerfile.release` 将 Linux 产物组装为 `linux/amd64,linux/arm64` 镜像并推送 GHCR。
+- 配置全走 env，并支持 `.env`（当前目录与数据目录，进程环境优先）：`ONEAPI_ADDR=0.0.0.0:3000`、`ONEAPI_DATA_DIR`、`ONEAPI_DATABASE_URL`、`ONEAPI_SECRET`、`ONEAPI_ADMIN_USER/PASSWORD`、`ONEAPI_LOG_LEVEL`、`ONEAPI_LOG_JSON`、`ONEAPI_COOKIE_SECURE`、`ONEAPI_TRUST_PROXY`、`ONEAPI_ALLOW_SELF_UPDATE`、`ONEAPI_UPDATE_API_BASE`。安装向导会生成 `<data_dir>/.env`。
 
 ## 11. 测试
 
@@ -232,6 +233,7 @@ GET /healthz  /readyz
 ## 15. 变更记录
 
 - 2026-10-27：创建本文档，记录已确认决策、架构、数据模型、协议转换策略、里程碑与风险。
+- 2026-10-27：完成 v0.1.0/v0.1.1 发布与实时指标、在线更新；随后按 `docs/REVIEW_PLAN.md` 落地阶段 A–D（设置接线、安全加固、性能优化、工程卫生与文档同步）。
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。

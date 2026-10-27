@@ -6,7 +6,7 @@ OneAPI 是一个自托管的 AI API 网关：在后台配置上游渠道，客�
 
 ## 当前进度
 
-M0–M7 已完成：脚手架、管理基础、三协议非流式/流式网关、Responses 本地状态、请求日志、仪表盘、Playground、Web 安装向导、CI/CD 与多架构发布、保留期清理、`reset-password` 与请求体记录。详细进度见 `docs/PROGRESS.md`。
+M0–M7 已完成：脚手架、管理基础、三协议非流式/流式网关、Responses 本地状态、请求日志、仪表盘、Playground、Web 安装向导、CI/CD 与多架构发布、保留期清理、`reset-password` 与请求体记录。发布后继续加入实时 tok/s、在线更新，以及安全加固与性能优化。详细进度见 `docs/PROGRESS.md`。
 
 ## 支持的平台
 
@@ -14,25 +14,18 @@ M0–M7 已完成：脚手架、管理基础、三协议非流式/流式网关�
 
 | 平台 | 架构 | Runner | 产物 |
 |---|---|---|---|
-| Linux | amd64 | `ubuntu-latest` | `oneapi-<tag>-linux-amd64.tar.gz` |
+| Linux | amd64 | `ubuntu-24.04` | `oneapi-<tag>-linux-amd64.tar.gz` |
 | Linux | arm64 | `ubuntu-24.04-arm` | `oneapi-<tag>-linux-arm64.tar.gz` |
-| Windows | amd64 | `windows-latest` | `oneapi-<tag>-windows-amd64.zip` |
+| Windows | amd64 | `windows-2025` | `oneapi-<tag>-windows-amd64.zip` |
 | Windows | arm64 | `windows-11-arm` | `oneapi-<tag>-windows-arm64.zip` |
 | macOS | amd64 | `macos-15-intel` | `oneapi-<tag>-macos-amd64.tar.gz` |
-| macOS | arm64 | `macos-14` | `oneapi-<tag>-macos-arm64.tar.gz` |
+| macOS | arm64 | `macos-15` | `oneapi-<tag>-macos-arm64.tar.gz` |
 
 同时构建并推送 `linux/amd64`、`linux/arm64` 多架构 Docker 镜像到 GitHub Container Registry。Linux 产物使用 **musl 静态链接**（`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`），不依赖 glibc，可在 Debian 11、Ubuntu 20.04、Alpine 等较老或精简系统运行。镜像直接使用同一次构建产出的 Linux 二进制（`Dockerfile.release`），不会在 QEMU 下二次编译；本地源码构建仍使用 `Dockerfile`。
 
 Actions artifact 上传的是原始二进制，Release 任务只打包一次为最终 `tar.gz`/`zip`，不会再出现“压缩包里套压缩包”。
 
 发布产物未做代码签名：macOS 首次运行可能需要执行 `xattr -dr com.apple.quarantine ./oneapi`，Windows 可能出现 SmartScreen 提示。
-
-### 计划中的 M7 剩余项
-
-- 日志与 Responses 保留期清理任务；
-- `reset-password` 子命令；
-- 请求/响应正文记录开关落地；
-- 最终部署与验收文档。
 
 ## 技术栈
 
@@ -106,6 +99,10 @@ ONEAPI_DATA_DIR=./data ./oneapi serve
 - `ONEAPI_SECRET`：上游 Key 加密主密钥；未设置时在数据目录生成
 - `ONEAPI_ADMIN_USER` / `ONEAPI_ADMIN_PASSWORD`：无界面首次启动的管理员引导账号；未设置密码时使用 Web 安装页
 - `ONEAPI_COOKIE_SECURE`：HTTPS 部署时设为 `true`
+- `ONEAPI_TRUST_PROXY`：受信反向代理后设为 `true`，CSRF 校验改用 `X-Forwarded-Host`
+- `ONEAPI_LOG_JSON`：设为 `1` 时输出 JSON 日志
+- `ONEAPI_ALLOW_SELF_UPDATE`：容器内允许自更新（仅测试用，默认拒绝）
+- `ONEAPI_UPDATE_API_BASE`：覆盖在线更新使用的 GitHub API 地址
 
 健康检查：`GET /healthz`、`GET /readyz`。
 
@@ -134,11 +131,11 @@ ONEAPI_DATA_DIR=./data ./oneapi serve
 
 ## 自动发布
 
-打标签前确保 `Cargo.toml` 的 `version` 与标签一致（例如 `version = "0.1.0"` 对应 `v0.1.0`）：
+打标签前确保 `Cargo.toml` 的 `version` 与标签一致（例如 `version = "0.1.1"` 对应 `v0.1.1`）：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 标签推送后 `.github/workflows/release.yml` 会：
@@ -149,9 +146,9 @@ git push origin v0.1.0
 4. 构建并推送多架构镜像到 `ghcr.io/langfordkuo/oneapi`；
 5. 创建 GitHub Release，附六个平台产物与 `SHA256SUMS`。
 
-Docker 镜像标签包括 `latest`、`0.1.0`、`0.1`、`v0.1.0` 与 `sha-<commit>`。首次发布后，如 GHCR 包默认为私有，可在 GitHub Packages 设置中改为 public。
+Docker 镜像标签包括 `latest`、`0.1.1`、`0.1`、`v0.1.1` 与 `sha-<commit>`。首次发布后，如 GHCR 包默认为私有，可在 GitHub Packages 设置中改为 public。
 
-`push` 到 `main` 或提交 PR 时，`.github/workflows/ci.yml` 会运行 Rust 格式检查、Clippy、测试与前端构建。
+`push` 到 `main` 或提交 PR 时，`.github/workflows/ci.yml` 会运行 Rust 格式检查、Clippy、测试，以及前端 ESLint、类型检查与构建。
 
 ## Docker
 

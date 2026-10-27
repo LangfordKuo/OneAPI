@@ -1,8 +1,8 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：v0.1.1 已发布；新增实时 tok/s 与在线更新
-- 当前分支：`main`
+- 当前阶段：审查计划阶段 A–D 已完成（分支 `review-plan`）
+- 当前分支：`review-plan`
 - 最近发布：`v0.1.1`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
@@ -201,6 +201,16 @@
 - 实时指标改为原子分桶，减少锁竞争；前端构建按 react/query/antd 拆分 vendor chunk。
 - 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（84 个测试）、`npm run build` 全部通过。
 
+## 审查计划阶段 D（工程卫生与文档同步）
+
+- 依赖清理：移除未使用的 `eventsource-stream`；`tower` 仅测试使用，移入 `[dev-dependencies]`；`tower-http` 去掉未启用的 `timeout`、`limit` feature。
+- 移除 `src/error.rs` 中已无必要的 `#[allow(dead_code)]`，Clippy 仍保持零警告。
+- 文档同步：README 更新发布进度、真实 CI runner、环境变量与 `0.1.1` 镜像/标签示例；`docs/IMPLEMENTATION_PLAN.md` 补充 `GET /api/site`、ESLint 与新环境变量，并新增变更记录。
+- 前端版本对齐 `package.json` / `package-lock.json` 到 `0.1.1`。
+- 引入 ESLint 10 flat config（typescript-eslint、react-hooks、react-refresh），新增 `npm run lint`，CI 前端任务增加 lint 步骤；Playground 默认模型改为派生值，消除 effect 内 setState。
+- `.env.example` 补齐 `ONEAPI_TRUST_PROXY`、`ONEAPI_ALLOW_SELF_UPDATE`、`ONEAPI_UPDATE_API_BASE` 说明。
+- 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`、`npm run lint`、`npm run build` 全部通过。
+
 ## AOCI 状态
 
 - 版本：`0.1.0-rc22`，二进制 `/usr/local/bin/aoci`。
@@ -211,8 +221,8 @@
 
 ## 下一步
 
-1. 推送 `v0.1.0` 标签，触发 GitHub Actions 六平台构建、GitHub Release 与 GHCR 多架构镜像推送。
-2. 首次发布后检查 GHCR 包可见性，按需改为 public。
+1. 审查计划阶段 A–D 已在 `review-plan` 分支完成，合并回 `main` 后按 `Cargo.toml` 版本打新标签。
+2. `review-plan` 中的阶段 E（长期演进：多管理员/RBAC、PostgreSQL、插件化协议、审计日志等）仍是路线图，未开始实现。
 3. 后续版本按 `Cargo.toml` 版本打标签，保留数据目录升级。
 
 ## 交接约定

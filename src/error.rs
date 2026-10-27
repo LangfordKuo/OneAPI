@@ -4,7 +4,6 @@ use axum::{
     Json,
 };
 
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("{0}")]
