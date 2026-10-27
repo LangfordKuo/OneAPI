@@ -432,8 +432,9 @@ export default function Logs() {
                 {formatNumber(detailQuery.data.completion_tokens)} /{' '}
                 {formatNumber(detailQuery.data.total_tokens)}
               </Descriptions.Item>
-              <Descriptions.Item label="缓存 / 推理">
+              <Descriptions.Item label="缓存读取 / 缓存写入 / 推理">
                 {formatNumber(detailQuery.data.cached_tokens)} /{' '}
+                {formatNumber(detailQuery.data.cache_creation_tokens)} /{' '}
                 {formatNumber(detailQuery.data.reasoning_tokens)}
               </Descriptions.Item>
               {detailQuery.data.error_message ? (
@@ -462,7 +463,7 @@ export default function Logs() {
                 type="info"
                 showIcon
                 message="未记录请求/响应体"
-                description="当前版本未保存请求与响应正文；此区域会在启用请求体记录后显示。"
+                description="可在「设置 → 记录请求/响应体」中开启；开启后单条最多保存 64KB。"
               />
             )}
           </>

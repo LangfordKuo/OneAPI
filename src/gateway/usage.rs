@@ -28,8 +28,9 @@ pub async fn insert(pool: &SqlitePool, record: &UsageRecord<'_>) -> sqlx::Result
          (request_id, source, api_key_id, channel_id, model, upstream_model,
           inbound_protocol, upstream_protocol, stream, status_code, attempts,
           error_type, error_message, prompt_tokens, completion_tokens, total_tokens,
-          cached_tokens, reasoning_tokens, latency_ms, first_token_ms, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          cached_tokens, cache_creation_tokens, reasoning_tokens, latency_ms, first_token_ms,
+          created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(record.request_id)
     .bind(record.source)
@@ -48,6 +49,7 @@ pub async fn insert(pool: &SqlitePool, record: &UsageRecord<'_>) -> sqlx::Result
     .bind(token(record.usage.output_tokens))
     .bind(token(record.usage.total_tokens))
     .bind(token(record.usage.cached_tokens))
+    .bind(token(record.usage.cache_creation_tokens))
     .bind(token(record.usage.reasoning_tokens))
     .bind(record.latency_ms)
     .bind(record.first_token_ms)

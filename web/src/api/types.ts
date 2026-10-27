@@ -85,6 +85,7 @@ export interface LogEntry {
   completion_tokens: number | null;
   total_tokens: number | null;
   cached_tokens: number | null;
+  cache_creation_tokens: number | null;
   reasoning_tokens: number | null;
   latency_ms: number;
   first_token_ms: number | null;
@@ -152,6 +153,11 @@ export interface Breakdown {
 
 export interface ModelsOutput {
   models: string[];
+}
+
+export interface SiteInfo {
+  site_name: string;
+  version: string;
 }
 
 export interface SetupStatus {

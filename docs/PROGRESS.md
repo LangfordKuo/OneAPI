@@ -167,6 +167,18 @@
 - 发布后发现 Linux/macOS 归档中的二进制权限为 0644，已重新打包并覆盖 v0.1.1 资产；Release workflow 已补 `chmod +x`，后续版本不会再出现该问题。
 - 修复空数据库仪表盘 500：`COALESCE(AVG(latency_ms), 0)` 在无数据时返回 INTEGER，与 SQLx 的 `f64` 不兼容；改为 `0.0`，并新增空库 summary/timeseries/breakdown 回归测试（72 个测试通过）。
 
+## 审查计划阶段 A（v0.1.2 修复与一致性）
+
+- 新增 `docs/REVIEW_PLAN.md`，按阶段记录审查结论与验收标准。
+- 设置项接线：`default_max_tokens` 用于跨协议编码到 Anthropic 时的缺省值；`nonstream_timeout_seconds` / `stream_idle_timeout_seconds` 作为渠道未配置 `timeout_ms` 时的默认超时；`site_name` 通过公开 `GET /api/site` 用于登录页、安装页、侧边栏与浏览器标题。
+- 新增 `POST /v1/messages/count_tokens`：Anthropic 上游原样转发，其他上游按字符数估算并返回 Anthropic 形状。
+- 通配符渠道的模型列表回退到最近 30 天 `usage_logs` 中出现的模型；Playground 模型选择改为可自由输入的 AutoComplete。
+- 渠道测试/拉取模型新增未保存配置接口 `POST /api/channels/test` 与 `/api/channels/fetch-models`；前端抽屉直接提交当前表单。
+- 转发客户端白名单请求头（`anthropic-beta`、`openai-beta` 等），鉴权头与 Cookie 不转发；渠道 `extra_headers` 优先。
+- 新增迁移 `0002_usage_cache_creation.sql`，日志记录并展示 `cache_creation_tokens`。
+- 后端校验渠道 `weight`（1–1000）与 `priority`（-10000–10000）；日志页空态文案修正。
+- 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（79 个测试）、`npm run build` 全部通过。
+
 ## AOCI 状态
 
 - 版本：`0.1.0-rc22`，二进制 `/usr/local/bin/aoci`。

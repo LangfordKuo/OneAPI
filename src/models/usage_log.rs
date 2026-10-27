@@ -20,6 +20,7 @@ pub struct UsageLogRow {
     pub completion_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
     pub cached_tokens: Option<i64>,
+    pub cache_creation_tokens: Option<i64>,
     pub reasoning_tokens: Option<i64>,
     pub latency_ms: i64,
     pub first_token_ms: Option<i64>,
@@ -44,8 +45,8 @@ pub struct LogFilters {
 const SELECT: &str = "SELECT l.id, l.request_id, l.source, l.api_key_id, l.channel_id,
     l.model, l.upstream_model, l.inbound_protocol, l.upstream_protocol, l.stream,
     l.status_code, l.attempts, l.error_type, l.error_message, l.prompt_tokens,
-    l.completion_tokens, l.total_tokens, l.cached_tokens, l.reasoning_tokens,
-    l.latency_ms, l.first_token_ms, l.created_at,
+    l.completion_tokens, l.total_tokens, l.cached_tokens, l.cache_creation_tokens,
+    l.reasoning_tokens, l.latency_ms, l.first_token_ms, l.created_at,
     k.name AS api_key_name, c.name AS channel_name
     FROM usage_logs l
     LEFT JOIN api_keys k ON k.id = l.api_key_id
@@ -141,6 +142,22 @@ pub async fn find_by_request_id(
         .bind(request_id)
         .fetch_optional(pool)
         .await
+}
+
+/// Distinct models observed recently. Used to populate model pickers for
+/// channels that only declare the `*` wildcard.
+pub async fn recent_models(pool: &SqlitePool, since: i64, limit: i64) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT model FROM usage_logs
+         WHERE created_at >= ?
+         GROUP BY model
+         ORDER BY MAX(created_at) DESC
+         LIMIT ?",
+    )
+    .bind(since)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn detail_bodies(

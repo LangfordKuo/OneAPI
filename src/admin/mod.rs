@@ -38,6 +38,11 @@ pub fn routes() -> Router<AppState> {
                 .put(channels::update)
                 .delete(channels::delete),
         )
+        .route("/api/channels/test", post(channels::probe_test))
+        .route(
+            "/api/channels/fetch-models",
+            post(channels::probe_fetch_models),
+        )
         .route("/api/channels/{id}/test", post(channels::test))
         .route(
             "/api/channels/{id}/fetch-models",

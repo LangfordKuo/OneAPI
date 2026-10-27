@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -10,7 +10,7 @@ use axum::{
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 
-use crate::{error::AppError, models, protocol::Protocol, state::AppState};
+use crate::{error::AppError, models, protocol::Protocol, state::AppState, upstream};
 
 use auth::ApiKeyAuth;
 
@@ -31,6 +31,7 @@ pub fn routes() -> Router<AppState> {
             get(get_response).delete(delete_response),
         )
         .route("/v1/messages", post(messages))
+        .route("/v1/messages/count_tokens", post(count_tokens))
         .route("/v1/models", get(list_models))
         .route("/v1/models/{id}", get(get_model))
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
@@ -62,6 +63,104 @@ async fn messages(
     Json(body): Json<Value>,
 ) -> Result<Response, AppError> {
     execute::proxy(&state, &auth, Protocol::Anthropic, &headers, body).await
+}
+
+/// Anthropic `count_tokens` endpoint. When an Anthropic upstream is available we
+/// forward the request as-is; otherwise we return a clearly approximate estimate
+/// so clients that probe context size keep working across providers.
+async fn count_tokens(
+    State(state): State<AppState>,
+    _auth: ApiKeyAuth,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Response, AppError> {
+    if let Some(model) = body
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        let channels = models::channel::list(&state.db).await?;
+        if let Some(candidate) = select::candidates(channels, model)
+            .into_iter()
+            .find(|candidate| candidate.channel.kind == "anthropic")
+        {
+            let defaults = models::setting::GatewayDefaults::load(&state.db).await?;
+            let mut request_body = body.clone();
+            if let Some(object) = request_body.as_object_mut() {
+                object.insert("model".into(), json!(candidate.upstream_model));
+                object.remove("stream");
+            }
+
+            let client =
+                match upstream::build_client(&candidate.channel, defaults.nonstream_timeout_ms) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        return Ok(error::client_error(
+                            Protocol::Anthropic,
+                            StatusCode::BAD_GATEWAY,
+                            error.to_string(),
+                            "upstream_configuration_error",
+                        ))
+                    }
+                };
+            let url = format!(
+                "{}/messages/count_tokens",
+                candidate.channel.base_url.trim_end_matches('/')
+            );
+            let request = match upstream::apply_auth(
+                client.post(url).json(&request_body),
+                &candidate.channel,
+                &state.crypto,
+                &headers,
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    return Ok(error::client_error(
+                        Protocol::Anthropic,
+                        StatusCode::BAD_GATEWAY,
+                        error.to_string(),
+                        "upstream_configuration_error",
+                    ))
+                }
+            };
+
+            match request.send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    let text = response.text().await.unwrap_or_default();
+                    return Ok((status, [(header::CONTENT_TYPE, "application/json")], text)
+                        .into_response());
+                }
+                Err(error) => {
+                    return Ok(error::client_error(
+                        Protocol::Anthropic,
+                        StatusCode::BAD_GATEWAY,
+                        error.to_string(),
+                        "upstream_unreachable",
+                    ))
+                }
+            }
+        }
+    }
+
+    Ok(Json(json!({ "input_tokens": estimate_input_tokens(&body) })).into_response())
+}
+
+fn estimate_input_tokens(body: &Value) -> u64 {
+    fn char_count(value: &Value) -> u64 {
+        match value {
+            Value::String(text) => text.chars().count() as u64,
+            Value::Array(items) => items.iter().map(char_count).sum(),
+            Value::Object(object) => object
+                .iter()
+                .filter(|(key, _)| key.as_str() != "model" && key.as_str() != "stream")
+                .map(|(_, value)| char_count(value))
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    char_count(body).div_ceil(4).max(1)
 }
 
 async fn get_response(
@@ -161,6 +260,7 @@ async fn get_model(
 async fn available_models(pool: &sqlx::SqlitePool) -> sqlx::Result<Vec<String>> {
     let channels = models::channel::list(pool).await?;
     let mut result = BTreeSet::new();
+    let mut has_wildcard = false;
 
     for channel in channels {
         if channel.enabled == 0 {
@@ -168,6 +268,19 @@ async fn available_models(pool: &sqlx::SqlitePool) -> sqlx::Result<Vec<String>> 
         }
         let channel_models: Vec<String> = serde_json::from_str(&channel.models).unwrap_or_default();
         for model in channel_models {
+            if model == "*" {
+                has_wildcard = true;
+            } else if !model.is_empty() {
+                result.insert(model);
+            }
+        }
+    }
+
+    // Wildcard channels accept any model, so surface models seen in recent
+    // traffic to keep model pickers useful.
+    if has_wildcard {
+        let since = models::now_ms() - 30 * 24 * 60 * 60 * 1000;
+        for model in models::usage_log::recent_models(pool, since, 200).await? {
             if !model.is_empty() && model != "*" {
                 result.insert(model);
             }
@@ -1189,5 +1302,157 @@ mod tests {
             server.received_requests().await.unwrap_or_default().len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn count_tokens_estimates_without_anthropic_upstream() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let router = app::router(state);
+
+        let (status, body) = send(
+            router,
+            "/v1/messages/count_tokens",
+            Some(&key),
+            json!({
+                "model": "claude-test",
+                "messages": [{"role": "user", "content": "12345678"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["input_tokens"].as_u64().unwrap_or(0) >= 2);
+    }
+
+    #[tokio::test]
+    async fn count_tokens_is_forwarded_to_anthropic_upstream() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/count_tokens"))
+            .and(header("x-api-key", "upstream-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 42})))
+            .mount(&server)
+            .await;
+
+        seed_channel(
+            &state,
+            "anthropic",
+            &format!("{}/v1", server.uri()),
+            &["claude-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let router = app::router(state);
+        let (status, body) = send(
+            router,
+            "/v1/messages/count_tokens",
+            Some(&key),
+            json!({
+                "model": "claude-test",
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["input_tokens"], json!(42));
+
+        let requests = server.received_requests().await.expect("requests");
+        let upstream: Value =
+            serde_json::from_slice(&requests[0].body).expect("upstream request json");
+        assert_eq!(upstream["model"], json!("claude-test"));
+        assert!(upstream.get("stream").is_none());
+    }
+
+    #[tokio::test]
+    async fn wildcard_channels_list_recent_models() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+
+        seed_channel(
+            &state,
+            "openai_chat",
+            "https://example.invalid/v1",
+            &["*"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        sqlx::query(
+            "INSERT INTO usage_logs
+             (request_id, source, model, inbound_protocol, upstream_protocol, stream,
+              status_code, attempts, latency_ms, created_at)
+             VALUES ('req-seen', 'gateway', 'gpt-seen', 'chat', 'chat', 0, 200, 1, 10, ?)",
+        )
+        .bind(models::now_ms())
+        .execute(&state.db)
+        .await
+        .expect("usage log");
+
+        let router = app::router(state);
+        let (status, body) = send_get(router, "/v1/models", &key).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"][0]["id"], json!("gpt-seen"));
+    }
+
+    #[tokio::test]
+    async fn default_max_tokens_setting_is_used_for_anthropic_upstream() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_mock",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            })))
+            .mount(&server)
+            .await;
+
+        seed_channel(
+            &state,
+            "anthropic",
+            &format!("{}/v1", server.uri()),
+            &["claude-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+        models::setting::upsert(&state.db, "default_max_tokens", "2048")
+            .await
+            .expect("setting");
+
+        let router = app::router(state);
+        let (status, _) = send(
+            router,
+            "/v1/chat/completions",
+            Some(&key),
+            json!({
+                "model": "claude-test",
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let requests = server.received_requests().await.expect("requests");
+        let upstream: Value =
+            serde_json::from_slice(&requests[0].body).expect("upstream request json");
+        assert_eq!(upstream["max_tokens"], json!(2048));
     }
 }

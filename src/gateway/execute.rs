@@ -77,9 +77,8 @@ pub async fn proxy_with_identity(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let store_request_bodies = models::setting::get_bool(&state.db, "store_request_bodies", false)
-        .await
-        .unwrap_or(false);
+    let defaults = models::setting::GatewayDefaults::load(&state.db).await?;
+    let store_request_bodies = defaults.store_request_bodies;
     let detail_request =
         store_request_bodies.then(|| serde_json::to_string(&body).unwrap_or_default());
 
@@ -250,6 +249,8 @@ pub async fn proxy_with_identity(
             client_wants_usage,
             store_request_bodies,
             detail_request.clone(),
+            headers,
+            defaults,
         )
         .await;
     }
@@ -297,6 +298,9 @@ pub async fn proxy_with_identity(
                     ));
                 }
             };
+            if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
+                ir.max_tokens = Some(defaults.default_max_tokens);
+            }
             ir.model = candidate.upstream_model.clone();
             match upstream.encode_request(&ir) {
                 Ok(value) => value,
@@ -322,7 +326,7 @@ pub async fn proxy_with_identity(
             }
         };
 
-        let client = match upstream::build_client(channel) {
+        let client = match upstream::build_client(channel, defaults.nonstream_timeout_ms) {
             Ok(client) => client,
             Err(error) => {
                 last_message = error.to_string();
@@ -339,8 +343,13 @@ pub async fn proxy_with_identity(
             }
         };
 
-        let request = match upstream::build_request(&client, channel, &state.crypto, &request_body)
-        {
+        let request = match upstream::build_request(
+            &client,
+            channel,
+            &state.crypto,
+            &request_body,
+            headers,
+        ) {
             Ok(request) => request,
             Err(error) => {
                 last_message = error.to_string();
@@ -690,6 +699,8 @@ async fn proxy_stream(
     client_wants_usage: bool,
     store_request_bodies: bool,
     detail_request: Option<String>,
+    headers: &HeaderMap,
+    defaults: models::setting::GatewayDefaults,
 ) -> Result<Response, AppError> {
     let mut attempts = 0u32;
     let mut last_channel: Option<Channel> = None;
@@ -741,6 +752,9 @@ async fn proxy_stream(
                     ));
                 }
             };
+            if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
+                ir.max_tokens = Some(defaults.default_max_tokens);
+            }
             ir.model = candidate.upstream_model.clone();
             match upstream.encode_request(&ir) {
                 Ok(value) => value,
@@ -805,8 +819,13 @@ async fn proxy_stream(
             }
         };
 
-        let request = match upstream::build_request(&client, channel, &state.crypto, &request_body)
-        {
+        let request = match upstream::build_request(
+            &client,
+            channel,
+            &state.crypto,
+            &request_body,
+            headers,
+        ) {
             Ok(request) => request.header(header::ACCEPT, "text/event-stream"),
             Err(error) => {
                 last_message = error.to_string();
@@ -901,7 +920,7 @@ async fn proxy_stream(
             upstream_model: candidate.upstream_model.clone(),
             started,
             attempts,
-            idle_timeout: upstream::stream_idle_timeout(channel),
+            idle_timeout: upstream::stream_idle_timeout(channel, defaults.stream_idle_timeout_ms),
             passthrough: upstream == inbound,
             client_wants_usage,
             store_request_detail: store_request_bodies,

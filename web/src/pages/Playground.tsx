@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   Alert,
+  AutoComplete,
   Button,
   Card,
   Col,
@@ -500,16 +501,15 @@ export default function Playground() {
               options={PROTOCOL_OPTIONS}
               onChange={(value) => setProtocol(value as ProtocolName)}
             />
-            <Select
-              showSearch
-              placeholder="选择模型"
+            <AutoComplete
+              placeholder="选择或输入模型"
               value={model}
-              loading={modelsQuery.isLoading}
               options={(modelsQuery.data?.models ?? []).map((item) => ({
                 value: item,
                 label: item,
               }))}
               onChange={(value) => setModel(value)}
+              style={{ width: '100%' }}
             />
             <Space>
               <Typography.Text>流式</Typography.Text>

@@ -465,3 +465,69 @@ async fn playground_proxies_and_logs_both_modes() {
     assert_eq!(rows[1].0, "playground");
     assert_eq!(rows[1].1, None);
 }
+
+#[tokio::test]
+async fn channel_probe_works_before_saving() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat_response("pong")))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "gpt-a"}]})))
+        .mount(&server)
+        .await;
+
+    let router = app::router(state.clone());
+    let draft = json!({
+        "name": "draft",
+        "kind": "openai_chat",
+        "base_url": format!("{}/v1", server.uri()),
+        "api_key": "upstream-key",
+        "models": ["gpt-test"],
+    });
+
+    let (status, body) =
+        admin_post(router.clone(), "/api/channels/test", &token, draft.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], json!(true));
+
+    let (status, body) = admin_post(router, "/api/channels/fetch-models", &token, draft).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["models"], json!(["gpt-a"]));
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+        .fetch_one(&state.db)
+        .await
+        .expect("channel count");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn channel_weight_is_bounded() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let router = app::router(state);
+
+    let (status, _) = admin_post(
+        router,
+        "/api/channels",
+        &token,
+        json!({
+            "name": "too-heavy",
+            "kind": "openai_chat",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "upstream-key",
+            "models": ["gpt-test"],
+            "weight": 1001,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

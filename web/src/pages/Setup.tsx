@@ -15,6 +15,7 @@ import type { SetupResult, SetupStatus } from '../api/types';
 
 interface Props {
   status: SetupStatus;
+  siteName?: string;
   onSuccess: () => void;
 }
 
@@ -25,7 +26,7 @@ interface SetupFormValues {
   site_name?: string;
 }
 
-export default function Setup({ status, onSuccess }: Props) {
+export default function Setup({ status, siteName = 'OneAPI', onSuccess }: Props) {
   const [result, setResult] = useState<SetupResult | null>(null);
 
   const mutation = useMutation({
@@ -73,7 +74,7 @@ export default function Setup({ status, onSuccess }: Props) {
     <div className="login-shell">
       <Card style={{ width: 680 }}>
         <Typography.Title level={3} style={{ marginTop: 0 }}>
-          OneAPI 首次安装
+          {siteName} 首次安装
         </Typography.Title>
         <Alert
           type="info"
@@ -93,7 +94,7 @@ export default function Setup({ status, onSuccess }: Props) {
 
         <Form<SetupFormValues>
           layout="vertical"
-          initialValues={{ username: 'admin', site_name: 'OneAPI' }}
+          initialValues={{ username: 'admin', site_name: siteName }}
           onFinish={(values) => mutation.mutate(values)}
         >
           <Form.Item
