@@ -5,6 +5,8 @@ pub struct Channel {
     pub id: i64,
     pub name: String,
     pub kind: String,
+    pub kinds: String,
+    pub fallback_kind: Option<String>,
     pub base_url: String,
     pub api_key_enc: String,
     pub auth_header: String,
@@ -28,6 +30,8 @@ pub struct Channel {
 pub struct ChannelWrite {
     pub name: String,
     pub kind: String,
+    pub kinds: String,
+    pub fallback_kind: String,
     pub base_url: String,
     pub api_key_enc: String,
     pub auth_header: String,
@@ -41,9 +45,61 @@ pub struct ChannelWrite {
     pub enabled: i64,
 }
 
-const SELECT_COLUMNS: &str = "id, name, kind, base_url, api_key_enc, auth_header, models,
+const SELECT_COLUMNS: &str =
+    "id, name, kind, kinds, fallback_kind, base_url, api_key_enc, auth_header, models,
     model_mapping, extra_headers, proxy_url, priority, weight, timeout_ms, enabled,
     last_error, last_error_at, disabled_until, consecutive_failures, created_at, updated_at";
+
+pub fn is_known_kind(kind: &str) -> bool {
+    matches!(kind, "openai_chat" | "openai_responses" | "anthropic")
+}
+
+/// Map an inbound protocol name (`chat`/`responses`/`anthropic`) to the channel
+/// kind string used in storage.
+pub fn kind_for_protocol(protocol: &str) -> &'static str {
+    match protocol {
+        "responses" => "openai_responses",
+        "anthropic" => "anthropic",
+        _ => "openai_chat",
+    }
+}
+
+/// Supported upstream kinds in configuration order, falling back to the legacy
+/// single `kind` column for rows created before `kinds` existed.
+pub fn supported_kinds(channel: &Channel) -> Vec<String> {
+    let mut kinds = Vec::new();
+    if let Ok(parsed) = serde_json::from_str::<Vec<String>>(&channel.kinds) {
+        for kind in parsed {
+            if is_known_kind(&kind) && !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+    }
+    if kinds.is_empty() {
+        kinds.push(if is_known_kind(&channel.kind) {
+            channel.kind.clone()
+        } else {
+            "openai_chat".to_string()
+        });
+    }
+    kinds
+}
+
+/// Kind to use upstream for an inbound kind: the same kind when supported,
+/// otherwise the configured fallback, otherwise the first supported kind.
+pub fn upstream_kind(channel: &Channel, inbound_kind: &str) -> String {
+    let kinds = supported_kinds(channel);
+    if kinds.iter().any(|kind| kind == inbound_kind) {
+        return inbound_kind.to_string();
+    }
+    channel
+        .fallback_kind
+        .as_deref()
+        .filter(|kind| kinds.iter().any(|item| item == kind))
+        .or_else(|| kinds.first().map(String::as_str))
+        .unwrap_or("openai_chat")
+        .to_string()
+}
 
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<Channel>> {
     let query = format!("SELECT {SELECT_COLUMNS} FROM channels ORDER BY priority DESC, id ASC");
@@ -58,12 +114,14 @@ pub async fn get(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<Channel>> {
 pub async fn create(pool: &SqlitePool, input: &ChannelWrite, now: i64) -> sqlx::Result<Channel> {
     let result = sqlx::query(
         "INSERT INTO channels
-         (name, kind, base_url, api_key_enc, auth_header, models, model_mapping, extra_headers,
+         (name, kind, kinds, fallback_kind, base_url, api_key_enc, auth_header, models, model_mapping, extra_headers,
           proxy_url, priority, weight, timeout_ms, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&input.name)
     .bind(&input.kind)
+    .bind(&input.kinds)
+    .bind(&input.fallback_kind)
     .bind(&input.base_url)
     .bind(&input.api_key_enc)
     .bind(&input.auth_header)
@@ -93,13 +151,15 @@ pub async fn update(
 ) -> sqlx::Result<bool> {
     let result = sqlx::query(
         "UPDATE channels SET
-            name = ?, kind = ?, base_url = ?, api_key_enc = ?, auth_header = ?, models = ?,
+            name = ?, kind = ?, kinds = ?, fallback_kind = ?, base_url = ?, api_key_enc = ?, auth_header = ?, models = ?,
             model_mapping = ?, extra_headers = ?, proxy_url = ?, priority = ?, weight = ?,
             timeout_ms = ?, enabled = ?, updated_at = ?
          WHERE id = ?",
     )
     .bind(&input.name)
     .bind(&input.kind)
+    .bind(&input.kinds)
+    .bind(&input.fallback_kind)
     .bind(&input.base_url)
     .bind(&input.api_key_enc)
     .bind(&input.auth_header)
@@ -254,5 +314,78 @@ mod tests {
         assert_eq!(failures, 0);
         assert_eq!(disabled_until, None);
         assert_eq!(last_error, None);
+    }
+
+    fn config_channel(kinds: &str, fallback: Option<&str>, legacy_kind: &str) -> Channel {
+        Channel {
+            id: 1,
+            name: "test".to_string(),
+            kind: legacy_kind.to_string(),
+            kinds: kinds.to_string(),
+            fallback_kind: fallback.map(str::to_string),
+            base_url: "http://localhost".to_string(),
+            api_key_enc: String::new(),
+            auth_header: "bearer".to_string(),
+            models: "[]".to_string(),
+            model_mapping: "{}".to_string(),
+            extra_headers: "{}".to_string(),
+            proxy_url: None,
+            priority: 0,
+            weight: 1,
+            timeout_ms: None,
+            enabled: 1,
+            last_error: None,
+            last_error_at: None,
+            disabled_until: None,
+            consecutive_failures: 0,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn supported_kinds_prefers_configured_values_and_dedups() {
+        let channel = config_channel(
+            r#"["openai_chat","anthropic","openai_chat","unknown"]"#,
+            None,
+            "openai_responses",
+        );
+        assert_eq!(supported_kinds(&channel), vec!["openai_chat", "anthropic"]);
+    }
+
+    #[test]
+    fn supported_kinds_falls_back_to_legacy_kind() {
+        let channel = config_channel("[]", None, "anthropic");
+        assert_eq!(supported_kinds(&channel), vec!["anthropic"]);
+    }
+
+    #[test]
+    fn upstream_kind_matches_native_protocol_first() {
+        let channel = config_channel(
+            r#"["openai_chat","openai_responses"]"#,
+            Some("openai_chat"),
+            "openai_chat",
+        );
+        assert_eq!(
+            upstream_kind(&channel, "openai_responses"),
+            "openai_responses"
+        );
+        assert_eq!(upstream_kind(&channel, "anthropic"), "openai_chat");
+    }
+
+    #[test]
+    fn upstream_kind_uses_fallback_or_first_supported() {
+        let channel = config_channel(
+            r#"["openai_chat","openai_responses"]"#,
+            Some("openai_responses"),
+            "openai_chat",
+        );
+        assert_eq!(upstream_kind(&channel, "anthropic"), "openai_responses");
+
+        let no_fallback = config_channel(r#"["openai_chat","anthropic"]"#, None, "openai_chat");
+        assert_eq!(
+            upstream_kind(&no_fallback, "openai_responses"),
+            "openai_chat"
+        );
     }
 }

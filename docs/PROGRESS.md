@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-28
-- 当前阶段：v0.1.4 已发布；日志页新增每请求 tok/s（`main`）
+- 当前阶段：v0.1.5 已发布（日志 tok/s、渠道多协议与自动匹配，`main`）
 - 当前分支：`main`
-- 最近发布：`v0.1.4`
+- 最近发布：`v0.1.5`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -200,6 +200,23 @@
 - `/api/logs` 与 `/api/logs/{request_id}` 新增 `tokens_per_second`：按输出 tokens 除以生成耗时计算；流式请求扣除首 token 等待时间，非流式使用整个请求耗时。
 - 日志列表新增“速度”列，详情抽屉新增“生成速度”，统一显示为 `xx.x tok/s`；无 token 或耗时为零时显示 `-`。
 - 验证：新增 4 个计算单元测试，并在日志集成测试中断言列表与详情速度一致；101 个测试通过。
+
+## 渠道多协议
+
+- 单个渠道新增 `kinds`（支持的协议集合）与 `fallback_kind`（协议不匹配时的转换目标）；支持同时勾选 Chat Completions、Responses 与 Anthropic。
+- 路由时若渠道支持入站协议，则原样转发、不做转换；否则转换到 `fallback_kind`，未配置时使用第一个支持的协议。
+- 新增迁移 `0004_channel_kinds.sql`：为已有渠道回填单协议 `kinds` 与 `fallback_kind`，旧字段 `kind` 保留为主协议以兼容旧客户端。
+- 设置页渠道表单改为多选协议，并显示当前可选的转换目标；自定义请求头与模型映射仍由整个渠道共享。
+- `count_tokens` 只在渠道原生支持 Anthropic 时转发，否则保持原有字符估算。
+- 验证：新增 4 个协议选择单元测试、2 个网关集成测试（原生匹配不转换、缺失协议走 fallback）与 1 个渠道 CRUD 测试；108 个测试通过。
+
+## v0.1.5 发布记录
+
+- 版本号从 `0.1.4` 升至 `0.1.5`，包含日志每请求 tok/s 与渠道多协议。
+- 渠道可同时配置 Chat Completions、Responses、Anthropic；入站协议匹配时原样转发，否则转换到配置的 `fallback_kind`。
+- 新增迁移 `0004_channel_kinds.sql`，旧渠道自动回填 `kinds` 与 `fallback_kind`；已在 v0.1.4 数据目录上验证升级。
+- 日志列表与详情新增 `tokens_per_second`，流式按扣除首 token 等待的生成耗时计算。
+- 验证：108 个测试通过，`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`npm run lint`、`npm run build` 全部通过；release 二进制端到端实测 54 项断言通过。
 
 ## 审查计划阶段 A（v0.1.2 修复与一致性）
 

@@ -205,7 +205,7 @@ pub async fn proxy_with_identity(
     };
 
     let channels = state.cache.channels(&state.db).await?;
-    let candidates = select::candidates(channels, &model);
+    let candidates = select::candidates(channels, &model, inbound);
     if candidates.is_empty() {
         let message = "no channel available for this model";
         ctx.record(
@@ -274,7 +274,7 @@ pub async fn proxy_with_identity(
         };
         ctx.attempts += 1;
         let channel = &candidate.channel;
-        let upstream = protocol_for_kind(&channel.kind);
+        let upstream = protocol_for_kind(&candidate.upstream_kind);
         last_channel = Some(channel.clone());
         last_upstream_model = Some(candidate.upstream_model.clone());
         last_upstream = upstream;
@@ -356,6 +356,7 @@ pub async fn proxy_with_identity(
             &client,
             channel,
             &state.crypto,
+            &candidate.upstream_kind,
             &request_body,
             headers,
         ) {
@@ -721,7 +722,7 @@ async fn proxy_stream(
         };
         attempts += 1;
         let channel = &candidate.channel;
-        let upstream = protocol_for_kind(&channel.kind);
+        let upstream = protocol_for_kind(&candidate.upstream_kind);
         last_channel = Some(channel.clone());
         last_upstream_model = Some(candidate.upstream_model.clone());
         last_upstream = upstream;
@@ -831,6 +832,7 @@ async fn proxy_stream(
             &client,
             channel,
             &state.crypto,
+            &candidate.upstream_kind,
             &request_body,
             headers,
         ) {

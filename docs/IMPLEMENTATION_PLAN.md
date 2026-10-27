@@ -1,6 +1,6 @@
 # OneAPI 实施计划
 
-- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头设置
+- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议
 - 最后更新：2026-10-27
 - 关联文档：`docs/PROGRESS.md`
 - 适用仓库：`/root/OneAPI`
@@ -70,7 +70,7 @@ SQLite，时间统一存 unix 毫秒 `INTEGER`。
 
 - `admin(id=1, username, password_hash, created_at)`
 - `sessions(token_hash PK, admin_id, created_at, expires_at)`
-- `channels(id, name, kind TEXT CHECK in ('openai_chat','openai_responses','anthropic'), base_url, api_key_enc, auth_header TEXT 'bearer'|'x-api-key', models TEXT JSON, model_mapping TEXT JSON, extra_headers TEXT JSON, proxy_url, priority INT, weight INT, timeout_ms, enabled, last_error, last_error_at, disabled_until, consecutive_failures, created_at, updated_at)`
+- `channels(id, name, kind TEXT CHECK in ('openai_chat','openai_responses','anthropic'), kinds TEXT JSON, fallback_kind TEXT, base_url, api_key_enc, auth_header TEXT 'bearer'|'x-api-key', models TEXT JSON, model_mapping TEXT JSON, extra_headers TEXT JSON, proxy_url, priority INT, weight INT, timeout_ms, enabled, last_error, last_error_at, disabled_until, consecutive_failures, created_at, updated_at)`
 - `api_keys(id, name, key_hash UNIQUE, key_prefix, enabled, expires_at, last_used_at, created_at)`
 - `usage_logs(id, request_id, source 'gateway'|'playground', api_key_id, channel_id, model, upstream_model, inbound_protocol, upstream_protocol, stream, status_code, attempts, error_type, error_message, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, latency_ms, first_token_ms, created_at)`
 - `responses(id 'resp_...' PK, api_key_id, model, request_json, response_json, status, created_at)`
@@ -239,6 +239,8 @@ GET /healthz  /readyz
 - 2026-10-28：新增设置项 `client_ip_header`：可指定 `CF-Connecting-IP`、`X-Forwarded-For`、`X-Real-IP` 等请求头解析真实客户端 IP，登录失败限速按解析后的 IP 计数；头缺失或无效时回退 TCP 对端，仅在可信代理后配置。
 - 2026-10-28：版本升至 `0.1.4` 并发布上述客户端 IP 请求头功能。
 - 2026-10-28：日志列表与详情新增 `tokens_per_second`：输出 tokens 除以生成耗时，流式扣除首 token 等待；前端显示为 `tok/s`。
+- 2026-10-28：渠道支持多上游协议：新增 `kinds` 与 `fallback_kind`，入站协议匹配时原样转发，否则转换到配置的 fallback；迁移 `0004_channel_kinds.sql` 回填旧渠道。
+- 2026-10-28：版本升至 `0.1.5`，发布日志 tok/s 与渠道多协议功能。
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。

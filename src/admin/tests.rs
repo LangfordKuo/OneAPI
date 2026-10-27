@@ -57,6 +57,8 @@ async fn seed_channel(state: &AppState, base_url: &str) -> i64 {
     let write = ChannelWrite {
         name: "test-chat".to_string(),
         kind: "openai_chat".to_string(),
+        kinds: r#"["openai_chat"]"#.to_string(),
+        fallback_kind: "openai_chat".to_string(),
         base_url: base_url.to_string(),
         api_key_enc: state.crypto.encrypt("upstream-key").expect("encrypt"),
         auth_header: "bearer".to_string(),
@@ -680,6 +682,67 @@ async fn login_limiter_uses_configured_client_ip_header() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn channel_supports_multiple_protocols() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let router = app::router(state);
+
+    let (status, body) = admin_post(
+        router.clone(),
+        "/api/channels",
+        &token,
+        json!({
+            "name": "multi",
+            "kinds": ["openai_chat", "openai_responses", "anthropic"],
+            "fallback_kind": "openai_responses",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "upstream-key",
+            "models": ["multi-test"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        body["kinds"],
+        json!(["openai_chat", "openai_responses", "anthropic"])
+    );
+    assert_eq!(body["fallback_kind"], json!("openai_responses"));
+    let channel_id = body["id"].as_i64().expect("id");
+
+    let (status, body) = admin_put(
+        router.clone(),
+        &format!("/api/channels/{channel_id}"),
+        &token,
+        json!({
+            "name": "multi",
+            "kinds": ["anthropic"],
+            "fallback_kind": "anthropic",
+            "base_url": "https://example.invalid/v1",
+            "models": ["multi-test"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kinds"], json!(["anthropic"]));
+    assert_eq!(body["fallback_kind"], json!("anthropic"));
+
+    let (status, _) = admin_put(
+        router,
+        &format!("/api/channels/{channel_id}"),
+        &token,
+        json!({
+            "name": "multi",
+            "kinds": ["openai_chat"],
+            "fallback_kind": "anthropic",
+            "base_url": "https://example.invalid/v1",
+            "models": ["multi-test"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

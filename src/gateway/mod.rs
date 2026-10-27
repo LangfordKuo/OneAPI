@@ -80,9 +80,13 @@ async fn count_tokens(
         .filter(|value| !value.is_empty())
     {
         let channels = state.cache.channels(&state.db).await?;
-        if let Some(candidate) = select::candidates(channels, model)
+        if let Some(candidate) = select::candidates(channels, model, Protocol::Anthropic)
             .into_iter()
-            .find(|candidate| candidate.channel.kind == "anthropic")
+            .find(|candidate| {
+                models::channel::supported_kinds(&candidate.channel)
+                    .iter()
+                    .any(|kind| kind == "anthropic")
+            })
         {
             let defaults = models::setting::GatewayDefaults::load(&state.db).await?;
             let mut request_body = body.clone();
@@ -111,6 +115,7 @@ async fn count_tokens(
                 client.post(url).json(&request_body),
                 &candidate.channel,
                 &state.crypto,
+                "anthropic",
                 &headers,
             ) {
                 Ok(request) => request,
@@ -363,6 +368,8 @@ mod tests {
         let write = ChannelWrite {
             name: format!("test-{kind}-{priority}"),
             kind: kind.to_string(),
+            kinds: json!([kind]).to_string(),
+            fallback_kind: kind.to_string(),
             base_url: base_url.to_string(),
             api_key_enc: state
                 .crypto
@@ -373,6 +380,42 @@ mod tests {
             } else {
                 "bearer".to_string()
             },
+            models: serde_json::to_string(&models).expect("models json"),
+            model_mapping: "{}".to_string(),
+            extra_headers: "{}".to_string(),
+            proxy_url: None,
+            priority,
+            weight: 1,
+            timeout_ms: None,
+            enabled: 1,
+        };
+
+        models::channel::create(&state.db, &write, now_ms())
+            .await
+            .expect("create channel")
+            .id
+    }
+
+    async fn seed_channel_with_kinds(
+        state: &AppState,
+        kinds: &[&str],
+        fallback_kind: &str,
+        base_url: &str,
+        models: &[&str],
+        priority: i64,
+        upstream_key: &str,
+    ) -> i64 {
+        let write = ChannelWrite {
+            name: format!("test-multi-{priority}"),
+            kind: kinds[0].to_string(),
+            kinds: serde_json::to_string(kinds).expect("kinds json"),
+            fallback_kind: fallback_kind.to_string(),
+            base_url: base_url.to_string(),
+            api_key_enc: state
+                .crypto
+                .encrypt(upstream_key)
+                .expect("encrypt upstream key"),
+            auth_header: "bearer".to_string(),
             models: serde_json::to_string(&models).expect("models json"),
             model_mapping: "{}".to_string(),
             extra_headers: "{}".to_string(),
@@ -619,6 +662,105 @@ mod tests {
             upstream_body["messages"][0]["content"][0]["text"],
             json!("hi")
         );
+    }
+
+    #[tokio::test]
+    async fn channel_matching_inbound_protocol_is_not_converted() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_native",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [{"type": "text", "text": "native"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {"input_tokens": 3, "output_tokens": 1},
+            })))
+            .mount(&server)
+            .await;
+
+        seed_channel_with_kinds(
+            &state,
+            &["openai_chat", "anthropic"],
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["claude-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let router = app::router(state.clone());
+        let (status, body) = send(
+            router,
+            "/v1/messages",
+            Some(&key),
+            json!({
+                "model": "claude-test",
+                "max_tokens": 32,
+                "top_k": 5,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["content"][0]["text"], json!("native"));
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests[0].url.path(), "/v1/messages");
+    }
+
+    #[tokio::test]
+    async fn unsupported_inbound_protocol_uses_configured_fallback() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_success_body("converted")))
+            .mount(&server)
+            .await;
+
+        seed_channel_with_kinds(
+            &state,
+            &["openai_chat", "openai_responses"],
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["claude-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let router = app::router(state.clone());
+        let (status, body) = send(
+            router,
+            "/v1/messages",
+            Some(&key),
+            json!({
+                "model": "claude-test",
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["type"], json!("message"));
+        assert_eq!(body["content"][0]["text"], json!("converted"));
+
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests[0].url.path(), "/v1/chat/completions");
+        let upstream_body: Value =
+            serde_json::from_slice(&requests[0].body).expect("upstream request json");
+        assert_eq!(upstream_body["model"], json!("claude-test"));
     }
 
     #[tokio::test]

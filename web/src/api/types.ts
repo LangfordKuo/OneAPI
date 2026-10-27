@@ -5,6 +5,8 @@ export interface Channel {
   id: number;
   name: string;
   kind: ChannelKind;
+  kinds: ChannelKind[];
+  fallback_kind: ChannelKind;
   base_url: string;
   auth_header: 'bearer' | 'x-api-key';
   api_key_masked: string;

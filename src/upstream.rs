@@ -131,11 +131,11 @@ pub fn endpoint_path(kind: &str) -> &'static str {
     }
 }
 
-pub fn endpoint_url(channel: &Channel) -> String {
+pub fn endpoint_url(channel: &Channel, kind: &str) -> String {
     format!(
         "{}/{}",
         channel.base_url.trim_end_matches('/'),
-        endpoint_path(&channel.kind)
+        endpoint_path(kind)
     )
 }
 
@@ -147,6 +147,7 @@ pub fn apply_auth(
     request: RequestBuilder,
     channel: &Channel,
     crypto: &Crypto,
+    kind: &str,
     client_headers: &HeaderMap,
 ) -> Result<RequestBuilder> {
     let api_key = crypto
@@ -176,7 +177,7 @@ pub fn apply_auth(
         request = request.header(name.as_str(), value.as_str());
     }
 
-    if channel.kind == "anthropic" && !has_anthropic_version {
+    if kind == "anthropic" && !has_anthropic_version {
         request = request.header("anthropic-version", "2023-06-01");
     }
 
@@ -197,11 +198,12 @@ pub fn build_request(
     client: &Client,
     channel: &Channel,
     crypto: &Crypto,
+    kind: &str,
     body: &serde_json::Value,
     client_headers: &HeaderMap,
 ) -> Result<RequestBuilder> {
-    let request = client.post(endpoint_url(channel)).json(body);
-    apply_auth(request, channel, crypto, client_headers)
+    let request = client.post(endpoint_url(channel, kind)).json(body);
+    apply_auth(request, channel, crypto, kind, client_headers)
 }
 
 #[cfg(test)]

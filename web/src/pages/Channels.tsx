@@ -34,7 +34,8 @@ interface MappingRow {
 
 interface ChannelFormValues {
   name: string;
-  kind: ChannelKind;
+  kinds: ChannelKind[];
+  fallback_kind?: ChannelKind;
   base_url: string;
   api_key?: string;
   auth_header?: 'bearer' | 'x-api-key';
@@ -54,10 +55,16 @@ const kindLabels: Record<ChannelKind, string> = {
   anthropic: 'Anthropic',
 };
 
+const kindOptions = (Object.keys(kindLabels) as ChannelKind[]).map((value) => ({
+  value,
+  label: kindLabels[value],
+}));
+
 function toPayload(values: ChannelFormValues) {
   return {
     name: values.name,
-    kind: values.kind,
+    kinds: values.kinds,
+    fallback_kind: values.fallback_kind ?? values.kinds[0],
     base_url: values.base_url,
     api_key: values.api_key?.trim() || undefined,
     auth_header: values.auth_header,
@@ -86,6 +93,7 @@ export default function Channels() {
   const { message } = App.useApp();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<ChannelFormValues>();
+  const watchedKinds = Form.useWatch('kinds', form) ?? [];
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Channel | null>(null);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
@@ -196,7 +204,8 @@ export default function Channels() {
     setEditing(null);
     form.resetFields();
     form.setFieldsValue({
-      kind: 'openai_chat',
+      kinds: ['openai_chat'],
+      fallback_kind: 'openai_chat',
       auth_header: 'bearer',
       models: [],
       priority: 0,
@@ -210,7 +219,8 @@ export default function Channels() {
     setEditing(channel);
     form.setFieldsValue({
       name: channel.name,
-      kind: channel.kind,
+      kinds: channel.kinds,
+      fallback_kind: channel.fallback_kind,
       base_url: channel.base_url,
       api_key: undefined,
       auth_header: channel.auth_header,
@@ -244,9 +254,15 @@ export default function Channels() {
       ),
     },
     {
-      title: '类型',
-      dataIndex: 'kind',
-      render: (kind: ChannelKind) => <Tag>{kindLabels[kind]}</Tag>,
+      title: '协议',
+      dataIndex: 'kinds',
+      render: (kinds: ChannelKind[]) => (
+        <Space size={4} wrap>
+          {(kinds ?? []).map((kind) => (
+            <Tag key={kind}>{kindLabels[kind]}</Tag>
+          ))}
+        </Space>
+      ),
     },
     { title: 'Base URL', dataIndex: 'base_url', ellipsis: true },
     {
@@ -345,6 +361,14 @@ export default function Channels() {
         <Form
           form={form}
           layout="vertical"
+          onValuesChange={(changed) => {
+            if (Array.isArray(changed.kinds)) {
+              const kinds = changed.kinds as ChannelKind[];
+              if (!kinds.includes(form.getFieldValue('fallback_kind'))) {
+                form.setFieldValue('fallback_kind', kinds[0]);
+              }
+            }
+          }}
           onFinish={(values: ChannelFormValues) =>
             saveMutation.mutate({ id: editing?.id, values })
           }
@@ -356,13 +380,24 @@ export default function Channels() {
           >
             <Input />
           </Form.Item>
-          <Form.Item name="kind" label="协议类型" rules={[{ required: true }]}>
+          <Form.Item
+            name="kinds"
+            label="支持的协议"
+            rules={[{ required: true, message: '至少选择一种协议' }]}
+            extra="入站协议在列表中时原样转发；不在列表中时转换到下方「转换目标」"
+          >
+            <Select mode="multiple" options={kindOptions} />
+          </Form.Item>
+          <Form.Item
+            name="fallback_kind"
+            label="转换目标"
+            rules={[{ required: true, message: '请选择转换目标' }]}
+            extra="只有入站协议不被该渠道支持时才会使用"
+          >
             <Select
-              options={[
-                { value: 'openai_chat', label: 'OpenAI Chat Completions' },
-                { value: 'openai_responses', label: 'OpenAI Responses' },
-                { value: 'anthropic', label: 'Anthropic Messages' },
-              ]}
+              options={kindOptions.filter((option) =>
+                watchedKinds.includes(option.value),
+              )}
             />
           </Form.Item>
           <Form.Item
