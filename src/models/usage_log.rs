@@ -63,8 +63,8 @@ fn push_filters(query: &mut QueryBuilder<'_, Sqlite>, filters: &LogFilters) {
         .filter(|model| !model.is_empty())
     {
         query
-            .push(" AND l.model LIKE ")
-            .push_bind(format!("%{model}%"));
+            .push(" AND l.model GLOB ")
+            .push_bind(glob_prefix(model));
     }
     if let Some(channel_id) = filters.channel_id {
         query.push(" AND l.channel_id = ").push_bind(channel_id);
@@ -103,9 +103,27 @@ fn push_filters(query: &mut QueryBuilder<'_, Sqlite>, filters: &LogFilters) {
         .filter(|request_id| !request_id.is_empty())
     {
         query
-            .push(" AND l.request_id LIKE ")
-            .push_bind(format!("%{request_id}%"));
+            .push(" AND l.request_id GLOB ")
+            .push_bind(glob_prefix(request_id));
     }
+}
+
+/// Prefix match that keeps SQLite on the BINARY index. GLOB metacharacters in
+/// user input are escaped instead of widening the pattern.
+fn glob_prefix(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 1);
+    for character in value.chars() {
+        match character {
+            '*' | '?' | '[' | ']' => {
+                escaped.push('[');
+                escaped.push(character);
+                escaped.push(']');
+            }
+            _ => escaped.push(character),
+        }
+    }
+    escaped.push('*');
+    escaped
 }
 
 pub async fn list(
@@ -168,4 +186,15 @@ pub async fn detail_bodies(
         .bind(request_id)
         .fetch_optional(pool)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_prefix;
+
+    #[test]
+    fn glob_prefix_escapes_metacharacters() {
+        assert_eq!(glob_prefix("gpt-4"), "gpt-4*");
+        assert_eq!(glob_prefix("a*b?c[d]"), "a[*]b[?]c[[]d[]]*");
+    }
 }

@@ -190,6 +190,17 @@
 - 前端实时指标改用 fetch + SSE 解析，401 时停止重连；网关 SSE 在等待上游时每 15 秒发送心跳注释，且心跳不会延长上游空闲超时。
 - 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（82 个测试）、`npm run build` 全部通过。
 
+## 审查计划阶段 C（性能与资源效率）
+
+- 新增渠道级 reqwest Client 缓存：按渠道 id + updated_at + 超时 + 流式标记复用连接池；渠道更新/删除与设置变更时清空。
+- 新增进程内渠道与网关设置缓存（30 秒 TTL），后台写接口主动失效；`GatewayDefaults` 改为一次查询读取全部设置。
+- usage 日志改为单写队列（容量 1024、批量 100、事务写入），队列满时回退同步写；渠道成功状态更新只在确需重置时执行。
+- 对所有非 SSE 响应启用 gzip 压缩。
+- 日志 model / request_id 过滤改为 GLOB 前缀匹配并转义元字符；新增 status/source/channel + created_at 复合索引迁移 `0003_usage_log_indexes.sql`。
+- 跨协议请求只解析 IR 一次，失败切换时复用。
+- 实时指标改为原子分桶，减少锁竞争；前端构建按 react/query/antd 拆分 vendor chunk。
+- 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（84 个测试）、`npm run build` 全部通过。
+
 ## AOCI 状态
 
 - 版本：`0.1.0-rc22`，二进制 `/usr/local/bin/aoci`。

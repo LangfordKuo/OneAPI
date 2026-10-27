@@ -16,7 +16,7 @@ pub async fn list(
     State(state): State<AppState>,
     _session: AdminSession,
 ) -> Result<Json<ModelsOutput>, AppError> {
-    let channels = models::channel::list(&state.db).await?;
+    let channels = state.cache.channels(&state.db).await?;
     let mut result = BTreeSet::new();
     let mut has_wildcard = false;
 

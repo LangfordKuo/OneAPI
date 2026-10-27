@@ -338,6 +338,7 @@ pub async fn create(
     let api_key_enc = state.crypto.encrypt(&api_key).map_err(AppError::Internal)?;
     let write = to_write(validated, api_key_enc)?;
     let channel = models::channel::create(&state.db, &write, models::now_ms()).await?;
+    state.cache.invalidate_channels();
 
     Ok((
         StatusCode::CREATED,
@@ -365,6 +366,8 @@ pub async fn update(
     if !models::channel::update(&state.db, id, &write, models::now_ms()).await? {
         return Err(AppError::NotFound("channel not found".to_string()));
     }
+    state.cache.invalidate_channels();
+    state.clients.clear();
 
     let channel = models::channel::get(&state.db, id)
         .await?
@@ -380,6 +383,8 @@ pub async fn delete(
     if !models::channel::delete(&state.db, id).await? {
         return Err(AppError::NotFound("channel not found".to_string()));
     }
+    state.cache.invalidate_channels();
+    state.clients.clear();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -571,7 +576,7 @@ async fn send_test(
     channel: &Channel,
     body: Value,
 ) -> anyhow::Result<(StatusCode, String)> {
-    let defaults = models::setting::GatewayDefaults::load(&state.db).await?;
+    let defaults = state.cache.defaults(&state.db).await?;
     let client = upstream::build_client(channel, defaults.nonstream_timeout_ms)?;
     let request =
         upstream::build_request(&client, channel, &state.crypto, &body, &HeaderMap::new())?;
@@ -582,7 +587,7 @@ async fn send_test(
 }
 
 async fn send_models(state: &AppState, channel: &Channel) -> anyhow::Result<(StatusCode, String)> {
-    let defaults = models::setting::GatewayDefaults::load(&state.db).await?;
+    let defaults = state.cache.defaults(&state.db).await?;
     let client = upstream::build_client(channel, defaults.nonstream_timeout_ms)?;
     let request = upstream::apply_auth(
         client.get(upstream::models_url(channel)),

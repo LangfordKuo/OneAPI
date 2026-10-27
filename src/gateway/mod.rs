@@ -79,7 +79,7 @@ async fn count_tokens(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
     {
-        let channels = models::channel::list(&state.db).await?;
+        let channels = state.cache.channels(&state.db).await?;
         if let Some(candidate) = select::candidates(channels, model)
             .into_iter()
             .find(|candidate| candidate.channel.kind == "anthropic")
@@ -209,7 +209,7 @@ async fn list_models(
     State(state): State<AppState>,
     _auth: ApiKeyAuth,
 ) -> Result<Json<Value>, AppError> {
-    let models = available_models(&state.db).await?;
+    let models = available_models(&state).await?;
     let first_id = models.first().cloned();
     let last_id = models.last().cloned();
     let data: Vec<Value> = models
@@ -238,7 +238,7 @@ async fn get_model(
     _auth: ApiKeyAuth,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
-    let models = available_models(&state.db).await?;
+    let models = available_models(&state).await?;
     if models.iter().any(|model| model == &id) {
         Ok(Json(json!({
             "id": id,
@@ -257,8 +257,8 @@ async fn get_model(
     }
 }
 
-async fn available_models(pool: &sqlx::SqlitePool) -> sqlx::Result<Vec<String>> {
-    let channels = models::channel::list(pool).await?;
+async fn available_models(state: &AppState) -> sqlx::Result<Vec<String>> {
+    let channels = state.cache.channels(&state.db).await?;
     let mut result = BTreeSet::new();
     let mut has_wildcard = false;
 
@@ -280,7 +280,7 @@ async fn available_models(pool: &sqlx::SqlitePool) -> sqlx::Result<Vec<String>> 
     // traffic to keep model pickers useful.
     if has_wildcard {
         let since = models::now_ms() - 30 * 24 * 60 * 60 * 1000;
-        for model in models::usage_log::recent_models(pool, since, 200).await? {
+        for model in models::usage_log::recent_models(&state.db, since, 200).await? {
             if !model.is_empty() && model != "*" {
                 result.insert(model);
             }
@@ -343,6 +343,9 @@ mod tests {
             live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
             updates: std::sync::Arc::new(crate::state::UpdateState::default()),
             login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
+            clients: std::sync::Arc::new(crate::upstream::ClientCache::default()),
+            cache: std::sync::Arc::new(crate::state::RuntimeCache::default()),
+            usage_writer: None,
             started_at: chrono::Utc::now(),
         };
         (temp, state)
@@ -1079,6 +1082,7 @@ mod tests {
         models::setting::upsert(&state.db, "store_request_bodies", "true")
             .await
             .expect("setting");
+        state.cache.invalidate_defaults();
         let (status, _) = send(router, "/v1/chat/completions", Some(&key), body).await;
         assert_eq!(status, StatusCode::OK);
 

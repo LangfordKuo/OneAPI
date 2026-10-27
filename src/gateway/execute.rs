@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     error::AppError,
     models::{self, channel::Channel, now_ms},
-    protocol::{Protocol, Usage},
+    protocol::{Protocol, UnifiedRequest, Usage},
     state::AppState,
     upstream,
 };
@@ -77,7 +77,7 @@ pub async fn proxy_with_identity(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let defaults = models::setting::GatewayDefaults::load(&state.db).await?;
+    let defaults = state.cache.defaults(&state.db).await?;
     let store_request_bodies = defaults.store_request_bodies;
     let detail_request =
         store_request_bodies.then(|| serde_json::to_string(&body).unwrap_or_default());
@@ -204,7 +204,7 @@ pub async fn proxy_with_identity(
         false
     };
 
-    let channels = models::channel::list(&state.db).await?;
+    let channels = state.cache.channels(&state.db).await?;
     let candidates = select::candidates(channels, &model);
     if candidates.is_empty() {
         let message = "no channel available for this model";
@@ -260,6 +260,7 @@ pub async fn proxy_with_identity(
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
+    let mut unified_request: Option<UnifiedRequest> = None;
 
     for candidate in candidates {
         ctx.attempts += 1;
@@ -276,28 +277,31 @@ pub async fn proxy_with_identity(
             }
             value
         } else {
-            let mut ir = match inbound.parse_request(&body) {
-                Ok(ir) => ir,
-                Err(error) => {
-                    let message = error.to_string();
-                    ctx.record(
-                        state,
-                        Some(channel),
-                        Some(&candidate.upstream_model),
-                        upstream,
-                        StatusCode::BAD_REQUEST,
-                        Some(("invalid_request_error", message.as_str())),
-                        Usage::default(),
-                    )
-                    .await;
-                    return Ok(error::client_error(
-                        inbound,
-                        StatusCode::BAD_REQUEST,
-                        message,
-                        "invalid_request_error",
-                    ));
-                }
-            };
+            if unified_request.is_none() {
+                unified_request = Some(match inbound.parse_request(&body) {
+                    Ok(ir) => ir,
+                    Err(error) => {
+                        let message = error.to_string();
+                        ctx.record(
+                            state,
+                            Some(channel),
+                            Some(&candidate.upstream_model),
+                            upstream,
+                            StatusCode::BAD_REQUEST,
+                            Some(("invalid_request_error", message.as_str())),
+                            Usage::default(),
+                        )
+                        .await;
+                        return Ok(error::client_error(
+                            inbound,
+                            StatusCode::BAD_REQUEST,
+                            message,
+                            "invalid_request_error",
+                        ));
+                    }
+                });
+            }
+            let mut ir = unified_request.clone().expect("parsed above");
             if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
                 ir.max_tokens = Some(defaults.default_max_tokens);
             }
@@ -326,7 +330,10 @@ pub async fn proxy_with_identity(
             }
         };
 
-        let client = match upstream::build_client(channel, defaults.nonstream_timeout_ms) {
+        let client = match state
+            .clients
+            .get(channel, defaults.nonstream_timeout_ms, false)
+        {
             Ok(client) => client,
             Err(error) => {
                 last_message = error.to_string();
@@ -708,6 +715,7 @@ async fn proxy_stream(
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
+    let mut unified_request: Option<UnifiedRequest> = None;
 
     for candidate in candidates {
         attempts += 1;
@@ -724,34 +732,37 @@ async fn proxy_stream(
             }
             value
         } else {
-            let mut ir = match inbound.parse_request(&body) {
-                Ok(ir) => ir,
-                Err(error) => {
-                    let message = error.to_string();
-                    record_stream_attempt(
-                        state,
-                        request_id,
-                        identity,
-                        model,
-                        Some(channel),
-                        Some(&candidate.upstream_model),
-                        inbound,
-                        upstream,
-                        StatusCode::BAD_REQUEST,
-                        attempts,
-                        started,
-                        Some(("invalid_request_error", message.as_str())),
-                        Usage::default(),
-                    )
-                    .await;
-                    return Ok(error::client_error(
-                        inbound,
-                        StatusCode::BAD_REQUEST,
-                        message,
-                        "invalid_request_error",
-                    ));
-                }
-            };
+            if unified_request.is_none() {
+                unified_request = Some(match inbound.parse_request(&body) {
+                    Ok(ir) => ir,
+                    Err(error) => {
+                        let message = error.to_string();
+                        record_stream_attempt(
+                            state,
+                            request_id,
+                            identity,
+                            model,
+                            Some(channel),
+                            Some(&candidate.upstream_model),
+                            inbound,
+                            upstream,
+                            StatusCode::BAD_REQUEST,
+                            attempts,
+                            started,
+                            Some(("invalid_request_error", message.as_str())),
+                            Usage::default(),
+                        )
+                        .await;
+                        return Ok(error::client_error(
+                            inbound,
+                            StatusCode::BAD_REQUEST,
+                            message,
+                            "invalid_request_error",
+                        ));
+                    }
+                });
+            }
+            let mut ir = unified_request.clone().expect("parsed above");
             if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
                 ir.max_tokens = Some(defaults.default_max_tokens);
             }
@@ -802,7 +813,10 @@ async fn proxy_stream(
             }
         }
 
-        let client = match upstream::build_stream_client(channel) {
+        let client = match state
+            .clients
+            .get(channel, defaults.nonstream_timeout_ms, true)
+        {
             Ok(client) => client,
             Err(error) => {
                 last_message = error.to_string();
@@ -1050,13 +1064,7 @@ async fn record_stream_attempt(
         created_at: now_ms(),
     };
 
-    if let Err(error) = usage::insert(&state.db, &record).await {
-        tracing::error!(
-            error = %error,
-            request_id = %request_id,
-            "failed to write streaming usage log"
-        );
-    }
+    usage::record(state, &record).await;
 }
 
 struct RequestContext<'a> {
@@ -1101,13 +1109,7 @@ impl RequestContext<'_> {
             created_at: now_ms(),
         };
 
-        if let Err(error) = usage::insert(&state.db, &record).await {
-            tracing::error!(
-                error = %error,
-                request_id = self.request_id,
-                "failed to write usage log"
-            );
-        }
+        usage::record(state, &record).await;
     }
 }
 

@@ -457,13 +457,7 @@ async fn run(
         created_at: models::now_ms(),
     };
 
-    if let Err(error) = usage::insert(&job.state.db, &record).await {
-        tracing::error!(
-            error = %error,
-            request_id = %job.request_id,
-            "failed to write streaming usage log"
-        );
-    }
+    usage::record(&job.state, &record).await;
 
     // Keep the response body open until persistence is done so a client that has
     // consumed the stream can immediately fetch a stored Responses object.
@@ -868,6 +862,9 @@ mod tests {
                 live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
                 updates: std::sync::Arc::new(crate::state::UpdateState::default()),
                 login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
+                clients: std::sync::Arc::new(crate::upstream::ClientCache::default()),
+                cache: std::sync::Arc::new(crate::state::RuntimeCache::default()),
+                usage_writer: None,
                 started_at: chrono::Utc::now(),
             },
         )

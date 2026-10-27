@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
 };
 
 use serde::Serialize;
@@ -14,54 +17,91 @@ pub struct LiveMetrics {
     inner: Mutex<Inner>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Inner {
-    global: Window,
-    channels: HashMap<i64, Window>,
+    global: Arc<Window>,
+    channels: HashMap<i64, Arc<Window>>,
 }
 
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            global: Arc::new(Window::default()),
+            channels: HashMap::new(),
+        }
+    }
+}
+
+/// Per-second buckets. Token increments are atomic so the hot path does not
+/// contend on the outer map lock; only bucket rollover takes a short lock.
 #[derive(Debug)]
 struct Window {
-    buckets: Vec<u64>,
-    index: usize,
-    last_second: i64,
+    buckets: [AtomicU64; WINDOW_SECONDS],
+    index: AtomicUsize,
+    last_second: AtomicI64,
+    rollover: Mutex<()>,
 }
 
 impl Default for Window {
     fn default() -> Self {
         Self {
-            buckets: vec![0; WINDOW_SECONDS],
-            index: 0,
-            last_second: 0,
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            index: AtomicUsize::new(0),
+            last_second: AtomicI64::new(0),
+            rollover: Mutex::new(()),
         }
     }
 }
 
 impl Window {
-    fn refresh(&mut self, second: i64) {
-        if second < self.last_second {
-            self.buckets.fill(0);
-            self.index = 0;
-            self.last_second = second;
+    fn rollover_lock(&self) -> MutexGuard<'_, ()> {
+        self.rollover
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn refresh_locked(&self, second: i64) {
+        let last = self.last_second.load(Ordering::Relaxed);
+        if second < last {
+            for bucket in &self.buckets {
+                bucket.store(0, Ordering::Relaxed);
+            }
+            self.index.store(0, Ordering::Relaxed);
+            self.last_second.store(second, Ordering::Relaxed);
             return;
         }
 
-        let steps = (second - self.last_second).min(WINDOW_SECONDS as i64) as usize;
+        let steps = (second - last).min(WINDOW_SECONDS as i64) as usize;
+        let mut index = self.index.load(Ordering::Relaxed);
         for _ in 0..steps {
-            self.index = (self.index + 1) % WINDOW_SECONDS;
-            self.buckets[self.index] = 0;
+            index = (index + 1) % WINDOW_SECONDS;
+            self.buckets[index].store(0, Ordering::Relaxed);
         }
-        self.last_second = second;
+        self.index.store(index, Ordering::Relaxed);
+        self.last_second.store(second, Ordering::Relaxed);
     }
 
-    fn add(&mut self, second: i64, tokens: u64) {
-        self.refresh(second);
-        self.buckets[self.index] = self.buckets[self.index].saturating_add(tokens);
+    fn add(&self, second: i64, tokens: u64) {
+        if self.last_second.load(Ordering::Relaxed) != second {
+            let _guard = self.rollover_lock();
+            if self.last_second.load(Ordering::Relaxed) != second {
+                self.refresh_locked(second);
+            }
+        }
+
+        let index = self.index.load(Ordering::Relaxed) % WINDOW_SECONDS;
+        self.buckets[index].fetch_add(tokens, Ordering::Relaxed);
     }
 
-    fn rate(&mut self, second: i64) -> f64 {
-        self.refresh(second);
-        self.buckets.iter().sum::<u64>() as f64 / WINDOW_SECONDS as f64
+    fn rate(&self, second: i64) -> f64 {
+        let _guard = self.rollover_lock();
+        self.refresh_locked(second);
+        let total: u64 = self
+            .buckets
+            .iter()
+            .map(|bucket| bucket.load(Ordering::Relaxed))
+            .sum();
+        total as f64 / WINDOW_SECONDS as f64
     }
 }
 
@@ -93,48 +133,63 @@ impl LiveMetrics {
     }
 
     fn add_tokens_at(&self, channel_id: Option<i64>, tokens: u64, second: i64) {
-        let mut inner = self.lock();
-        inner.global.add(second, tokens);
-        if let Some(channel_id) = channel_id {
-            inner
-                .channels
-                .entry(channel_id)
-                .or_default()
-                .add(second, tokens);
+        let (global, channel) = {
+            let mut inner = self.lock();
+            let global = inner.global.clone();
+            let channel = channel_id.map(|id| inner.channels.entry(id).or_default().clone());
+            (global, channel)
+        };
+
+        global.add(second, tokens);
+        if let Some(window) = channel {
+            window.add(second, tokens);
         }
     }
 
     pub fn snapshot(&self) -> LiveSnapshot {
         let second = now_ms() / 1000;
-        let mut inner = self.lock();
+        let (global, channels) = {
+            let inner = self.lock();
+            let global = inner.global.clone();
+            let channels: Vec<(i64, Arc<Window>)> = inner
+                .channels
+                .iter()
+                .map(|(id, window)| (*id, window.clone()))
+                .collect();
+            (global, channels)
+        };
 
-        let mut channels = Vec::new();
+        let mut rates = Vec::new();
         let mut stale = Vec::new();
-        for (channel_id, window) in inner.channels.iter_mut() {
+        for (channel_id, window) in channels {
             let rate = window.rate(second);
             if rate > 0.0 {
-                channels.push(ChannelRate {
-                    channel_id: *channel_id,
+                rates.push(ChannelRate {
+                    channel_id,
                     tok_s: round_one(rate),
                 });
             } else {
-                stale.push(*channel_id);
+                stale.push(channel_id);
             }
         }
-        for channel_id in stale {
-            inner.channels.remove(&channel_id);
-        }
-        channels.sort_by(|left, right| {
+        rates.sort_by(|left, right| {
             right
                 .tok_s
                 .partial_cmp(&left.tok_s)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        if !stale.is_empty() {
+            let mut inner = self.lock();
+            for channel_id in stale {
+                inner.channels.remove(&channel_id);
+            }
+        }
+
         LiveSnapshot {
             timestamp: now_ms(),
-            global_tok_s: round_one(inner.global.rate(second)),
-            channels,
+            global_tok_s: round_one(global.rate(second)),
+            channels: rates,
         }
     }
 }

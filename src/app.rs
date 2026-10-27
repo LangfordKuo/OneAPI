@@ -1,6 +1,10 @@
 use axum::{extract::State, http::HeaderName, response::IntoResponse, routing::get, Json, Router};
 use serde::Serialize;
 use tower_http::{
+    compression::{
+        predicate::{DefaultPredicate, NotForContentType, Predicate},
+        CompressionLayer,
+    },
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     trace::TraceLayer,
 };
@@ -20,6 +24,10 @@ pub fn router(state: AppState) -> Router {
         .fallback(web::fallback)
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
+        .layer(
+            CompressionLayer::new()
+                .compress_when(DefaultPredicate::new().and(NotForContentType::SSE)),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

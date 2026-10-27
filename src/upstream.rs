@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::RwLock, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::http::HeaderMap;
@@ -17,6 +17,59 @@ const FORWARDED_HEADERS: &[&str] = &[
     "openai-organization",
     "openai-project",
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ClientKey {
+    channel_id: i64,
+    updated_at: i64,
+    timeout_ms: u64,
+    stream: bool,
+}
+
+/// Reuses reqwest clients per channel so connection pools and TLS sessions
+/// survive across requests. Keys include `updated_at`, so editing a channel
+/// naturally invalidates its client.
+#[derive(Debug, Default)]
+pub struct ClientCache {
+    clients: RwLock<HashMap<ClientKey, Client>>,
+}
+
+impl ClientCache {
+    pub fn get(&self, channel: &Channel, default_timeout_ms: u64, stream: bool) -> Result<Client> {
+        let timeout_ms = channel
+            .timeout_ms
+            .map(|value| value.max(1) as u64)
+            .unwrap_or(default_timeout_ms);
+        let key = ClientKey {
+            channel_id: channel.id,
+            updated_at: channel.updated_at,
+            timeout_ms,
+            stream,
+        };
+
+        if let Ok(clients) = self.clients.read() {
+            if let Some(client) = clients.get(&key) {
+                return Ok(client.clone());
+            }
+        }
+
+        let client = if stream {
+            build_stream_client(channel)?
+        } else {
+            build_client(channel, default_timeout_ms)?
+        };
+        if let Ok(mut clients) = self.clients.write() {
+            clients.insert(key, client.clone());
+        }
+        Ok(client)
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut clients) = self.clients.write() {
+            clients.clear();
+        }
+    }
+}
 
 pub fn build_client(channel: &Channel, default_timeout_ms: u64) -> Result<Client> {
     let timeout_ms = channel
