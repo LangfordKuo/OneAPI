@@ -104,35 +104,20 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p package
-          cp "target/${{ matrix.target }}/release/oneapi" package/
-          cp README.md LICENSE .env.example package/
-          chmod +x package/oneapi
-          tar -czf "oneapi-${GITHUB_REF_NAME}-${{ matrix.platform }}.tar.gz" -C package .
-          ls -lh "oneapi-${GITHUB_REF_NAME}-${{ matrix.platform }}.tar.gz"
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force package | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/oneapi.exe" package/
-          Copy-Item README.md, LICENSE, .env.example package/
-          Compress-Archive -Path package/* -DestinationPath "oneapi-${env:GITHUB_REF_NAME}-${{ matrix.platform }}.zip"
-          Get-Item "oneapi-${env:GITHUB_REF_NAME}-${{ matrix.platform }}.zip" | Format-List
-
-      # archive: false keeps the final .tar.gz/.zip as the artifact itself so the
-      # Actions artifact and GitHub Release asset are not zipped a second time.
+      # Upload the raw executable. The final tar.gz/zip is assembled once in the
+      # release job, so no archive ever contains another archive.
       - uses: actions/upload-artifact@v7
+        if: runner.os != 'Windows'
         with:
           name: oneapi-${{ matrix.platform }}
-          path: oneapi-*
-          archive: false
+          path: target/${{ matrix.target }}/release/oneapi
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows'
+        with:
+          name: oneapi-${{ matrix.platform }}
+          path: target/${{ matrix.target }}/release/oneapi.exe
           if-no-files-found: error
 
   docker:
@@ -149,16 +134,15 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          pattern: oneapi-*-linux-*
+          pattern: oneapi-linux-*
           path: docker-artifacts
-          merge-multiple: true
 
-      - name: Extract Linux release binaries
+      - name: Prepare Linux binaries
         run: |
           set -euo pipefail
           mkdir -p docker-context/amd64 docker-context/arm64
-          tar -xzf docker-artifacts/oneapi-*-linux-amd64.tar.gz -C docker-context/amd64
-          tar -xzf docker-artifacts/oneapi-*-linux-arm64.tar.gz -C docker-context/arm64
+          cp docker-artifacts/oneapi-linux-amd64/oneapi docker-context/amd64/oneapi
+          cp docker-artifacts/oneapi-linux-arm64/oneapi docker-context/arm64/oneapi
           chmod +x docker-context/amd64/oneapi docker-context/arm64/oneapi
           file docker-context/amd64/oneapi docker-context/arm64/oneapi
 
@@ -208,20 +192,47 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
-          merge-multiple: true
 
-      - name: Generate checksums
-        working-directory: artifacts
-        run: sha256sum *.tar.gz *.zip > SHA256SUMS
+      - name: Package release archives
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          package_platform() {
+            platform="$1"
+            binary="$2"
+            archive_type="$3"
+            stage="stage/$platform"
+            mkdir -p "$stage"
+            cp "artifacts/oneapi-$platform/$binary" "$stage/"
+            cp README.md LICENSE .env.example "$stage/"
+            if [ "$archive_type" = "zip" ]; then
+              (cd "$stage" && zip -qr "$GITHUB_WORKSPACE/out/oneapi-${GITHUB_REF_NAME}-$platform.zip" .)
+            else
+              tar -czf "out/oneapi-${GITHUB_REF_NAME}-$platform.tar.gz" -C "$stage" .
+            fi
+          }
+
+          package_platform linux-amd64 oneapi tar
+          package_platform linux-arm64 oneapi tar
+          package_platform windows-amd64 oneapi.exe zip
+          package_platform windows-arm64 oneapi.exe zip
+          package_platform macos-amd64 oneapi tar
+          package_platform macos-arm64 oneapi tar
+
+          ls -lh out
+          (cd out && sha256sum *.tar.gz *.zip > SHA256SUMS)
 
       - uses: softprops/action-gh-release@v3
         with:
           files: |
-            artifacts/*.tar.gz
-            artifacts/*.zip
-            artifacts/SHA256SUMS
+            out/*.tar.gz
+            out/*.zip
+            out/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: true

@@ -23,7 +23,7 @@ M0–M6 已完成：脚手架、管理基础、三协议非流式/流式网关�
 
 同时构建并推送 `linux/amd64`、`linux/arm64` 多架构 Docker 镜像到 GitHub Container Registry。镜像直接使用同一次构建产出的 Linux 二进制（`Dockerfile.release`），不会在 QEMU 下二次编译；本地源码构建仍使用 `Dockerfile`。
 
-Actions artifact 与 Release asset 使用同一份最终压缩包（`upload-artifact` 的 `archive: false`），不会再出现“压缩包里套压缩包”。
+Actions artifact 上传的是原始二进制，Release 任务只打包一次为最终 `tar.gz`/`zip`，不会再出现“压缩包里套压缩包”。
 
 发布产物未做代码签名：macOS 首次运行可能需要执行 `xattr -dr com.apple.quarantine ./oneapi`，Windows 可能出现 SmartScreen 提示。
 
