@@ -118,7 +118,8 @@
 - Docker 任务在六个平台构建完成后，下载 Linux amd64/arm64 产物，使用 `Dockerfile.release` 组装并推送 `ghcr.io/langfordkuo/oneapi` 多架构镜像；避免 QEMU 下二次编译 Rust，标签包含 semver、`v<tag>`、`sha-<commit>` 与 `latest`。
 - Dockerfile 升级为 `node:24-alpine` + `rust:1-slim-bookworm` + `debian:bookworm-slim`，SQLite 使用 bundled 构建，运行镜像无需额外 SQLite 库；增加 cargo registry/npm 缓存与 OCI label。
 - 本地校验：两个 workflow 通过 PyYAML 解析；runner 标签、Windows ARM64 Tier 1 host 工具链、`windows-11-arm` 的 VS ARM64 工具与 Rust 预装均已核对。
-- 尚未推送 `v*` 标签，因此 GitHub Actions 实跑与 GHCR 首次推送待首次正式发版时验证。
+- GitHub Actions dry-run（`workflow_dispatch`，run `40460124182`）：validate、web、六个平台 build（Linux/Windows/macOS × amd64/arm64）与 Docker `linux/amd64,linux/arm64` 组装全部成功；手动触发按设计跳过 Release 发布且不推送镜像。正式推送 `v*` 标签时会执行 push 并创建 Release。
+- 尚未推送 `v*` 标签，因此 GHCR 首次镜像推送与 GitHub Release 发布待正式发版时验证。
 
 ## AOCI 状态
 

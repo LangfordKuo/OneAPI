@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-27T05:47:10Z",
+  "updated_at": "2026-10-27T06:22:32Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -20,6 +20,18 @@
       "sha256": "21fa16a2122e2b0360b47502c577428b645437e08e9e87ffba661f84853cb476",
       "size": 291,
       "normalized_sha256": "21fa16a2122e2b0360b47502c577428b645437e08e9e87ffba661f84853cb476"
+    },
+    ".github/workflows/ci.yml": {
+      "role": "index",
+      "sha256": "0b625f43707edce192a372df38a92dee922d9332a9b70db481d39e41fda40584",
+      "size": 1087,
+      "normalized_sha256": "0b625f43707edce192a372df38a92dee922d9332a9b70db481d39e41fda40584"
+    },
+    ".github/workflows/release.yml": {
+      "role": "index",
+      "sha256": "2b00525f8ecf43f299181637e1a82cfb392afbcdee82cd631d78d2d08c354b31",
+      "size": 6388,
+      "normalized_sha256": "2b00525f8ecf43f299181637e1a82cfb392afbcdee82cd631d78d2d08c354b31"
     },
     ".gitignore": {
       "role": "index",
@@ -47,9 +59,15 @@
     },
     "Dockerfile": {
       "role": "index",
-      "sha256": "4798d4409362819aa5fba460dac730ea26ed0c099c48e5ed3d9c38f977da71d4",
-      "size": 962,
-      "normalized_sha256": "4798d4409362819aa5fba460dac730ea26ed0c099c48e5ed3d9c38f977da71d4"
+      "sha256": "6dd9ca9c24a1a72ac1afd6d535c5253b57bfb9d7d6d0ee006563a144e230ea12",
+      "size": 1232,
+      "normalized_sha256": "6dd9ca9c24a1a72ac1afd6d535c5253b57bfb9d7d6d0ee006563a144e230ea12"
+    },
+    "Dockerfile.release": {
+      "role": "index",
+      "sha256": "2483793aff4a03054f4c2578829f5fc69120cc8cb222e8a0d7579ce2c774dbbf",
+      "size": 853,
+      "normalized_sha256": "2483793aff4a03054f4c2578829f5fc69120cc8cb222e8a0d7579ce2c774dbbf"
     },
     "LICENSE": {
       "role": "index",
@@ -65,15 +83,15 @@
     },
     "README.md": {
       "role": "index",
-      "sha256": "ade4ebc7241e98133a48f260d990d37e6b94d9d64f3b0a5f9bf137cfc7cb549e",
-      "size": 2404,
-      "normalized_sha256": "ade4ebc7241e98133a48f260d990d37e6b94d9d64f3b0a5f9bf137cfc7cb549e"
+      "sha256": "b5be6c74413e7b034c196e840e7f125d75be4f35e50a134d3561f5177e84f51b",
+      "size": 4855,
+      "normalized_sha256": "b5be6c74413e7b034c196e840e7f125d75be4f35e50a134d3561f5177e84f51b"
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "a1c0e335ac7e437311af52512dd52f3f480d57da25e9b645e6318631104513cf",
-      "size": 33994,
-      "normalized_sha256": "a1c0e335ac7e437311af52512dd52f3f480d57da25e9b645e6318631104513cf"
+      "sha256": "d2e907b0cf48af23c9e3a5fb5a30d06fc02892b265d80cfe086fbe5db3ee339b",
+      "size": 35756,
+      "normalized_sha256": "d2e907b0cf48af23c9e3a5fb5a30d06fc02892b265d80cfe086fbe5db3ee339b"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -101,15 +119,15 @@
     },
     "docs/IMPLEMENTATION_PLAN.md": {
       "role": "index",
-      "sha256": "49f2a2bdf784d6dfd3b72a587196fb042ab0fd5c7c5fb980a767f613dcff62e3",
-      "size": 19866,
-      "normalized_sha256": "49f2a2bdf784d6dfd3b72a587196fb042ab0fd5c7c5fb980a767f613dcff62e3"
+      "sha256": "8519a3a5bbe046d2f17b23477be93d924e839933d93918a6c1ada72cbd4d8ce9",
+      "size": 20408,
+      "normalized_sha256": "8519a3a5bbe046d2f17b23477be93d924e839933d93918a6c1ada72cbd4d8ce9"
     },
     "docs/PROGRESS.md": {
       "role": "index",
-      "sha256": "318dd4408182e69be162704400e665f178faa7cdbfc9c96d30fa552f2de57f78",
-      "size": 10623,
-      "normalized_sha256": "318dd4408182e69be162704400e665f178faa7cdbfc9c96d30fa552f2de57f78"
+      "sha256": "6a64e27dd4575d510e2a88e4a3d2ebe02a8623c6b265996b212f76b150bf5b47",
+      "size": 12816,
+      "normalized_sha256": "6a64e27dd4575d510e2a88e4a3d2ebe02a8623c6b265996b212f76b150bf5b47"
     },
     "migrations/0001_init.sql": {
       "role": "index",

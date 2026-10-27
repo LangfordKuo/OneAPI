@@ -8,17 +8,18 @@
 AGENTS.md[SG7S]: F:汇总 AOCI 仓库认知规则与项目文档入口，供每个新会话自动加载 | R:code:docs/IMPLEMENTATION_PLAN.md,code:docs/PROGRESS.md | A:- | S:aoci 区块由 AOCI 维护，project 区块必须在 aoci:end 之外，避免被索引工具覆盖
 Cargo.lock[FV5L]: F:锁定 OneAPI 后端全部 Rust 依赖的精确版本与校验和 | R:code:Cargo.toml | A:- | S:由 Cargo 自动维护，禁止手工编辑；二进制发布必须提交此文件以保证可复现构建
 Cargo.toml[FV8T]: F:定义 oneapi 二进制 crate 的元数据、运行时依赖、测试依赖与 release 优化策略 | R:code:Cargo.lock,code:build.rs,code:src/main.rs,code:web/package.json | A:- | S:release 使用 thin LTO、strip 与单 codegen unit；修改依赖特性会直接影响单文件二进制的体积和 TLS/SQLite 能力
-Dockerfile[OV6T]: F:三阶段构建 OneAPI 镜像：构建前端静态资源、编译内嵌前端的 Rust 二进制、生成最小运行镜像 | R:code:Cargo.toml,code:web/package.json,code:docker-compose.yml | A:镜像入口 oneapi serve | S:构建阶段必须先复制 web/dist，否则 rust-embed 会嵌入占位页；运行镜像以非 root 启动并依赖 /data 卷
+Dockerfile[OV6T]: F:三阶段源码构建 OneAPI 镜像：构建前端静态资源、编译内嵌前端的 Rust 二进制、生成最小运行镜像 | R:code:Cargo.toml,code:web/package.json,code:docker-compose.yml,code:Dockerfile.release | A:镜像入口 oneapi serve | S:构建阶段必须先复制 web/dist，否则 rust-embed 会嵌入占位页；SQLite 使用 bundled，无需运行镜像额外库；使用 cargo registry/npm cache mount；运行镜像非 root 并依赖 /data 卷
 LICENSE[SG3L]: F:声明 OneAPI 以 GNU General Public License v3.0 发布 | R:code:README.md | A:- | S:-
 Makefile[XV6T]: F:提供前端安装/构建、release 编译、开发、测试、lint 与 Docker 构建入口 | R:code:Cargo.toml,code:web/package.json,code:build.rs,code:Dockerfile | A:make web/build/run/dev/test/lint/docker | S:构建目标先把 vite-plus 的 Node 目录前置到 PATH；make build 必须在 cargo build 前完成 web/dist 构建
-README.md[SG6T]: F:说明 OneAPI 的定位、当前进度、技术栈、开发与构建命令、环境变量和 Docker 用法 | R:code:docs/IMPLEMENTATION_PLAN.md,code:docs/PROGRESS.md,code:.env.example | A:- | S:当前进度必须与 docs/PROGRESS.md 保持一致，构建命令需同时覆盖分步构建与 make build
+README.md[SG6S]: F:说明 OneAPI 的定位、进度、支持平台、开发/构建、自动发布、环境变量与 Docker/GHCR 用法 | R:code:docs/IMPLEMENTATION_PLAN.md,code:docs/PROGRESS.md,code:.env.example,code:.github/workflows/release.yml | A:- | S:当前进度必须与 docs/PROGRESS.md 一致；发布说明需保持标签与 Cargo.toml 版本一致的约束；Docker 示例使用 ghcr.io/langfordkuo/oneapi；平台表与 workflow 矩阵必须同步
 build.rs[XV5T]: F:编译前确保 web/dist/index.html 存在，缺失时写入占位页，并声明前端产物变更触发重编译 | R:code:Cargo.toml,code:web/vite.config.ts,code:src/web.rs | A:- | S:占位页只保证 cargo check/build 可用，不能替代真实前端构建；release 构建前必须运行 make web
 docker-compose.yml[OV4T]: F:提供 OneAPI 单服务 Compose 部署示例，映射 3000 端口并持久化 /data | R:code:Dockerfile,code:docs/IMPLEMENTATION_PLAN.md | A:- | S:示例密码与 ONEAPI_SECRET 为占位值，部署前必须替换
 rust-toolchain.toml[FV4T]: F:固定使用 stable Rust 工具链并声明 rustfmt 与 clippy 组件 | R:code:Cargo.toml | A:- | S:构建机需 rustup 能解析 stable 通道；CI 与本地应使用同一工具链
+Dockerfile.release[OV7T]: F:发布镜像装配文件：把 CI 构建的 Linux amd64/arm64 二进制按 TARGETARCH 复制进 debian slim 运行镜像 | R:code:.github/workflows/release.yml,code:Dockerfile | A:- | S:仅用于 CI/预编译发布；本地源码构建必须使用 Dockerfile；TARGETARCH 目录需包含对应 oneapi 可执行文件；运行镜像以非 root 用户和 /data 卷运行
 
 ===/root/OneAPI/docs/===
-IMPLEMENTATION_PLAN.md[SG7M]: F:记录 OneAPI v1 的目标、已确认决策、架构、数据模型、协议转换/流式/前端策略、里程碑、测试与风险 | R:code:docs/PROGRESS.md,code:README.md,code:migrations/0001_init.sql | A:- | S:计划中的产品决策是后续实现的约束；修改范围或关键决策时必须同步更新本文档与 docs/PROGRESS.md；流式空闲超时、首 event 切换与 Playground 的身份/落库规则以此处记录为准
-PROGRESS.md[SV5S]: F:记录当前阶段、里程碑完成情况、验证结果、AOCI 状态与下一步交接信息 | R:code:docs/IMPLEMENTATION_PLAN.md,code:AGENTS.md | A:- | S:每个里程碑结束后必须更新本文件；新会话以本文件和实施计划作为恢复上下文入口；M5 起流式验证需包含单元/集成测试与进程级端到端结果；M6 起需记录前端构建与拆分后的 chunk 规模
+IMPLEMENTATION_PLAN.md[SG7M]: F:记录 OneAPI v1 的目标、已确认决策、架构、数据模型、协议转换/流式/前端策略、里程碑、测试与风险 | R:code:docs/PROGRESS.md,code:README.md,code:migrations/0001_init.sql,code:.github/workflows/release.yml | A:- | S:计划中的产品决策是后续实现的约束；修改范围或关键决策时必须同步更新本文档与 docs/PROGRESS.md；流式空闲超时、首 event 切换、Playground 身份/落库规则与发布矩阵/Docker 装配方式以此处记录为准
+PROGRESS.md[SV5S]: F:记录当前阶段、里程碑完成情况、验证结果、AOCI 状态与下一步交接信息 | R:code:docs/IMPLEMENTATION_PLAN.md,code:AGENTS.md,code:.github/workflows/release.yml | A:- | S:每个里程碑结束后必须更新本文件；新会话以本文件和实施计划作为恢复上下文入口；M5 起流式验证需含单元/集成测试与进程级端到端；M6 起记录前端 chunk；M7 起记录 GitHub Actions dry-run 与六平台结果
 
 ===/root/OneAPI/migrations/===
 0001_init.sql[PD8S]: F:建立 SQLite 初始 schema，覆盖管理员、会话、渠道、API Key、用量日志、Responses 存储、请求详情与设置 | R:code:src/db.rs,code:docs/IMPLEMENTATION_PLAN.md | A:admin/sessions/channels/api_keys/usage_logs/responses/request_details/settings | S:迁移由 sqlx 在启动时执行；已发布迁移不得修改，只能追加新迁移文件；usage_logs 的 api_key_id/channel_id 使用 ON DELETE SET NULL 以保留历史日志
@@ -111,3 +112,7 @@ select.rs[AN8T]: F:按模型过滤启用且未冷却的渠道，按优先级分�
 usage.rs[PO8T]: F:把一次网关请求的渠道、协议、状态、token、耗时与错误写入 usage_logs | R:code:src/gateway/execute.rs,code:src/protocol/ir.rs,code:src/models/mod.rs | A:UsageRecord,insert | S:每次请求只写一行；attempts 记录尝试过的渠道数；first_token_ms 在非流式为 null
 responses_state.rs[PN8S]: F:Responses 本地状态：生成 resp_ id、按 previous_response_id 展开历史、落库与按 Key 查询/删除 | R:code:src/models/response.rs,code:src/gateway/execute.rs,code:src/gateway/mod.rs | A:new_response_id,expand_previous,store,get,delete | S:展开时把上一轮 request.input + response.output + 本轮 input 拼接；过滤 reasoning item；存储上限 10MB，超限跳过并告警
 stream.rs[AN9L]: F:流式提交与转发任务：缓冲首帧判定 error 后回退、同协议 tee、跨协议解码/编码、逐 chunk 空闲超时、客户端断开 499、Responses 流式落库 | R:code:src/gateway/execute.rs,code:src/gateway/usage.rs,code:src/gateway/responses_state.rs,code:src/protocol/sse.rs,code:src/protocol/stream.rs,code:src/models/channel.rs | A:start,run,process_frame,rewrite_responses_frame | S:必须在写出任何下游字节前检查首个 SSE frame，error 才能继续切换；提交后不再切换渠道；tx.closed() 触发即记 499 且不把客户端断开记为渠道失败；同协议 Responses 只改 response.id/store 并保留其他事件原文；Chat 下游未请求 usage 时只过滤 choices 为空的 usage 尾块；api_key_id 为空（Playground）时不写 responses；响应体在 usage 落库与 Responses 持久化完成后才结束
+
+===/root/OneAPI/.github/workflows/===
+ci.yml[OV7T]: F:GitHub Actions CI：在 main/PR 上执行 Rust fmt、Clippy、测试与前端 typecheck/build | R:code:Cargo.toml,code:web/package.json,code:.github/workflows/release.yml | A:backend,frontend | S:使用 Node 24 与 npm cache；Rust job 先 fmt --check 再 clippy -D warnings 再 cargo test --locked；前端 build 先 tsc --noEmit
+release.yml[OV8M]: F:Tag 发布流水线：校验版本后在六个原生 runner 构建二进制、生成压缩包与校验和，并组装双架构 Docker 镜像 | R:code:.github/workflows/ci.yml,code:Dockerfile.release,code:Dockerfile,code:Cargo.toml,code:README.md | A:validate,web,build,docker,release | S:仅 v* 标签触发；标签必须与 Cargo.toml version 一致；矩阵固定 6 个目标（Linux/Windows/macOS × amd64/arm64）；Docker 使用 Dockerfile.release 和刚构建的 Linux 产物；手动 workflow_dispatch 只 dry-run（不 push、不发布 Release）；GHCR 镜像名必须小写
