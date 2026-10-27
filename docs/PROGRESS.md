@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：M7 进行中（CI/CD 与多平台发布已完成）
+- 当前阶段：M7 进行中（CI/CD、多平台发布与 Web 安装向导已完成）
 - 当前分支：`main`
-- 最近提交：`390cf24 feat: 完成管理后台日志、仪表盘与 Playground`
+- 最近提交：`c4351ab docs: 记录 Linux musl 静态产物验证`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -15,7 +15,7 @@
 - [x] **M4 Responses 状态**：落库、`previous_response_id` 展开、GET/DELETE、Key 归属校验。
 - [x] **M5 流式**：SSE 解码/编码状态机、tee 透传、首 event 失败切换、断连记 499。
 - [x] **M6 前端**：登录、仪表盘、渠道、Key、日志、设置、Playground。
-- [ ] **M7 收尾**：Docker、README/部署文档、CI、保留期清理任务、`reset-password`、clippy/fmt 全绿。（CI/CD 与多平台发布已完成，剩余清理、命令与最终验收）
+- [ ] **M7 收尾**：Docker、README/部署文档、CI、保留期清理任务、`reset-password`、clippy/fmt 全绿。（CI/CD、多平台发布与 Web 安装向导已完成，剩余清理、命令与最终验收）
 
 ## 当前状态
 
@@ -28,7 +28,7 @@
 - M4 已完成：Responses 本地落库、`previous_response_id` 历史展开、GET/DELETE、Key 归属校验；`store=false` 不落库且后续引用返回 400。
 - M5 已完成：三协议 SSE 解码/编码、同协议 tee 透传、跨协议 6 条流路径、首 event 失败切换、逐 chunk 空闲超时、断连 499、Responses 流式落库与回读。
 - M6 已完成：请求日志页与详情抽屉、仪表盘统计/时序/占比/最近错误、Playground 三协议（含流式）、`/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`、路由级懒加载与暗色模式。
-- M7 进行中：已完成 GitHub Actions CI、Tag 触发的六平台 Release（Linux/Windows/macOS × amd64/arm64）与 GHCR 多架构 Docker 镜像；剩余保留期清理、`reset-password`、请求体记录开关与最终验收。
+- M7 进行中：已完成 GitHub Actions CI、Tag 触发的六平台 Release（Linux/Windows/macOS × amd64/arm64）与 GHCR 多架构 Docker 镜像；已完成 Web 安装向导（首次访问创建管理员、自动写 `<data_dir>/.env`、自动登录）；剩余保留期清理、`reset-password`、请求体记录开关与最终验收。
 - 已确认的产品决策见 `docs/IMPLEMENTATION_PLAN.md` 第 1 节。
 
 ## M0 验证记录
@@ -124,6 +124,16 @@
 - 已下载并校验 artifact：六个 artifact 均为原始可执行文件（ELF x86_64/aarch64、Mach-O x86_64/arm64、PE x86_64/ARM64）；按 Release 脚本打包后，Linux tar 与 Windows zip 根目录仅含二进制、README、LICENSE、`.env.example`，无嵌套压缩包；`gh run download` 全量下载成功。
 - 已关闭 Buildx 构建记录 artifact 上传，避免 `gh run download` 全量下载遇到非 zip 缓存文件；Docker 任务使用 `pattern: oneapi-*` / `oneapi-linux-*` 精确下载。
 - 尚未推送 `v*` 标签，因此 GHCR 首次镜像推送与 GitHub Release 发布待正式发版时验证。
+
+## M7 安装向导验证记录
+
+- 新增 `GET /api/setup/status` 与 `POST /api/setup`：无管理员时返回 `initialized=false` 及监听地址、数据目录、SQLite 路径、`.env` 路径；提交管理员后创建 Argon2id 哈希、写入 `<data_dir>/.env`（Unix 0600）、签发会话并自动登录；初始化后再次提交返回 400。
+- 首次启动引导逻辑：未设置 `ONEAPI_ADMIN_PASSWORD` 且无管理员时不再生成随机密码，改为提示通过 Web 安装页完成初始化；设置了 `ONEAPI_ADMIN_PASSWORD` 时仍支持无界面自动创建管理员（Docker/服务端场景）。
+- 配置加载：启动时先读当前目录 `.env`，再读数据目录 `.env`，且不覆盖已存在的进程环境变量；安装向导写入绝对 `ONEAPI_DATA_DIR`，避免从不同工作目录重启时找错数据。
+- 前端新增安装页：显示版本、监听地址、数据目录、SQLite 与 `.env` 路径，填写管理员用户名/密码/站点名；成功后展示 `.env` 路径并自动登录。App 启动时先查询安装状态，未初始化直接显示安装页，初始化后才进入登录/后台。
+- `cargo fmt` / `clippy -D warnings` / `cargo test`：通过，60 个测试（新增安装向导与 `.env` 加载测试）。
+- 进程级验证：首次启动 `/api/setup/status` 返回 `initialized=false`；提交安装后 `/api/auth/me` 立即 200，`.env` 权限为 `600` 且不含明文密码；仅用 `ONEAPI_DATA_DIR` 重启时从数据目录 `.env` 读取监听地址，管理员登录仍成功。
+- `.env` 不写入管理员密码（仅注释占位），密码只以 Argon2id 哈希存入 SQLite；如需重新引导空管理员表，设置 `ONEAPI_ADMIN_PASSWORD` 后启动。
 
 ## AOCI 状态
 

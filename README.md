@@ -6,7 +6,7 @@ OneAPI 是一个自托管的 AI API 网关：在后台配置上游渠道，客�
 
 ## 当前进度
 
-M0–M6 已完成：脚手架、管理基础、三协议非流式/流式网关、Responses 本地状态、请求日志、仪表盘、Playground 与多架构发布流水线。M7 继续补齐保留期清理、请求体记录开关与最终验收。详细进度见 `docs/PROGRESS.md`。
+M0–M6 已完成：脚手架、管理基础、三协议非流式/流式网关、Responses 本地状态、请求日志、仪表盘、Playground 与多架构发布流水线。M7 已完成 Web 安装向导与 CI/CD；剩余保留期清理、请求体记录开关与最终验收。详细进度见 `docs/PROGRESS.md`。
 
 ## 支持的平台
 
@@ -68,16 +68,43 @@ cd web && npm install && npm run build
 cargo build --release
 ```
 
+## 首次运行
+
+首次启动不需要预先创建 `.env` 或数据库：
+
+```bash
+# 可选：指定数据目录；不指定时使用 ./data
+ONEAPI_DATA_DIR=./data ./oneapi serve
+```
+
+1. 打开 `http://localhost:3000`，如果还没有管理员，会进入 **安装页**，不会显示登录页。
+2. 在安装页填写管理员用户名、密码和站点名称。
+3. 提交后程序会：
+   - 创建管理员（Argon2id 哈希存入 SQLite）；
+   - 在数据目录写入 `.env`（Unix 下权限 `0600`）；
+   - 自动登录并进入后台。
+4. SQLite 数据库 `oneapi.db` 和加密主密钥 `master.key` 会在启动时自动创建；数据目录里的 `.env` 会随数据库一起持久化。
+
+安装页会显示当前的监听地址、数据目录、SQLite 路径和 `.env` 路径。监听地址与数据目录仍由启动环境变量/默认值决定；需要修改时，编辑 `.env` 或设置环境变量后重启。
+
+安装完成前请勿将端口直接暴露到公网；如需远程安装，建议先通过防火墙或反向代理限制访问。
+
+如果希望无界面自动初始化（Docker/服务端部署），设置 `ONEAPI_ADMIN_USER` 和 `ONEAPI_ADMIN_PASSWORD` 后启动，程序会直接创建管理员并跳过安装页。
+
+后续升级只需替换二进制并重启，保留同一个数据目录（`oneapi.db`、`master.key`、`.env`）；数据库迁移会在启动时自动执行。
+
 ## 配置
 
-复制 `.env.example` 按需修改，或直接使用环境变量：
+`.env` 会从当前工作目录和数据目录两处加载，且不会覆盖已经存在的进程环境变量。安装向导生成的 `.env` 位于数据目录中。
+
+也可以直接使用环境变量：
 
 - `ONEAPI_ADDR`：监听地址，默认 `0.0.0.0:3000`
 - `ONEAPI_DATA_DIR`：数据目录，默认 `./data`
 - `ONEAPI_DATABASE_URL`：可选，显式 SQLite URL
 - `ONEAPI_LOG_LEVEL`：日志级别，默认 `info`
 - `ONEAPI_SECRET`：上游 Key 加密主密钥；未设置时在数据目录生成
-- `ONEAPI_ADMIN_USER` / `ONEAPI_ADMIN_PASSWORD`：首次启动的管理员引导账号
+- `ONEAPI_ADMIN_USER` / `ONEAPI_ADMIN_PASSWORD`：无界面首次启动的管理员引导账号；未设置密码时使用 Web 安装页
 - `ONEAPI_COOKIE_SECURE`：HTTPS 部署时设为 `true`
 
 健康检查：`GET /healthz`、`GET /readyz`。

@@ -141,7 +141,7 @@ pub async fn change_password(
     Ok((jar, Json(AdminOutput::from(&session.admin))))
 }
 
-async fn issue_session(
+pub(crate) async fn issue_session(
     state: &AppState,
     jar: CookieJar,
     admin_id: i64,
@@ -168,15 +168,18 @@ pub async fn bootstrap(pool: &SqlitePool) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let provided = std::env::var("ONEAPI_ADMIN_PASSWORD")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let Some(password) = provided else {
+        tracing::info!("OneAPI is not initialized; open the web UI to create the admin account");
+        return Ok(());
+    };
+
     let username = std::env::var("ONEAPI_ADMIN_USER")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "admin".to_string());
-    let provided = std::env::var("ONEAPI_ADMIN_PASSWORD")
-        .ok()
-        .filter(|value| !value.is_empty());
-    let generated = provided.is_none();
-    let password = provided.unwrap_or_else(|| security::random_password(20));
 
     if password.chars().count() < 8 {
         return Err(anyhow::anyhow!(
@@ -186,16 +189,7 @@ pub async fn bootstrap(pool: &SqlitePool) -> anyhow::Result<()> {
 
     let password_hash = security::hash_password(&password)?;
     models::admin::create(pool, &username, &password_hash, models::now_ms()).await?;
-
-    if generated {
-        tracing::warn!(
-            username = %username,
-            password = %password,
-            "generated initial admin password; change it after first login"
-        );
-    } else {
-        tracing::info!(username = %username, "initial admin account created");
-    }
+    tracing::info!(username = %username, "initial admin account created from environment");
 
     Ok(())
 }

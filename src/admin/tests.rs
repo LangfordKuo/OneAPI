@@ -199,6 +199,88 @@ async fn admin_post_stream(
 }
 
 #[tokio::test]
+async fn setup_wizard_creates_admin_and_env() {
+    let (_temp, state) = test_state().await;
+    let router = app::router(state.clone());
+
+    let (status, body) = admin_get(router.clone(), "/api/setup/status", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["initialized"], json!(false));
+    assert_eq!(body["data_dir"], json!(state.config.data_dir_display()));
+    assert!(body["env_path"]
+        .as_str()
+        .unwrap_or_default()
+        .ends_with(".env"));
+    assert!(body["database"]
+        .as_str()
+        .unwrap_or_default()
+        .ends_with("test.db"));
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/setup")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "username": "admin",
+                "password": "password123",
+                "site_name": "OneAPI Test",
+            }))
+            .expect("json"),
+        ))
+        .expect("request");
+    let response = router.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or(value).to_string())
+        .expect("setup issues a session cookie");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body: Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(body["username"], json!("admin"));
+    assert_eq!(body["env_written"], json!(true));
+
+    let env_path = state.config.data_dir.join(".env");
+    assert!(env_path.exists());
+    let contents = std::fs::read_to_string(&env_path).expect("env file");
+    assert!(contents.contains("ONEAPI_ADMIN_USER=admin"));
+    assert!(contents.contains(&format!(
+        "ONEAPI_DATA_DIR={}",
+        state.config.data_dir.display()
+    )));
+    assert!(!contents.contains("password123"));
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/auth/me")
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .expect("request");
+    let response = app::router(state.clone())
+        .oneshot(request)
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let (status, _) = admin_post(
+        app::router(state.clone()),
+        "/api/setup",
+        "",
+        json!({"username": "other", "password": "password123"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = admin_get(app::router(state), "/api/setup/status", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["initialized"], json!(true));
+}
+
+#[tokio::test]
 async fn logs_and_dashboard_read_usage() {
     let (_temp, state) = test_state().await;
     let key = seed_key(&state).await;

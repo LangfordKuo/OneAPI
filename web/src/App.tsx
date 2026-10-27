@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Alert,
   Button,
   ConfigProvider,
   Layout,
@@ -13,8 +14,9 @@ import {
 } from 'antd';
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { api } from './api/client';
-import type { Admin } from './api/types';
+import type { Admin, SetupStatus } from './api/types';
 import Login from './pages/Login';
+import Setup from './pages/Setup';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Channels = lazy(() => import('./pages/Channels'));
@@ -50,10 +52,16 @@ export default function App() {
   const [dark, setDark] = useState(
     () => window.localStorage.getItem('oneapi-theme') === 'dark',
   );
+  const setupQuery = useQuery({
+    queryKey: ['setup-status'],
+    queryFn: () => api.get<SetupStatus>('/api/setup/status'),
+    retry: false,
+  });
   const meQuery = useQuery({
     queryKey: ['me'],
     queryFn: () => api.get<Admin>('/api/auth/me'),
     retry: false,
+    enabled: setupQuery.data?.initialized === true,
   });
 
   useEffect(() => {
@@ -75,6 +83,44 @@ export default function App() {
       {content}
     </ConfigProvider>
   );
+
+  if (setupQuery.isLoading) {
+    return themed(
+      <div className="center-shell">
+        <Spin size="large" />
+      </div>,
+    );
+  }
+
+  if (setupQuery.isError) {
+    return themed(
+      <div className="center-shell">
+        <Alert
+          type="error"
+          showIcon
+          message="无法连接后端"
+          description={
+            setupQuery.error instanceof Error
+              ? setupQuery.error.message
+              : String(setupQuery.error)
+          }
+        />
+      </div>,
+    );
+  }
+
+  const setup = setupQuery.data;
+  if (!setup) {
+    return themed(
+      <div className="center-shell">
+        <Spin size="large" />
+      </div>,
+    );
+  }
+
+  if (!setup.initialized) {
+    return themed(<Setup status={setup} onSuccess={() => window.location.assign('/')} />);
+  }
 
   if (meQuery.isLoading) {
     return themed(

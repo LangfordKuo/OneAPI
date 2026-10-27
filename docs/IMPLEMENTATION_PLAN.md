@@ -147,7 +147,7 @@ StreamEvent { Start | BlockStart{index,kind} | TextDelta | ReasoningDelta |
 
 - API Key：`sk-` + 48 位 base62；库里只存 SHA-256 哈希 + 前缀用于展示；创建时仅返回一次明文。
 - 管理员：Argon2id 密码；登录后签发随机 opaque session，存哈希到 `sessions`，HttpOnly + SameSite=Lax Cookie（HTTPS 时 Secure），7 天过期，登出即删。
-- 初始化：`ONEAPI_ADMIN_USER/PASSWORD`；未提供且无管理员时生成随机密码并只打印一次。提供 `oneapi reset-password` 子命令。
+- 初始化：首次启动且无管理员时，浏览器访问进入 Web 安装页，创建管理员后自动写入 `<data_dir>/.env` 并登录；也支持设置 `ONEAPI_ADMIN_USER/PASSWORD` 无界面自动初始化。未设置密码时不再生成随机密码，而是等待 Web 安装。提供 `oneapi reset-password` 子命令（M7 剩余）。
 - 上游 Key 用 AES-256-GCM 加密存储（`v1:nonce:ciphertext`），主密钥来自 `ONEAPI_SECRET`，否则自动生成 `data/master.key`（0600）；接口返回一律掩码。
 - CSRF：SameSite + 对 `/api` 写请求校验 Origin；日志脱敏 Authorization/x-api-key。
 - CORS：`/v1/*` 允许任意 Origin（Bearer 鉴权，不携带 Cookie）；`/api/*` 同源。
@@ -156,6 +156,7 @@ StreamEvent { Start | BlockStart{index,kind} | TextDelta | ReasoningDelta |
 
 ```
 POST /api/auth/login|logout   GET /api/auth/me   PUT /api/auth/password
+GET /api/setup/status   POST /api/setup   # 首次运行安装向导（无会话）
 GET|POST /api/channels        GET|PUT|DELETE /api/channels/:id
 POST /api/channels/test       POST /api/channels/fetch-models   # 支持未保存配置
 GET|POST /api/keys            PUT|DELETE /api/keys/:id
@@ -188,7 +189,7 @@ GET /healthz  /readyz
 - Makefile：`make dev`（后端 + vite）、`make web`、`make build`（web → `cargo build --release`）、`make test`、`make lint`、`make docker`。
 - Dockerfile 三段：node:24 构建前端 → rust:1-slim-bookworm 构建（rustls，无 OpenSSL，SQLite bundled）→ debian:bookworm-slim 运行（CA 证书、非 root、`/data` 卷、EXPOSE 3000）。附 docker-compose。
 - GitHub Actions：`ci.yml` 在 `main`/PR 上运行 fmt、clippy、test 与前端构建；`release.yml` 在 `v*` 标签上校验版本并构建 Linux/Windows/macOS × amd64/arm64 六个产物，同时用 `Dockerfile.release` 将 Linux 产物组装为 `linux/amd64,linux/arm64` 镜像并推送 GHCR。
-- 配置全走 env：`ONEAPI_ADDR=0.0.0.0:3000`、`ONEAPI_DATA_DIR`、`ONEAPI_DATABASE_URL`、`ONEAPI_SECRET`、`ONEAPI_ADMIN_USER/PASSWORD`、`ONEAPI_LOG_LEVEL`、`ONEAPI_COOKIE_SECURE`。
+- 配置全走 env，并支持 `.env`（当前目录与数据目录，进程环境优先）：`ONEAPI_ADDR=0.0.0.0:3000`、`ONEAPI_DATA_DIR`、`ONEAPI_DATABASE_URL`、`ONEAPI_SECRET`、`ONEAPI_ADMIN_USER/PASSWORD`、`ONEAPI_LOG_LEVEL`、`ONEAPI_COOKIE_SECURE`。安装向导会生成 `<data_dir>/.env`。
 
 ## 11. 测试
 
@@ -231,3 +232,4 @@ GET /healthz  /readyz
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。
+- 2026-10-27：新增 Web 安装向导：无管理员时首次访问进入安装页，创建管理员后写入 `<data_dir>/.env`（0600）并自动登录；支持 `.env` 从当前目录/数据目录加载，进程环境变量优先；设置 `ONEAPI_ADMIN_PASSWORD` 时仍可无界面引导。

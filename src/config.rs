@@ -1,4 +1,8 @@
-use std::{env, net::SocketAddr, path::PathBuf};
+use std::{
+    env,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 
@@ -15,12 +19,19 @@ pub struct Config {
 
 impl Config {
     pub fn from_env(data_dir: Option<PathBuf>) -> Result<Self> {
+        // A .env next to the binary/working directory overrides defaults.
+        load_env_file(Path::new(".env"));
+
         let data_dir = data_dir
             .or_else(|| env::var_os("ONEAPI_DATA_DIR").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("./data"));
 
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("failed to create data directory {}", data_dir.display()))?;
+
+        // The setup wizard writes .env into the data directory so the config
+        // travels with the SQLite database and master.key.
+        load_env_file(&data_dir.join(".env"));
 
         let addr: SocketAddr = env::var("ONEAPI_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
@@ -49,5 +60,72 @@ impl Config {
 
     pub fn data_dir_display(&self) -> String {
         self.data_dir.to_string_lossy().into_owned()
+    }
+}
+
+/// Minimal dotenv loader. Processes only `KEY=value` lines, ignores comments,
+/// and never overrides variables already present in the process environment.
+fn load_env_file(path: &Path) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+
+    for line in contents.lines() {
+        let line = line.trim();
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || env::var_os(key).is_some() {
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .or_else(|| {
+                value
+                    .strip_prefix('\'')
+                    .and_then(|value| value.strip_suffix('\''))
+            })
+            .unwrap_or(value);
+        env::set_var(key, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dotenv_loader_reads_simple_values_without_overriding() {
+        let key = "ONEAPI_TEST_DOTENV_VALUE";
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(".env");
+        std::fs::write(
+            &path,
+            "ONEAPI_TEST_DOTENV_VALUE=from-file\n# comment\nexport ONEAPI_TEST_DOTENV_OTHER='quoted'\n",
+        )
+        .expect("write env");
+
+        std::env::remove_var(key);
+        std::env::remove_var("ONEAPI_TEST_DOTENV_OTHER");
+        load_env_file(&path);
+        assert_eq!(std::env::var(key).expect("value"), "from-file");
+        assert_eq!(
+            std::env::var("ONEAPI_TEST_DOTENV_OTHER").expect("quoted"),
+            "quoted"
+        );
+
+        std::env::set_var(key, "from-process");
+        load_env_file(&path);
+        assert_eq!(std::env::var(key).expect("value"), "from-process");
+
+        std::env::remove_var(key);
+        std::env::remove_var("ONEAPI_TEST_DOTENV_OTHER");
     }
 }

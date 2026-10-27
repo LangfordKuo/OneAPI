@@ -152,3 +152,19 @@ export interface Breakdown {
 export interface ModelsOutput {
   models: string[];
 }
+
+export interface SetupStatus {
+  initialized: boolean;
+  version: string;
+  addr?: string;
+  data_dir?: string;
+  database?: string;
+  env_path?: string;
+}
+
+export interface SetupResult {
+  username: string;
+  env_written: boolean;
+  env_path: string;
+  message: string;
+}

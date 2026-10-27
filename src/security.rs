@@ -203,14 +203,6 @@ pub fn sha256_hex(value: &str) -> String {
     hex(&sha256_bytes(value.as_bytes()))
 }
 
-pub fn random_password(len: usize) -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(len)
-        .map(char::from)
-        .collect()
-}
-
 fn sha256_bytes(value: &[u8]) -> [u8; 32] {
     let digest = Sha256::digest(value);
     let mut out = [0u8; 32];

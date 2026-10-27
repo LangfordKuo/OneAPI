@@ -8,6 +8,7 @@ mod logs;
 mod playground;
 mod query;
 mod settings;
+mod setup;
 
 #[cfg(test)]
 mod tests;
@@ -50,5 +51,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/dashboard/breakdown", get(dashboard::breakdown))
         .route("/api/models", get(catalog::list))
         .route("/api/playground", post(playground::proxy))
+        .route("/api/setup/status", get(setup::status))
+        .route("/api/setup", post(setup::setup))
         .layer(middleware::from_fn(csrf::guard))
 }
