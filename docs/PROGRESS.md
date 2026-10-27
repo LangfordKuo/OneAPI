@@ -114,7 +114,8 @@
   - Windows arm64 `aarch64-pc-windows-msvc`（`windows-11-arm`）
   - macOS amd64 `x86_64-apple-darwin`（`macos-15-intel`）
   - macOS arm64 `aarch64-apple-darwin`（`macos-15`）
-- 发布产物命名 `oneapi-<tag>-<platform>.tar.gz|.zip`，包含二进制、`README.md`、`LICENSE`、`.env.example`；Release 同时上传 `SHA256SUMS`。
+- 发布产物命名 `oneapi-<tag>-<platform>.tar.gz|.zip`，包含二进制、`README.md`、`LICENSE`、`.env.example`；Release 同时上传 `SHA256SUMS`。`upload-artifact` 使用 `archive: false`，Actions artifact 与 Release asset 都是最终压缩包本体，不再二次打包。
+- Actions 全部升级到 Node 24 版本（checkout/setup-node/upload-download-artifact/docker/*/gh-release）；runner 固定为 `ubuntu-24.04`、`windows-2025`、`macos-15-intel`、`macos-15`、`ubuntu-24.04-arm`、`windows-11-arm`，避免 `ubuntu-latest` 迁移提示。
 - Docker 任务在六个平台构建完成后，下载 Linux amd64/arm64 产物，使用 `Dockerfile.release` 组装并推送 `ghcr.io/langfordkuo/oneapi` 多架构镜像；避免 QEMU 下二次编译 Rust，标签包含 semver、`v<tag>`、`sha-<commit>` 与 `latest`。
 - Dockerfile 升级为 `node:24-alpine` + `rust:1-slim-bookworm` + `debian:bookworm-slim`，SQLite 使用 bundled 构建，运行镜像无需额外 SQLite 库；增加 cargo registry/npm 缓存与 OCI label。
 - 本地校验：两个 workflow 通过 PyYAML 解析；runner 标签、Windows ARM64 Tier 1 host 工具链、`windows-11-arm` 的 VS ARM64 工具与 Rust 预装均已核对。
