@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-27T15:51:14Z",
+  "updated_at": "2026-10-27T16:52:01Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -83,15 +83,15 @@
     },
     "README.md": {
       "role": "index",
-      "sha256": "cbc8f4b2bd96ff97917987de391d750ea2273ef3107cd5cc26f65a5defd9d0fd",
-      "size": 9206,
-      "normalized_sha256": "cbc8f4b2bd96ff97917987de391d750ea2273ef3107cd5cc26f65a5defd9d0fd"
+      "sha256": "da5a02cdf653ee9047c885833a7939960bec82587b91c0818fbfe5ef4b6b5984",
+      "size": 4065,
+      "normalized_sha256": "da5a02cdf653ee9047c885833a7939960bec82587b91c0818fbfe5ef4b6b5984"
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "e0ca4ba14ee8ad63ec6eecca73374aa7a867d5c171694e4874c68b939f2d313e",
-      "size": 47513,
-      "normalized_sha256": "e0ca4ba14ee8ad63ec6eecca73374aa7a867d5c171694e4874c68b939f2d313e"
+      "sha256": "43a01ee810cc187959805ab0d7faaba9388095fb0f41280689a351fa81ae1e44",
+      "size": 47278,
+      "normalized_sha256": "43a01ee810cc187959805ab0d7faaba9388095fb0f41280689a351fa81ae1e44"
     },
     "aoci.meta.txt": {
       "role": "index",
