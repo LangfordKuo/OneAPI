@@ -165,6 +165,7 @@
 - 发布流程仍为六平台构建 + GitHub Release + GHCR 多架构镜像；Linux 使用 musl 静态链接。
 - 安装包命名 `oneapi-v0.1.1-<platform>`，`SHA256SUMS` 可供在线更新校验。
 - 发布后发现 Linux/macOS 归档中的二进制权限为 0644，已重新打包并覆盖 v0.1.1 资产；Release workflow 已补 `chmod +x`，后续版本不会再出现该问题。
+- 修复空数据库仪表盘 500：`COALESCE(AVG(latency_ms), 0)` 在无数据时返回 INTEGER，与 SQLx 的 `f64` 不兼容；改为 `0.0`，并新增空库 summary/timeseries/breakdown 回归测试（72 个测试通过）。
 
 ## AOCI 状态
 

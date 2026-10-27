@@ -283,6 +283,41 @@ async fn setup_wizard_creates_admin_and_env() {
 }
 
 #[tokio::test]
+async fn dashboard_empty_database_returns_zero_metrics() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let router = app::router(state);
+
+    let (status, summary) =
+        admin_get(router.clone(), "/api/dashboard/summary?range=24h", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(summary["requests"], json!(0));
+    assert_eq!(summary["avg_latency_ms"], json!(0.0));
+
+    let (status, timeseries) = admin_get(
+        router.clone(),
+        "/api/dashboard/timeseries?range=24h",
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let points = timeseries["points"].as_array().expect("points");
+    assert!(!points.is_empty());
+    assert!(points
+        .iter()
+        .all(|point| point["avg_latency_ms"] == json!(0.0)));
+
+    let (status, breakdown) = admin_get(
+        router,
+        "/api/dashboard/breakdown?range=24h&dimension=model",
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(breakdown["items"], json!([]));
+}
+
+#[tokio::test]
 async fn logs_and_dashboard_read_usage() {
     let (_temp, state) = test_state().await;
     let key = seed_key(&state).await;

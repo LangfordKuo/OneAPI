@@ -71,7 +71,7 @@ pub async fn summary(
             COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
             COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
             COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
-            COALESCE(AVG(latency_ms), 0) AS avg_latency_ms,
+            COALESCE(AVG(latency_ms), 0.0) AS avg_latency_ms,
             AVG(first_token_ms) AS avg_first_token_ms,
             COUNT(DISTINCT channel_id) AS active_channels,
             COUNT(DISTINCT api_key_id) AS active_keys
@@ -146,7 +146,7 @@ pub async fn timeseries(
             COUNT(*) AS requests,
             COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS errors,
             COALESCE(SUM(total_tokens), 0) AS total_tokens,
-            COALESCE(AVG(latency_ms), 0) AS avg_latency_ms
+            COALESCE(AVG(latency_ms), 0.0) AS avg_latency_ms
          FROM usage_logs
          WHERE created_at >= ?
          GROUP BY bucket
@@ -249,7 +249,7 @@ pub async fn breakdown(
             COUNT(*) AS requests,
             COALESCE(SUM(l.total_tokens), 0) AS total_tokens,
             COALESCE(SUM(CASE WHEN l.status_code >= 400 THEN 1 ELSE 0 END), 0) AS errors,
-            COALESCE(AVG(l.latency_ms), 0) AS avg_latency_ms
+            COALESCE(AVG(l.latency_ms), 0.0) AS avg_latency_ms
          FROM usage_logs l
          LEFT JOIN channels c ON c.id = l.channel_id
          LEFT JOIN api_keys k ON k.id = l.api_key_id

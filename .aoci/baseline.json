@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-27T08:35:25Z",
+  "updated_at": "2026-10-27T08:37:46Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -89,9 +89,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "83cf8ed72cd01d18a7bd6ddeac01a7b2bea93be57f973a4b3ece7e0d2ad20914",
-      "size": 42211,
-      "normalized_sha256": "83cf8ed72cd01d18a7bd6ddeac01a7b2bea93be57f973a4b3ece7e0d2ad20914"
+      "sha256": "5b4ec9d33e5f265f33b215f2ca0f7fca3f051e8602042d40b75a9871e45196e6",
+      "size": 42310,
+      "normalized_sha256": "5b4ec9d33e5f265f33b215f2ca0f7fca3f051e8602042d40b75a9871e45196e6"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -125,9 +125,9 @@
     },
     "docs/PROGRESS.md": {
       "role": "index",
-      "sha256": "9b07dc7afa6fd5145018bfde0a824cad64592534de4da88b5685053479cb5e8e",
-      "size": 18845,
-      "normalized_sha256": "9b07dc7afa6fd5145018bfde0a824cad64592534de4da88b5685053479cb5e8e"
+      "sha256": "26644e3b81bdfc24e84cd340bfe5a3d1b2c29ca34f53acf54234aeedf96f09f6",
+      "size": 19075,
+      "normalized_sha256": "26644e3b81bdfc24e84cd340bfe5a3d1b2c29ca34f53acf54234aeedf96f09f6"
     },
     "migrations/0001_init.sql": {
       "role": "index",
@@ -167,9 +167,9 @@
     },
     "src/admin/dashboard.rs": {
       "role": "index",
-      "sha256": "1d2d3068e81c461f6e2f74b0538eadef659535fdf3a7228105c7f677b88c6112",
-      "size": 8301,
-      "normalized_sha256": "1d2d3068e81c461f6e2f74b0538eadef659535fdf3a7228105c7f677b88c6112"
+      "sha256": "82aab2ae90a60424eee5d0f61f7f35b235802026303d604543db970b14942f8e",
+      "size": 8307,
+      "normalized_sha256": "82aab2ae90a60424eee5d0f61f7f35b235802026303d604543db970b14942f8e"
     },
     "src/admin/keys.rs": {
       "role": "index",
@@ -221,9 +221,9 @@
     },
     "src/admin/tests.rs": {
       "role": "index",
-      "sha256": "b5d296c675518df8c84199865be245725a3ccf7850fb822ee37b7d0024694eae",
-      "size": 13946,
-      "normalized_sha256": "b5d296c675518df8c84199865be245725a3ccf7850fb822ee37b7d0024694eae"
+      "sha256": "cf94518e29ba7d4a412a72f6033e5d13a52f68957d8a5a0a4f9a211be793985e",
+      "size": 15030,
+      "normalized_sha256": "cf94518e29ba7d4a412a72f6033e5d13a52f68957d8a5a0a4f9a211be793985e"
     },
     "src/admin/update.rs": {
       "role": "index",
