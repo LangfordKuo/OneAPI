@@ -131,11 +131,11 @@ ONEAPI_DATA_DIR=./data ./oneapi serve
 
 ## 自动发布
 
-打标签前确保 `Cargo.toml` 的 `version` 与标签一致（例如 `version = "0.1.2"` 对应 `v0.1.2`）：
+打标签前确保 `Cargo.toml` 的 `version` 与标签一致（例如 `version = "0.1.3"` 对应 `v0.1.3`）：
 
 ```bash
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 标签推送后 `.github/workflows/release.yml` 会：
@@ -146,7 +146,7 @@ git push origin v0.1.2
 4. 构建并推送多架构镜像到 `ghcr.io/langfordkuo/oneapi`；
 5. 创建 GitHub Release，附六个平台产物与 `SHA256SUMS`。
 
-Docker 镜像标签包括 `latest`、`0.1.2`、`0.1`、`v0.1.2` 与 `sha-<commit>`。首次发布后，如 GHCR 包默认为私有，可在 GitHub Packages 设置中改为 public。
+Docker 镜像标签包括 `latest`、`0.1.3`、`0.1`、`v0.1.3` 与 `sha-<commit>`。首次发布后，如 GHCR 包默认为私有，可在 GitHub Packages 设置中改为 public。
 
 `push` 到 `main` 或提交 PR 时，`.github/workflows/ci.yml` 会运行 Rust 格式检查、Clippy、测试，以及前端 ESLint、类型检查与构建。
 
