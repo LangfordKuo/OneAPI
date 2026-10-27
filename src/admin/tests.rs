@@ -31,6 +31,7 @@ async fn test_state() -> (TempDir, AppState) {
         database_path: data_dir.join("test.db"),
         log_level: "error".to_string(),
         cookie_secure: false,
+        trust_proxy: false,
     };
     let db = db::connect(&config).await.expect("database");
     let crypto = Arc::new(security::Crypto::load_or_create(&config.data_dir).expect("master key"));
@@ -42,6 +43,11 @@ async fn test_state() -> (TempDir, AppState) {
             crypto,
             live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
             updates: std::sync::Arc::new(crate::state::UpdateState::default()),
+            login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
+            clients: std::sync::Arc::new(crate::upstream::ClientCache::default()),
+            cache: std::sync::Arc::new(crate::state::RuntimeCache::default()),
+            probes: std::sync::Arc::new(crate::state::ChannelProbes::default()),
+            usage_writer: None,
             started_at: chrono::Utc::now(),
         },
     )
@@ -464,4 +470,97 @@ async fn playground_proxies_and_logs_both_modes() {
     assert_eq!(rows[0].1, None);
     assert_eq!(rows[1].0, "playground");
     assert_eq!(rows[1].1, None);
+}
+
+#[tokio::test]
+async fn login_is_rate_limited_after_repeated_failures() {
+    let (_temp, state) = test_state().await;
+    admin_token(&state).await;
+    let router = app::router(state);
+
+    for _ in 0..5 {
+        let (status, _) = admin_post(
+            router.clone(),
+            "/api/auth/login",
+            "",
+            json!({"username": "admin", "password": "wrong-password"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    let (status, _) = admin_post(
+        router,
+        "/api/auth/login",
+        "",
+        json!({"username": "admin", "password": "password123"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn channel_probe_works_before_saving() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat_response("pong")))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "gpt-a"}]})))
+        .mount(&server)
+        .await;
+
+    let router = app::router(state.clone());
+    let draft = json!({
+        "name": "draft",
+        "kind": "openai_chat",
+        "base_url": format!("{}/v1", server.uri()),
+        "api_key": "upstream-key",
+        "models": ["gpt-test"],
+    });
+
+    let (status, body) =
+        admin_post(router.clone(), "/api/channels/test", &token, draft.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], json!(true));
+
+    let (status, body) = admin_post(router, "/api/channels/fetch-models", &token, draft).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["models"], json!(["gpt-a"]));
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+        .fetch_one(&state.db)
+        .await
+        .expect("channel count");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn channel_weight_is_bounded() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let router = app::router(state);
+
+    let (status, _) = admin_post(
+        router,
+        "/api/channels",
+        &token,
+        json!({
+            "name": "too-heavy",
+            "kind": "openai_chat",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "upstream-key",
+            "models": ["gpt-test"],
+            "weight": 1001,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

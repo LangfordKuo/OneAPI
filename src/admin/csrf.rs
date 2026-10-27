@@ -1,5 +1,5 @@
 use axum::{
-    extract::Request,
+    extract::{Request, State},
     http::{header, Method},
     middleware::Next,
     response::Response,
@@ -7,7 +7,11 @@ use axum::{
 
 use crate::error::AppError;
 
-pub async fn guard(request: Request, next: Next) -> Result<Response, AppError> {
+pub async fn guard(
+    State(trust_proxy): State<bool>,
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
     let method = request.method();
     let mutating = method == Method::POST
         || method == Method::PUT
@@ -27,10 +31,23 @@ pub async fn guard(request: Request, next: Next) -> Result<Response, AppError> {
                 .split('/')
                 .next()
                 .unwrap_or_default();
-            let host = request
-                .headers()
-                .get(header::HOST)
-                .and_then(|value| value.to_str().ok())
+            let forwarded_host = trust_proxy
+                .then(|| {
+                    request
+                        .headers()
+                        .get("x-forwarded-host")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.split(',').next())
+                        .map(str::trim)
+                })
+                .flatten();
+            let host = forwarded_host
+                .or_else(|| {
+                    request
+                        .headers()
+                        .get(header::HOST)
+                        .and_then(|value| value.to_str().ok())
+                })
                 .unwrap_or_default();
 
             if !host.is_empty() && origin_host != host {

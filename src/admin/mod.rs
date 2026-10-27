@@ -15,7 +15,7 @@ mod update;
 #[cfg(test)]
 mod tests;
 
-pub use auth::bootstrap;
+pub use auth::{bootstrap, AdminSession, LoginLimiter};
 
 use axum::{
     middleware,
@@ -25,7 +25,7 @@ use axum::{
 
 use crate::state::AppState;
 
-pub fn routes() -> Router<AppState> {
+pub fn routes(trust_proxy: bool) -> Router<AppState> {
     Router::new()
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
@@ -37,6 +37,11 @@ pub fn routes() -> Router<AppState> {
             get(channels::get)
                 .put(channels::update)
                 .delete(channels::delete),
+        )
+        .route("/api/channels/test", post(channels::probe_test))
+        .route(
+            "/api/channels/fetch-models",
+            post(channels::probe_fetch_models),
         )
         .route("/api/channels/{id}/test", post(channels::test))
         .route(
@@ -58,5 +63,5 @@ pub fn routes() -> Router<AppState> {
         .route("/api/metrics/stream", get(metrics::stream))
         .route("/api/update/check", get(update::check))
         .route("/api/update/apply", post(update::apply))
-        .layer(middleware::from_fn(csrf::guard))
+        .layer(middleware::from_fn_with_state(trust_proxy, csrf::guard))
 }

@@ -160,6 +160,9 @@ pub async fn update(
         setting::upsert(&state.db, "update_source", value).await?;
     }
 
+    state.cache.invalidate_defaults();
+    state.clients.clear();
+
     let rows = setting::all(&state.db).await?;
     Ok(Json(SettingsOutput::from_rows(rows)))
 }

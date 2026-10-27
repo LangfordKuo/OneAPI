@@ -14,7 +14,7 @@ import {
 } from 'antd';
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { api } from './api/client';
-import type { Admin, SetupStatus } from './api/types';
+import type { Admin, SetupStatus, SiteInfo } from './api/types';
 import Login from './pages/Login';
 import Setup from './pages/Setup';
 
@@ -52,6 +52,12 @@ export default function App() {
   const [dark, setDark] = useState(
     () => window.localStorage.getItem('oneapi-theme') === 'dark',
   );
+  const siteQuery = useQuery({
+    queryKey: ['site'],
+    queryFn: () => api.get<SiteInfo>('/api/site'),
+    retry: false,
+  });
+  const siteName = siteQuery.data?.site_name ?? 'OneAPI';
   const setupQuery = useQuery({
     queryKey: ['setup-status'],
     queryFn: () => api.get<SetupStatus>('/api/setup/status'),
@@ -68,6 +74,10 @@ export default function App() {
     window.localStorage.setItem('oneapi-theme', dark ? 'dark' : 'light');
     document.body.style.background = dark ? '#000' : '';
   }, [dark]);
+
+  useEffect(() => {
+    document.title = siteName;
+  }, [siteName]);
 
   const logout = useMutation({
     mutationFn: () => api.post('/api/auth/logout'),
@@ -119,7 +129,13 @@ export default function App() {
   }
 
   if (!setup.initialized) {
-    return themed(<Setup status={setup} onSuccess={() => window.location.assign('/')} />);
+    return themed(
+      <Setup
+        status={setup}
+        siteName={siteName}
+        onSuccess={() => window.location.assign('/')}
+      />,
+    );
   }
 
   if (meQuery.isLoading) {
@@ -131,13 +147,17 @@ export default function App() {
   }
 
   if (meQuery.isError) {
-    return themed(<Login onSuccess={() => void meQuery.refetch()} />);
+    return themed(
+      <Login siteName={siteName} onSuccess={() => void meQuery.refetch()} />,
+    );
   }
 
   return themed(
     <Layout style={{ minHeight: '100vh' }}>
       <Sider theme={dark ? 'dark' : 'light'} width={220}>
-        <div style={{ padding: '20px 16px', fontSize: 18, fontWeight: 600 }}>OneAPI</div>
+        <div style={{ padding: '20px 16px', fontSize: 18, fontWeight: 600 }}>
+          {siteName}
+        </div>
         <Menu
           mode="inline"
           selectedKeys={[selectedKey(location.pathname)]}

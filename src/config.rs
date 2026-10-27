@@ -13,8 +13,8 @@ pub struct Config {
     pub database_url: Option<String>,
     pub database_path: PathBuf,
     pub log_level: String,
-    #[allow(dead_code)]
     pub cookie_secure: bool,
+    pub trust_proxy: bool,
 }
 
 impl Config {
@@ -47,6 +47,9 @@ impl Config {
         let cookie_secure = env::var("ONEAPI_COOKIE_SECURE")
             .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
+        let trust_proxy = env::var("ONEAPI_TRUST_PROXY")
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
 
         Ok(Self {
             addr,
@@ -55,6 +58,7 @@ impl Config {
             database_path,
             log_level,
             cookie_secure,
+            trust_proxy,
         })
     }
 

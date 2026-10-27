@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use axum::{
     extract::{Path, State},
-    http::{header::HeaderName, HeaderValue, StatusCode},
+    http::{header::HeaderName, HeaderMap, HeaderValue, StatusCode},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -249,6 +249,20 @@ fn validate(input: ChannelInput, creating: bool) -> Result<ValidatedChannel, App
         value => value,
     };
 
+    let priority = priority.unwrap_or(0);
+    if !(-10_000..=10_000).contains(&priority) {
+        return Err(AppError::BadRequest(
+            "priority must be between -10000 and 10000".to_string(),
+        ));
+    }
+
+    let weight = weight.unwrap_or(1);
+    if !(1..=1000).contains(&weight) {
+        return Err(AppError::BadRequest(
+            "weight must be between 1 and 1000".to_string(),
+        ));
+    }
+
     Ok(ValidatedChannel {
         name,
         kind,
@@ -259,8 +273,8 @@ fn validate(input: ChannelInput, creating: bool) -> Result<ValidatedChannel, App
         model_mapping: mapping,
         extra_headers,
         proxy_url,
-        priority: priority.unwrap_or(0),
-        weight: weight.unwrap_or(1).max(1),
+        priority,
+        weight,
         timeout_ms,
         enabled: if enabled.unwrap_or(true) { 1 } else { 0 },
     })
@@ -324,6 +338,7 @@ pub async fn create(
     let api_key_enc = state.crypto.encrypt(&api_key).map_err(AppError::Internal)?;
     let write = to_write(validated, api_key_enc)?;
     let channel = models::channel::create(&state.db, &write, models::now_ms()).await?;
+    state.cache.invalidate_channels();
 
     Ok((
         StatusCode::CREATED,
@@ -351,6 +366,8 @@ pub async fn update(
     if !models::channel::update(&state.db, id, &write, models::now_ms()).await? {
         return Err(AppError::NotFound("channel not found".to_string()));
     }
+    state.cache.invalidate_channels();
+    state.clients.clear();
 
     let channel = models::channel::get(&state.db, id)
         .await?
@@ -366,7 +383,18 @@ pub async fn delete(
     if !models::channel::delete(&state.db, id).await? {
         return Err(AppError::NotFound("channel not found".to_string()));
     }
+    state.cache.invalidate_channels();
+    state.clients.clear();
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChannelProbeInput {
+    /// Set when testing an existing channel so a blank api_key keeps the stored one.
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(flatten)]
+    pub channel: ChannelInput,
 }
 
 pub async fn test(
@@ -377,8 +405,86 @@ pub async fn test(
     let channel = models::channel::get(&state.db, id)
         .await?
         .ok_or_else(|| AppError::NotFound("channel not found".to_string()))?;
+    Ok(Json(run_test(&state, &channel).await?))
+}
 
-    let model = first_test_model(&channel).ok_or_else(|| {
+pub async fn fetch_models(
+    State(state): State<AppState>,
+    _session: AdminSession,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, AppError> {
+    let channel = models::channel::get(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("channel not found".to_string()))?;
+    Ok(Json(run_fetch_models(&state, &channel).await?))
+}
+
+pub async fn probe_test(
+    State(state): State<AppState>,
+    _session: AdminSession,
+    Json(input): Json<ChannelProbeInput>,
+) -> Result<Json<Value>, AppError> {
+    let channel = probe_channel(&state, input).await?;
+    Ok(Json(run_test(&state, &channel).await?))
+}
+
+pub async fn probe_fetch_models(
+    State(state): State<AppState>,
+    _session: AdminSession,
+    Json(input): Json<ChannelProbeInput>,
+) -> Result<Json<Value>, AppError> {
+    let channel = probe_channel(&state, input).await?;
+    Ok(Json(run_fetch_models(&state, &channel).await?))
+}
+
+/// Build a transient channel from an unsaved form so the connectivity test and
+/// model fetch work before the channel is persisted.
+async fn probe_channel(state: &AppState, input: ChannelProbeInput) -> Result<Channel, AppError> {
+    let creating = input.id.is_none();
+    let validated = validate(input.channel, creating)?;
+    let api_key_enc = match &validated.api_key {
+        Some(api_key) => state.crypto.encrypt(api_key).map_err(AppError::Internal)?,
+        None => {
+            let id = input.id.ok_or_else(|| {
+                AppError::BadRequest("api_key is required when creating a channel".to_string())
+            })?;
+            models::channel::get(&state.db, id)
+                .await?
+                .ok_or_else(|| AppError::NotFound("channel not found".to_string()))?
+                .api_key_enc
+        }
+    };
+    let now = models::now_ms();
+
+    Ok(Channel {
+        id: input.id.unwrap_or(0),
+        name: validated.name,
+        kind: validated.kind.as_str().to_string(),
+        base_url: validated.base_url,
+        api_key_enc,
+        auth_header: validated.auth_header,
+        models: serde_json::to_string(&validated.models)
+            .map_err(|error| AppError::Internal(error.into()))?,
+        model_mapping: serde_json::to_string(&validated.model_mapping)
+            .map_err(|error| AppError::Internal(error.into()))?,
+        extra_headers: serde_json::to_string(&validated.extra_headers)
+            .map_err(|error| AppError::Internal(error.into()))?,
+        proxy_url: validated.proxy_url,
+        priority: validated.priority,
+        weight: validated.weight,
+        timeout_ms: validated.timeout_ms,
+        enabled: validated.enabled,
+        last_error: None,
+        last_error_at: None,
+        disabled_until: None,
+        consecutive_failures: 0,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+async fn run_test(state: &AppState, channel: &Channel) -> Result<Value, AppError> {
+    let model = first_test_model(channel).ok_or_else(|| {
         AppError::BadRequest(
             "channel has no concrete model to test; add a model name first".to_string(),
         )
@@ -386,9 +492,9 @@ pub async fn test(
 
     let started = Instant::now();
     let body = test_body(&channel.kind, &model);
-    let result = send_test(&state, &channel, body).await;
+    let result = send_test(state, channel, body).await;
 
-    Ok(Json(match result {
+    Ok(match result {
         Ok((status, text)) => json!({
             "ok": status.is_success(),
             "status": status.as_u16(),
@@ -401,22 +507,14 @@ pub async fn test(
             "latency_ms": started.elapsed().as_millis() as i64,
             "message": error.to_string(),
         }),
-    }))
+    })
 }
 
-pub async fn fetch_models(
-    State(state): State<AppState>,
-    _session: AdminSession,
-    Path(id): Path<i64>,
-) -> Result<Json<Value>, AppError> {
-    let channel = models::channel::get(&state.db, id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("channel not found".to_string()))?;
-
+async fn run_fetch_models(state: &AppState, channel: &Channel) -> Result<Value, AppError> {
     let started = Instant::now();
-    let result = send_models(&state, &channel).await;
+    let result = send_models(state, channel).await;
 
-    Ok(Json(match result {
+    Ok(match result {
         Ok((status, text)) => {
             let models = parse_models(&text);
             json!({
@@ -438,7 +536,7 @@ pub async fn fetch_models(
             "models": [],
             "message": error.to_string(),
         }),
-    }))
+    })
 }
 
 fn first_test_model(channel: &Channel) -> Option<String> {
@@ -478,8 +576,10 @@ async fn send_test(
     channel: &Channel,
     body: Value,
 ) -> anyhow::Result<(StatusCode, String)> {
-    let client = upstream::build_client(channel)?;
-    let request = upstream::build_request(&client, channel, &state.crypto, &body)?;
+    let defaults = state.cache.defaults(&state.db).await?;
+    let client = upstream::build_client(channel, defaults.nonstream_timeout_ms)?;
+    let request =
+        upstream::build_request(&client, channel, &state.crypto, &body, &HeaderMap::new())?;
     let response = request.send().await?;
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
@@ -487,11 +587,13 @@ async fn send_test(
 }
 
 async fn send_models(state: &AppState, channel: &Channel) -> anyhow::Result<(StatusCode, String)> {
-    let client = upstream::build_client(channel)?;
+    let defaults = state.cache.defaults(&state.db).await?;
+    let client = upstream::build_client(channel, defaults.nonstream_timeout_ms)?;
     let request = upstream::apply_auth(
         client.get(upstream::models_url(channel)),
         channel,
         &state.crypto,
+        &HeaderMap::new(),
     )?;
     let response = request.send().await?;
     let status = response.status();

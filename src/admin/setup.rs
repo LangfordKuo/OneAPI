@@ -156,6 +156,7 @@ fn write_env_file(config: &Config, username: &str) -> std::io::Result<(bool, Str
     }
     contents.push_str(&format!("ONEAPI_LOG_LEVEL={}\n", config.log_level));
     contents.push_str(&format!("ONEAPI_COOKIE_SECURE={}\n", config.cookie_secure));
+    contents.push_str(&format!("ONEAPI_TRUST_PROXY={}\n", config.trust_proxy));
     contents.push_str(&format!("ONEAPI_ADMIN_USER={}\n", username));
     contents.push_str("# The admin password is stored as an Argon2 hash in SQLite.\n");
     contents

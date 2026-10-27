@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：v0.1.1 已发布；新增实时 tok/s 与在线更新
-- 当前分支：`main`
-- 最近发布：`v0.1.1`
+- 当前阶段：审查计划阶段 A–D 与 E3 已完成，v0.1.2 全量实测通过（分支 `review-plan`）
+- 当前分支：`review-plan`
+- 最近发布：`v0.1.2`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -167,6 +167,64 @@
 - 发布后发现 Linux/macOS 归档中的二进制权限为 0644，已重新打包并覆盖 v0.1.1 资产；Release workflow 已补 `chmod +x`，后续版本不会再出现该问题。
 - 修复空数据库仪表盘 500：`COALESCE(AVG(latency_ms), 0)` 在无数据时返回 INTEGER，与 SQLx 的 `f64` 不兼容；改为 `0.0`，并新增空库 summary/timeseries/breakdown 回归测试（72 个测试通过）。
 
+## v0.1.2 发布记录
+
+- 版本号从 `0.1.1` 升至 `0.1.2`，包含审查计划阶段 A–D 与阶段 E3（渠道指数退避 + 半开探测）。
+- 验证：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（89 个测试）、`npm run lint`、`npm run build` 全部通过。
+- 发布前全量实测：release 二进制 + 本地 mock 上游 + 真实 HTTP 流程，51 项断言全部通过，覆盖安装向导/登录/Key/渠道 CRUD、同协议与跨协议（Chat↔Anthropic/Responses）非流式与流式、故障转移、首次失败不冷却、第二次失败进入冷却、冷却期跳过、并发半开探测仅放行一个请求、探测成功清零、探测占用时返回 `503 channel_recovering`、Responses 落库与 `previous_response_id`、401/404 错误形状、仪表盘/日志聚合与内嵌前端。
+
+## 审查计划阶段 A（v0.1.2 修复与一致性）
+
+- 新增 `docs/REVIEW_PLAN.md`，按阶段记录审查结论与验收标准。
+- 设置项接线：`default_max_tokens` 用于跨协议编码到 Anthropic 时的缺省值；`nonstream_timeout_seconds` / `stream_idle_timeout_seconds` 作为渠道未配置 `timeout_ms` 时的默认超时；`site_name` 通过公开 `GET /api/site` 用于登录页、安装页、侧边栏与浏览器标题。
+- 新增 `POST /v1/messages/count_tokens`：Anthropic 上游原样转发，其他上游按字符数估算并返回 Anthropic 形状。
+- 通配符渠道的模型列表回退到最近 30 天 `usage_logs` 中出现的模型；Playground 模型选择改为可自由输入的 AutoComplete。
+- 渠道测试/拉取模型新增未保存配置接口 `POST /api/channels/test` 与 `/api/channels/fetch-models`；前端抽屉直接提交当前表单。
+- 转发客户端白名单请求头（`anthropic-beta`、`openai-beta` 等），鉴权头与 Cookie 不转发；渠道 `extra_headers` 优先。
+- 新增迁移 `0002_usage_cache_creation.sql`，日志记录并展示 `cache_creation_tokens`。
+- 后端校验渠道 `weight`（1–1000）与 `priority`（-10000–10000）；日志页空态文案修正。
+- 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（79 个测试）、`npm run build` 全部通过。
+
+## 审查计划阶段 B（安全与稳定性）
+
+- `/api/system` 改为需要管理员会话，未登录不再暴露数据目录。
+- 管理员登录新增失败限速：按客户端 IP + 用户名计数，5/10/15 次失败分别锁定 30s/5min/15min，返回 429；服务启动改为携带 ConnectInfo。
+- 新增 `ONEAPI_TRUST_PROXY`：受信反代后可改用 `X-Forwarded-Host` 做 CSRF 同源判断；安装向导同步写入该配置。
+- Responses `previous_response_id` 展开增加 2000 条 / 16MB 上限，超限返回 400。
+- 保留期清理任务顺带删除过期会话（启动与每 6 小时）。
+- 在线更新完成后清理临时二进制；README 补充“GitHub 账号 + HTTPS”信任模型说明。
+- 前端实时指标改用 fetch + SSE 解析，401 时停止重连；网关 SSE 在等待上游时每 15 秒发送心跳注释，且心跳不会延长上游空闲超时。
+- 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（82 个测试）、`npm run build` 全部通过。
+
+## 审查计划阶段 C（性能与资源效率）
+
+- 新增渠道级 reqwest Client 缓存：按渠道 id + updated_at + 超时 + 流式标记复用连接池；渠道更新/删除与设置变更时清空。
+- 新增进程内渠道与网关设置缓存（30 秒 TTL），后台写接口主动失效；`GatewayDefaults` 改为一次查询读取全部设置。
+- usage 日志改为单写队列（容量 1024、批量 100、事务写入），队列满时回退同步写；渠道成功状态更新只在确需重置时执行。
+- 对所有非 SSE 响应启用 gzip 压缩。
+- 日志 model / request_id 过滤改为 GLOB 前缀匹配并转义元字符；新增 status/source/channel + created_at 复合索引迁移 `0003_usage_log_indexes.sql`。
+- 跨协议请求只解析 IR 一次，失败切换时复用。
+- 实时指标改为原子分桶，减少锁竞争；前端构建按 react/query/antd 拆分 vendor chunk。
+- 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（84 个测试）、`npm run build` 全部通过。
+
+## 审查计划阶段 D（工程卫生与文档同步）
+
+- 依赖清理：移除未使用的 `eventsource-stream`；`tower` 仅测试使用，移入 `[dev-dependencies]`；`tower-http` 去掉未启用的 `timeout`、`limit` feature。
+- 移除 `src/error.rs` 中已无必要的 `#[allow(dead_code)]`，Clippy 仍保持零警告。
+- 文档同步：README 更新发布进度、真实 CI runner、环境变量与 `0.1.1` 镜像/标签示例；`docs/IMPLEMENTATION_PLAN.md` 补充 `GET /api/site`、ESLint 与新环境变量，并新增变更记录。
+- 前端版本对齐 `package.json` / `package-lock.json` 到 `0.1.1`。
+- 引入 ESLint 10 flat config（typescript-eslint、react-hooks、react-refresh），新增 `npm run lint`，CI 前端任务增加 lint 步骤；Playground 默认模型改为派生值，消除 effect 内 setState。
+- `.env.example` 补齐 `ONEAPI_TRUST_PROXY`、`ONEAPI_ALLOW_SELF_UPDATE`、`ONEAPI_UPDATE_API_BASE` 说明。
+- 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`、`npm run lint`、`npm run build` 全部通过。
+
+## 审查计划阶段 E3（渠道健康与退避）
+
+- 渠道冷却从固定 60s 改为指数退避：首次失败只记录错误；第二次连续失败起冷却 60s，之后按 120s/240s/480s/960s 翻倍，30 分钟封顶；成功清零。
+- 冷却到期后进入半开状态：进程内 `ChannelProbes` 只放行一个探测请求，其余请求跳过该渠道；探测成功立即恢复，失败则继续按指数退避冷却。流式探测期间 lease 随流任务持有，首帧成功后其他请求即可正常进入。
+- 新增 `AppState::mark_channel_failure` / `mark_channel_success`：失败写入后立即失效渠道缓存，冷却不再受 30s 缓存 TTL 影响；健康渠道成功时不产生额外写放大。
+- 当所有候选渠道都处于探测占用状态时，网关返回 `503 channel_recovering`，避免把可恢复状态误报为 502。
+- 新增退避序列与探测闸门单测；验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（89 个测试）、`npm run lint`、`npm run build` 全部通过。
+
 ## AOCI 状态
 
 - 版本：`0.1.0-rc22`，二进制 `/usr/local/bin/aoci`。
@@ -177,8 +235,8 @@
 
 ## 下一步
 
-1. 推送 `v0.1.0` 标签，触发 GitHub Actions 六平台构建、GitHub Release 与 GHCR 多架构镜像推送。
-2. 首次发布后检查 GHCR 包可见性，按需改为 public。
+1. 审查计划阶段 A–D 与 E3 已合并回 `main` 并发布 `v0.1.2`。
+2. 阶段 E 剩余项（速率限制与额度、Prometheus `/metrics`、日志导出/重放、备份恢复、Playground 增强、多管理员/RBAC 与 PostgreSQL）仍是路线图。
 3. 后续版本按 `Cargo.toml` 版本打标签，保留数据目录升级。
 
 ## 交接约定

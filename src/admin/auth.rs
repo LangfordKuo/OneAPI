@@ -1,5 +1,12 @@
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Mutex, MutexGuard},
+    time::{Duration, Instant},
+};
+
 use axum::{
-    extract::{FromRequestParts, State},
+    extract::{ConnectInfo, FromRequestParts, State},
     http::{header, request::Parts, StatusCode},
     Json,
 };
@@ -17,8 +24,90 @@ use crate::{
 pub const SESSION_COOKIE: &str = "oneapi_session";
 const SESSION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+#[derive(Debug, Default)]
+pub struct LoginLimiter {
+    attempts: Mutex<HashMap<String, Attempt>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Attempt {
+    failures: u32,
+    last_failure: Instant,
+    blocked_until: Option<Instant>,
+}
+
+impl LoginLimiter {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, Attempt>> {
+        self.attempts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Remaining lockout for a client/username pair, if any.
+    pub fn blocked_for(&self, key: &str) -> Option<Duration> {
+        let now = Instant::now();
+        let attempts = self.lock();
+        match attempts.get(key).and_then(|entry| entry.blocked_until) {
+            Some(until) if until > now => Some(until - now),
+            _ => None,
+        }
+    }
+
+    pub fn record_failure(&self, key: &str) {
+        let now = Instant::now();
+        let mut attempts = self.lock();
+        if attempts.len() > 10_000 {
+            attempts.retain(|_, entry| {
+                now.duration_since(entry.last_failure) < Duration::from_secs(3_600)
+            });
+        }
+
+        let entry = attempts.entry(key.to_string()).or_insert(Attempt {
+            failures: 0,
+            last_failure: now,
+            blocked_until: None,
+        });
+        entry.failures = entry.failures.saturating_add(1);
+        entry.last_failure = now;
+
+        let block_secs = match entry.failures {
+            5..=9 => 30,
+            10..=14 => 300,
+            15.. => 900,
+            _ => 0,
+        };
+        if block_secs > 0 {
+            entry.blocked_until = Some(now + Duration::from_secs(block_secs));
+        }
+    }
+
+    pub fn record_success(&self, key: &str) {
+        self.lock().remove(key);
+    }
+}
+
 pub struct AdminSession {
     pub admin: Admin,
+}
+
+/// Optional client address. `ConnectInfo` is only present when the server is
+/// started with connect-info support (and absent in oneshot tests).
+pub struct ClientAddr(pub Option<std::net::IpAddr>);
+
+impl FromRequestParts<AppState> for ClientAddr {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| addr.ip()),
+        ))
+    }
 }
 
 impl FromRequestParts<AppState> for AdminSession {
@@ -73,6 +162,7 @@ impl From<&Admin> for AdminOutput {
 pub async fn login(
     State(state): State<AppState>,
     jar: CookieJar,
+    client_addr: ClientAddr,
     Json(input): Json<LoginInput>,
 ) -> Result<(CookieJar, Json<AdminOutput>), AppError> {
     let username = input.username.trim();
@@ -82,14 +172,30 @@ pub async fn login(
         ));
     }
 
-    let admin = models::admin::find_by_username(&state.db, username)
-        .await?
-        .ok_or(AppError::Unauthorized)?;
+    let client_ip = client_addr
+        .0
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let limiter_key = format!("{client_ip}|{username}");
+
+    if let Some(wait) = state.login_limiter.blocked_for(&limiter_key) {
+        return Err(AppError::TooManyRequests(format!(
+            "too many failed login attempts; retry in {} seconds",
+            wait.as_secs().max(1)
+        )));
+    }
+
+    let Some(admin) = models::admin::find_by_username(&state.db, username).await? else {
+        state.login_limiter.record_failure(&limiter_key);
+        return Err(AppError::Unauthorized);
+    };
 
     if !security::verify_password(&admin.password_hash, &input.password) {
+        state.login_limiter.record_failure(&limiter_key);
         return Err(AppError::Unauthorized);
     }
 
+    state.login_limiter.record_success(&limiter_key);
     let jar = issue_session(&state, jar, admin.id).await?;
     Ok((jar, Json(AdminOutput::from(&admin))))
 }

@@ -7,7 +7,13 @@ interface LoginValues {
   password: string;
 }
 
-export default function Login({ onSuccess }: { onSuccess: () => void }) {
+export default function Login({
+  onSuccess,
+  siteName = 'OneAPI',
+}: {
+  onSuccess: () => void;
+  siteName?: string;
+}) {
   const login = useMutation({
     mutationFn: (values: LoginValues) =>
       api.post<{ username: string }>('/api/auth/login', values),
@@ -18,7 +24,7 @@ export default function Login({ onSuccess }: { onSuccess: () => void }) {
     <div className="login-shell">
       <Card style={{ width: 380 }}>
         <Typography.Title level={3} style={{ marginBottom: 4 }}>
-          OneAPI
+          {siteName}
         </Typography.Title>
         <Typography.Paragraph type="secondary">登录管理后台</Typography.Paragraph>
         {login.isError && (

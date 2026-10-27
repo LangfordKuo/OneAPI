@@ -64,12 +64,18 @@ async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let crypto = Arc::new(security::Crypto::load_or_create(&config.data_dir)?);
     admin::bootstrap(&db).await?;
 
+    let usage_writer = Arc::new(gateway::usage::UsageWriter::start(db.clone()));
     let state = AppState {
         config: Arc::new(config.clone()),
         db,
         crypto,
         live: Arc::new(metrics::LiveMetrics::default()),
         updates: std::sync::Arc::new(crate::state::UpdateState::default()),
+        login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
+        clients: Arc::new(upstream::ClientCache::default()),
+        cache: Arc::new(state::RuntimeCache::default()),
+        probes: Arc::new(state::ChannelProbes::default()),
+        usage_writer: Some(usage_writer),
         started_at: chrono::Utc::now(),
     };
 
@@ -89,15 +95,18 @@ async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
         "OneAPI listening"
     );
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = shutdown_signal() => {},
-                _ = shutdown_updates.shutdown.notified() => {},
-            }
-        })
-        .await
-        .context("HTTP server failed")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        tokio::select! {
+            _ = shutdown_signal() => {},
+            _ = shutdown_updates.shutdown.notified() => {},
+        }
+    })
+    .await
+    .context("HTTP server failed")?;
 
     if updates
         .restart_requested

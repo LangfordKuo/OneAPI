@@ -19,7 +19,7 @@ use crate::{
         sse::{SseFrame, SseParser},
         Protocol, StreamDecoder, StreamEncodeOptions, StreamEncoder, StreamEvent, Usage,
     },
-    state::AppState,
+    state::{AppState, ProbeLease},
 };
 
 use super::{
@@ -67,6 +67,8 @@ pub struct StreamJob {
     pub detail_request: Option<String>,
     pub stored_request: Option<Value>,
     pub stream: ByteStream,
+    /// Half-open trial lease for a recovering channel; held until the stream ends.
+    pub _probe: Option<ProbeLease>,
 }
 
 /// Commit the stream to the client only after the first upstream SSE frame has
@@ -107,6 +109,46 @@ enum FrameOutcome {
     Ok,
     Disconnected,
     Failed(String, String),
+}
+
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const HEARTBEAT_FRAME: &[u8] = b": keep-alive\n\n";
+
+enum WaitOutcome {
+    Next(Option<Result<Bytes, std::io::Error>>),
+    TimedOut,
+    Disconnected,
+}
+
+/// Wait for the next upstream chunk while emitting SSE heartbeat comments. The
+/// idle deadline is absolute, so heartbeats do not extend the upstream timeout.
+async fn wait_for_upstream(
+    upstream: &mut ByteStream,
+    tx: &mpsc::Sender<Bytes>,
+    idle_timeout: Duration,
+) -> WaitOutcome {
+    let deadline = Instant::now() + idle_timeout;
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return WaitOutcome::TimedOut;
+        }
+        let wait = (deadline - now).min(HEARTBEAT_INTERVAL);
+
+        tokio::select! {
+            _ = tx.closed() => return WaitOutcome::Disconnected,
+            _ = tokio::time::sleep(wait) => {
+                if Instant::now() >= deadline {
+                    return WaitOutcome::TimedOut;
+                }
+                if tx.send(Bytes::from_static(HEARTBEAT_FRAME)).await.is_err() {
+                    return WaitOutcome::Disconnected;
+                }
+            }
+            result = upstream.next() => return WaitOutcome::Next(result),
+        }
+    }
 }
 
 async fn run(
@@ -166,7 +208,7 @@ async fn run(
         return;
     }
 
-    let _ = models::channel::mark_success(&job.state.db, job.channel_id).await;
+    job.state.mark_channel_success(job.channel_id).await;
 
     pending.push_front(first);
 
@@ -197,35 +239,32 @@ async fn run(
         } else if stream_done {
             break;
         } else {
-            let next = tokio::select! {
-                _ = tx.closed() => {
+            match wait_for_upstream(&mut upstream, &tx, job.idle_timeout).await {
+                WaitOutcome::Disconnected => {
                     client_disconnected = true;
                     break;
                 }
-                result = timeout(job.idle_timeout, upstream.next()) => result,
-            };
-            match next {
-                Ok(Some(Ok(chunk))) => {
-                    pending.extend(parser.push(&chunk));
-                    continue;
-                }
-                Ok(Some(Err(error))) => {
-                    stream_error = Some(("upstream_unreachable".to_string(), error.to_string()));
-                    synthesize_error = true;
-                    break;
-                }
-                Ok(None) => {
-                    pending.extend(parser.finish());
-                    stream_done = true;
-                    continue;
-                }
-                Err(_) => {
+                WaitOutcome::TimedOut => {
                     stream_error = Some((
                         "upstream_stream_timeout".to_string(),
                         format!("upstream stream was idle for {:?}", job.idle_timeout),
                     ));
                     synthesize_error = true;
                     break;
+                }
+                WaitOutcome::Next(Some(Ok(chunk))) => {
+                    pending.extend(parser.push(&chunk));
+                    continue;
+                }
+                WaitOutcome::Next(Some(Err(error))) => {
+                    stream_error = Some(("upstream_unreachable".to_string(), error.to_string()));
+                    synthesize_error = true;
+                    break;
+                }
+                WaitOutcome::Next(None) => {
+                    pending.extend(parser.finish());
+                    stream_done = true;
+                    continue;
                 }
             }
         };
@@ -389,14 +428,9 @@ async fn run(
 
     if let Some((error_type, message)) = &stream_error {
         if !client_disconnected {
-            let _ = models::channel::mark_failure(
-                &job.state.db,
-                job.channel_id,
-                &format!("{error_type}: {message}"),
-                models::now_ms(),
-                60_000,
-            )
-            .await;
+            job.state
+                .mark_channel_failure(job.channel_id, &format!("{error_type}: {message}"))
+                .await;
         }
     }
 
@@ -420,13 +454,7 @@ async fn run(
         created_at: models::now_ms(),
     };
 
-    if let Err(error) = usage::insert(&job.state.db, &record).await {
-        tracing::error!(
-            error = %error,
-            request_id = %job.request_id,
-            "failed to write streaming usage log"
-        );
-    }
+    usage::record(&job.state, &record).await;
 
     // Keep the response body open until persistence is done so a client that has
     // consumed the stream can immediately fetch a stored Responses object.
@@ -816,6 +844,7 @@ mod tests {
             database_path: data_dir.join("test.db"),
             log_level: "error".to_string(),
             cookie_secure: false,
+            trust_proxy: false,
         };
         let db = db::connect(&config).await.expect("database");
         let crypto = std::sync::Arc::new(
@@ -829,6 +858,11 @@ mod tests {
                 crypto,
                 live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
                 updates: std::sync::Arc::new(crate::state::UpdateState::default()),
+                login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
+                clients: std::sync::Arc::new(crate::upstream::ClientCache::default()),
+                cache: std::sync::Arc::new(crate::state::RuntimeCache::default()),
+                probes: std::sync::Arc::new(crate::state::ChannelProbes::default()),
+                usage_writer: None,
                 started_at: chrono::Utc::now(),
             },
         )
@@ -888,6 +922,7 @@ mod tests {
             detail_request: None,
             stored_request: None,
             stream,
+            _probe: None,
         }
     }
 

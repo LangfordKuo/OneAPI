@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::{
     error::AppError,
     models::{self, channel::Channel, now_ms},
-    protocol::{Protocol, Usage},
-    state::AppState,
+    protocol::{Protocol, UnifiedRequest, Usage},
+    state::{AppState, ProbeAttempt},
     upstream,
 };
 
@@ -77,9 +77,8 @@ pub async fn proxy_with_identity(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let store_request_bodies = models::setting::get_bool(&state.db, "store_request_bodies", false)
-        .await
-        .unwrap_or(false);
+    let defaults = state.cache.defaults(&state.db).await?;
+    let store_request_bodies = defaults.store_request_bodies;
     let detail_request =
         store_request_bodies.then(|| serde_json::to_string(&body).unwrap_or_default());
 
@@ -205,7 +204,7 @@ pub async fn proxy_with_identity(
         false
     };
 
-    let channels = models::channel::list(&state.db).await?;
+    let channels = state.cache.channels(&state.db).await?;
     let candidates = select::candidates(channels, &model);
     if candidates.is_empty() {
         let message = "no channel available for this model";
@@ -250,6 +249,8 @@ pub async fn proxy_with_identity(
             client_wants_usage,
             store_request_bodies,
             detail_request.clone(),
+            headers,
+            defaults,
         )
         .await;
     }
@@ -259,8 +260,18 @@ pub async fn proxy_with_identity(
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
+    let mut unified_request: Option<UnifiedRequest> = None;
+    let mut probe_deferred = false;
 
     for candidate in candidates {
+        let _probe = match state.probes.acquire(&candidate.channel, now_ms()) {
+            ProbeAttempt::NotNeeded => None,
+            ProbeAttempt::Acquired(lease) => Some(lease),
+            ProbeAttempt::Busy => {
+                probe_deferred = true;
+                continue;
+            }
+        };
         ctx.attempts += 1;
         let channel = &candidate.channel;
         let upstream = protocol_for_kind(&channel.kind);
@@ -275,28 +286,34 @@ pub async fn proxy_with_identity(
             }
             value
         } else {
-            let mut ir = match inbound.parse_request(&body) {
-                Ok(ir) => ir,
-                Err(error) => {
-                    let message = error.to_string();
-                    ctx.record(
-                        state,
-                        Some(channel),
-                        Some(&candidate.upstream_model),
-                        upstream,
-                        StatusCode::BAD_REQUEST,
-                        Some(("invalid_request_error", message.as_str())),
-                        Usage::default(),
-                    )
-                    .await;
-                    return Ok(error::client_error(
-                        inbound,
-                        StatusCode::BAD_REQUEST,
-                        message,
-                        "invalid_request_error",
-                    ));
-                }
-            };
+            if unified_request.is_none() {
+                unified_request = Some(match inbound.parse_request(&body) {
+                    Ok(ir) => ir,
+                    Err(error) => {
+                        let message = error.to_string();
+                        ctx.record(
+                            state,
+                            Some(channel),
+                            Some(&candidate.upstream_model),
+                            upstream,
+                            StatusCode::BAD_REQUEST,
+                            Some(("invalid_request_error", message.as_str())),
+                            Usage::default(),
+                        )
+                        .await;
+                        return Ok(error::client_error(
+                            inbound,
+                            StatusCode::BAD_REQUEST,
+                            message,
+                            "invalid_request_error",
+                        ));
+                    }
+                });
+            }
+            let mut ir = unified_request.clone().expect("parsed above");
+            if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
+                ir.max_tokens = Some(defaults.default_max_tokens);
+            }
             ir.model = candidate.upstream_model.clone();
             match upstream.encode_request(&ir) {
                 Ok(value) => value,
@@ -322,37 +339,31 @@ pub async fn proxy_with_identity(
             }
         };
 
-        let client = match upstream::build_client(channel) {
+        let client = match state
+            .clients
+            .get(channel, defaults.nonstream_timeout_ms, false)
+        {
             Ok(client) => client,
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
 
-        let request = match upstream::build_request(&client, channel, &state.crypto, &request_body)
-        {
+        let request = match upstream::build_request(
+            &client,
+            channel,
+            &state.crypto,
+            &request_body,
+            headers,
+        ) {
             Ok(request) => request,
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
@@ -362,14 +373,7 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_unreachable".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
@@ -380,21 +384,14 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_unreachable".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
         let upstream_value = serde_json::from_str::<Value>(&text).ok();
 
         if status.is_success() {
-            let _ = models::channel::mark_success(&state.db, channel.id).await;
+            state.mark_channel_success(channel.id).await;
 
             let mut client_json: Option<Value> = None;
             let usage = if upstream == inbound {
@@ -408,14 +405,7 @@ pub async fn proxy_with_identity(
                     client_json = upstream_value.clone();
                     if client_json.is_none() {
                         let message = "upstream returned a non-JSON response";
-                        let _ = models::channel::mark_failure(
-                            &state.db,
-                            channel.id,
-                            message,
-                            now_ms(),
-                            60_000,
-                        )
-                        .await;
+                        state.mark_channel_failure(channel.id, message).await;
                         ctx.record(
                             state,
                             Some(channel),
@@ -439,14 +429,7 @@ pub async fn proxy_with_identity(
             } else {
                 let Some(value) = upstream_value.as_ref() else {
                     let message = "upstream returned a non-JSON response";
-                    let _ = models::channel::mark_failure(
-                        &state.db,
-                        channel.id,
-                        message,
-                        now_ms(),
-                        60_000,
-                    )
-                    .await;
+                    state.mark_channel_failure(channel.id, message).await;
                     ctx.record(
                         state,
                         Some(channel),
@@ -619,9 +602,7 @@ pub async fn proxy_with_identity(
 
         let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
         if is_retryable(status) {
-            let _ =
-                models::channel::mark_failure(&state.db, channel.id, &message, now_ms(), 60_000)
-                    .await;
+            state.mark_channel_failure(channel.id, &message).await;
             last_error_type = error_type;
             last_message = message;
             continue;
@@ -644,6 +625,33 @@ pub async fn proxy_with_identity(
             Some(value) => error::upstream_error(inbound, status, &value),
             None => error::client_error(inbound, status, message, error_type.as_str()),
         });
+    }
+
+    if ctx.attempts == 0 && probe_deferred {
+        let message = "upstream channels are recovering; retry shortly";
+        ctx.record(
+            state,
+            None,
+            None,
+            inbound,
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(("channel_recovering", message)),
+            Usage::default(),
+        )
+        .await;
+        store_request_detail(
+            state,
+            &request_id,
+            detail_request.as_deref(),
+            &error::client_error_value(inbound, message, "channel_recovering").to_string(),
+        )
+        .await;
+        return Ok(error::client_error(
+            inbound,
+            StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            "channel_recovering",
+        ));
     }
 
     ctx.record(
@@ -690,6 +698,8 @@ async fn proxy_stream(
     client_wants_usage: bool,
     store_request_bodies: bool,
     detail_request: Option<String>,
+    headers: &HeaderMap,
+    defaults: models::setting::GatewayDefaults,
 ) -> Result<Response, AppError> {
     let mut attempts = 0u32;
     let mut last_channel: Option<Channel> = None;
@@ -697,8 +707,18 @@ async fn proxy_stream(
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
+    let mut unified_request: Option<UnifiedRequest> = None;
+    let mut probe_deferred = false;
 
     for candidate in candidates {
+        let probe = match state.probes.acquire(&candidate.channel, now_ms()) {
+            ProbeAttempt::NotNeeded => None,
+            ProbeAttempt::Acquired(lease) => Some(lease),
+            ProbeAttempt::Busy => {
+                probe_deferred = true;
+                continue;
+            }
+        };
         attempts += 1;
         let channel = &candidate.channel;
         let upstream = protocol_for_kind(&channel.kind);
@@ -713,34 +733,40 @@ async fn proxy_stream(
             }
             value
         } else {
-            let mut ir = match inbound.parse_request(&body) {
-                Ok(ir) => ir,
-                Err(error) => {
-                    let message = error.to_string();
-                    record_stream_attempt(
-                        state,
-                        request_id,
-                        identity,
-                        model,
-                        Some(channel),
-                        Some(&candidate.upstream_model),
-                        inbound,
-                        upstream,
-                        StatusCode::BAD_REQUEST,
-                        attempts,
-                        started,
-                        Some(("invalid_request_error", message.as_str())),
-                        Usage::default(),
-                    )
-                    .await;
-                    return Ok(error::client_error(
-                        inbound,
-                        StatusCode::BAD_REQUEST,
-                        message,
-                        "invalid_request_error",
-                    ));
-                }
-            };
+            if unified_request.is_none() {
+                unified_request = Some(match inbound.parse_request(&body) {
+                    Ok(ir) => ir,
+                    Err(error) => {
+                        let message = error.to_string();
+                        record_stream_attempt(
+                            state,
+                            request_id,
+                            identity,
+                            model,
+                            Some(channel),
+                            Some(&candidate.upstream_model),
+                            inbound,
+                            upstream,
+                            StatusCode::BAD_REQUEST,
+                            attempts,
+                            started,
+                            Some(("invalid_request_error", message.as_str())),
+                            Usage::default(),
+                        )
+                        .await;
+                        return Ok(error::client_error(
+                            inbound,
+                            StatusCode::BAD_REQUEST,
+                            message,
+                            "invalid_request_error",
+                        ));
+                    }
+                });
+            }
+            let mut ir = unified_request.clone().expect("parsed above");
+            if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
+                ir.max_tokens = Some(defaults.default_max_tokens);
+            }
             ir.model = candidate.upstream_model.clone();
             match upstream.encode_request(&ir) {
                 Ok(value) => value,
@@ -788,37 +814,31 @@ async fn proxy_stream(
             }
         }
 
-        let client = match upstream::build_stream_client(channel) {
+        let client = match state
+            .clients
+            .get(channel, defaults.nonstream_timeout_ms, true)
+        {
             Ok(client) => client,
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
 
-        let request = match upstream::build_request(&client, channel, &state.crypto, &request_body)
-        {
+        let request = match upstream::build_request(
+            &client,
+            channel,
+            &state.crypto,
+            &request_body,
+            headers,
+        ) {
             Ok(request) => request.header(header::ACCEPT, "text/event-stream"),
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
@@ -828,14 +848,7 @@ async fn proxy_stream(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_unreachable".to_string();
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &last_message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
@@ -847,14 +860,7 @@ async fn proxy_stream(
             let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
 
             if is_retryable(status) {
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state.mark_channel_failure(channel.id, &message).await;
                 last_error_type = error_type;
                 last_message = message;
                 continue;
@@ -901,7 +907,7 @@ async fn proxy_stream(
             upstream_model: candidate.upstream_model.clone(),
             started,
             attempts,
-            idle_timeout: upstream::stream_idle_timeout(channel),
+            idle_timeout: upstream::stream_idle_timeout(channel, defaults.stream_idle_timeout_ms),
             passthrough: upstream == inbound,
             client_wants_usage,
             store_request_detail: store_request_bodies,
@@ -910,6 +916,7 @@ async fn proxy_stream(
             store_response: should_store,
             stored_request: client_request.clone(),
             stream: byte_stream,
+            _probe: probe,
         };
 
         match stream::start(job).await {
@@ -919,14 +926,9 @@ async fn proxy_stream(
             }
             Err(failure) => {
                 let retryable = failure.retryable;
-                let _ = models::channel::mark_failure(
-                    &state.db,
-                    channel.id,
-                    &failure.message,
-                    now_ms(),
-                    60_000,
-                )
-                .await;
+                state
+                    .mark_channel_failure(channel.id, &failure.message)
+                    .await;
                 last_error_type = failure.error_type.clone();
                 last_message = failure.message.clone();
 
@@ -959,6 +961,39 @@ async fn proxy_stream(
                 ));
             }
         }
+    }
+
+    if attempts == 0 && probe_deferred {
+        let message = "upstream channels are recovering; retry shortly";
+        record_stream_attempt(
+            state,
+            request_id,
+            identity,
+            model,
+            None,
+            None,
+            inbound,
+            inbound,
+            StatusCode::SERVICE_UNAVAILABLE,
+            attempts,
+            started,
+            Some(("channel_recovering", message)),
+            Usage::default(),
+        )
+        .await;
+        store_request_detail(
+            state,
+            request_id,
+            detail_request.as_deref(),
+            &error::client_error_value(inbound, message, "channel_recovering").to_string(),
+        )
+        .await;
+        return Ok(error::client_error(
+            inbound,
+            StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            "channel_recovering",
+        ));
     }
 
     record_stream_attempt(
@@ -1031,13 +1066,7 @@ async fn record_stream_attempt(
         created_at: now_ms(),
     };
 
-    if let Err(error) = usage::insert(&state.db, &record).await {
-        tracing::error!(
-            error = %error,
-            request_id = %request_id,
-            "failed to write streaming usage log"
-        );
-    }
+    usage::record(state, &record).await;
 }
 
 struct RequestContext<'a> {
@@ -1082,13 +1111,7 @@ impl RequestContext<'_> {
             created_at: now_ms(),
         };
 
-        if let Err(error) = usage::insert(&state.db, &record).await {
-            tracing::error!(
-                error = %error,
-                request_id = self.request_id,
-                "failed to write usage log"
-            );
-        }
+        usage::record(state, &record).await;
     }
 }
 

@@ -80,6 +80,8 @@ function toPayload(values: ChannelFormValues) {
   };
 }
 
+type ProbePayload = ReturnType<typeof toPayload> & { id?: number };
+
 export default function Channels() {
   const { message } = App.useApp();
   const queryClient = useQueryClient();
@@ -144,9 +146,25 @@ export default function Channels() {
       message.error(error instanceof Error ? error.message : String(error)),
   });
 
-  const fetchModelsMutation = useMutation({
-    mutationFn: (id: number) =>
-      api.post<ModelFetchResult>(`/api/channels/${id}/fetch-models`),
+  const probeTestMutation = useMutation({
+    mutationFn: (payload: ProbePayload) =>
+      api.post<ChannelTestResult>('/api/channels/test', payload),
+    onSuccess: (result) => {
+      if (result.ok) {
+        message.success(`连通成功，${result.latency_ms} ms`);
+      } else {
+        message.error(
+          `测试失败（${result.status || '网络错误'}）：${result.message}`,
+        );
+      }
+    },
+    onError: (error) =>
+      message.error(error instanceof Error ? error.message : String(error)),
+  });
+
+  const probeFetchModelsMutation = useMutation({
+    mutationFn: (payload: ProbePayload) =>
+      api.post<ModelFetchResult>('/api/channels/fetch-models', payload),
     onSuccess: (result) => {
       if (result.models.length === 0) {
         message.warning(result.message || '未拉取到模型');
@@ -159,6 +177,20 @@ export default function Channels() {
     onError: (error) =>
       message.error(error instanceof Error ? error.message : String(error)),
   });
+
+  async function probe(action: 'test' | 'fetch-models') {
+    try {
+      const values = await form.validateFields();
+      const payload: ProbePayload = { ...toPayload(values), id: editing?.id };
+      if (action === 'test') {
+        probeTestMutation.mutate(payload);
+      } else {
+        probeFetchModelsMutation.mutate(payload);
+      }
+    } catch {
+      // Validation messages are rendered inline by the form.
+    }
+  }
 
   function openCreate() {
     setEditing(null);
@@ -295,25 +327,21 @@ export default function Channels() {
         onClose={() => setOpen(false)}
         destroyOnHidden
       >
-        {editing && (
-          <Space style={{ marginBottom: 16 }}>
-            <Button
-              onClick={() => testMutation.mutate(editing.id)}
-              loading={testMutation.isPending}
-            >
-              测试连通性
-            </Button>
-            <Button
-              onClick={() => fetchModelsMutation.mutate(editing.id)}
-              loading={fetchModelsMutation.isPending}
-            >
-              拉取模型
-            </Button>
-            <Typography.Text type="secondary">
-              使用已保存的配置
-            </Typography.Text>
-          </Space>
-        )}
+        <Space style={{ marginBottom: 16 }}>
+          <Button
+            onClick={() => void probe('test')}
+            loading={probeTestMutation.isPending}
+          >
+            测试连通性
+          </Button>
+          <Button
+            onClick={() => void probe('fetch-models')}
+            loading={probeFetchModelsMutation.isPending}
+          >
+            拉取模型
+          </Button>
+          <Typography.Text type="secondary">使用当前表单配置，无需先保存</Typography.Text>
+        </Space>
         <Form
           form={form}
           layout="vertical"
