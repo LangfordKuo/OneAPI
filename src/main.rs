@@ -12,6 +12,7 @@ mod protocol;
 mod security;
 mod state;
 mod telemetry;
+mod update;
 mod upstream;
 mod web;
 
@@ -68,11 +69,14 @@ async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
         db,
         crypto,
         live: Arc::new(metrics::LiveMetrics::default()),
+        updates: std::sync::Arc::new(crate::state::UpdateState::default()),
         started_at: chrono::Utc::now(),
     };
 
     maintenance::spawn(state.clone());
 
+    let updates = state.updates.clone();
+    let shutdown_updates = updates.clone();
     let app = app::router(state);
     let listener = tokio::net::TcpListener::bind(config.addr)
         .await
@@ -86,9 +90,61 @@ async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     );
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = shutdown_signal() => {},
+                _ = shutdown_updates.shutdown.notified() => {},
+            }
+        })
         .await
-        .context("HTTP server failed")
+        .context("HTTP server failed")?;
+
+    if updates
+        .restart_requested
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        let executable = updates
+            .restart_exe
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        restart_process(executable)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restart_process(exe: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let exe = match exe {
+        Some(path) => path,
+        None => std::env::current_exe().context("failed to locate current executable")?,
+    };
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let exe_display = exe.display().to_string();
+    tracing::info!(executable = %exe_display, "restarting OneAPI after update");
+    let error = std::process::Command::new(exe).args(args).exec();
+    Err(anyhow::anyhow!(
+        "failed to restart OneAPI from {exe_display}: {error}"
+    ))
+}
+
+#[cfg(not(unix))]
+fn restart_process(exe: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    let exe = match exe {
+        Some(path) => path,
+        None => std::env::current_exe().context("failed to locate current executable")?,
+    };
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let exe_display = exe.display().to_string();
+    tracing::info!(executable = %exe_display, "restarting OneAPI after update");
+    std::process::Command::new(exe)
+        .args(args)
+        .spawn()
+        .with_context(|| format!("failed to restart OneAPI from {exe_display}"))?;
+    Ok(())
 }
 
 async fn shutdown_signal() {

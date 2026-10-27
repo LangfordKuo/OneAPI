@@ -19,6 +19,8 @@ eventsource-stream = "0.2"
 futures-util = "0.3"
 mime_guess = "2"
 rand = "0.8"
+self-replace = "1"
+semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks"] }
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 serde = { version = "1", features = ["derive"] }
@@ -34,6 +36,13 @@ tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip",
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(unix)'.dependencies]
+flate2 = "1"
+tar = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"

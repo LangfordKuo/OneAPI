@@ -151,6 +151,7 @@ StreamEvent { Start | BlockStart{index,kind} | TextDelta | ReasoningDelta |
 - 上游 Key 用 AES-256-GCM 加密存储（`v1:nonce:ciphertext`），主密钥来自 `ONEAPI_SECRET`，否则自动生成 `data/master.key`（0600）；接口返回一律掩码。
 - CSRF：SameSite + 对 `/api` 写请求校验 Origin；日志脱敏 Authorization/x-api-key。
 - CORS：`/v1/*` 允许任意 Origin（Bearer 鉴权，不携带 Cookie）；`/api/*` 同源。
+- 在线更新：只从 GitHub Release 或 gh-proxy.com 获取官方资产，强制校验 SHA256SUMS；容器环境默认拒绝自更新。
 
 ## 8. 后台 API
 
@@ -158,6 +159,7 @@ StreamEvent { Start | BlockStart{index,kind} | TextDelta | ReasoningDelta |
 POST /api/auth/login|logout   GET /api/auth/me   PUT /api/auth/password
 GET /api/setup/status   POST /api/setup   # 首次运行安装向导（无会话）
 GET /api/metrics/stream   # 实时 tok/s SSE（管理员会话）
+GET /api/update/check   POST /api/update/apply   # 在线更新
 GET|POST /api/channels        GET|PUT|DELETE /api/channels/:id
 POST /api/channels/test       POST /api/channels/fetch-models   # 支持未保存配置
 GET|POST /api/keys            PUT|DELETE /api/keys/:id
@@ -236,3 +238,4 @@ GET /healthz  /readyz
 - 2026-10-27：新增 Web 安装向导：无管理员时首次访问进入安装页，创建管理员后写入 `<data_dir>/.env`（0600）并自动登录；支持 `.env` 从当前目录/数据目录加载，进程环境变量优先；设置 `ONEAPI_ADMIN_PASSWORD` 时仍可无界面引导。
 - 2026-10-27：M7 收尾：新增每 6 小时保留期清理（0 表示永久保留）、`oneapi reset-password` 子命令、请求/响应正文记录（单条 64KB，日志详情可查看）。
 - 2026-10-27：新增实时 tok/s：内存 10 秒滑动窗口，`GET /api/metrics/stream` 每秒推送全站与各渠道输出速率；前端渠道页与主页用 EventSource 订阅，流式请求增量估算并在结束时用 usage 校准。
+- 2026-10-27：新增在线更新：可切换 GitHub / gh-proxy.com 更新源，后台检查最新 Release、校验 SHA256、替换二进制并自动重启；容器环境默认拒绝自更新。

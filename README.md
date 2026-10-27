@@ -116,6 +116,21 @@ ONEAPI_DATA_DIR=./data ./oneapi serve
 - 非流式请求在完成时计入输出 tokens；流式请求按增量文本估算，并在使用量事件到达后用实际 completion tokens 校准。
 - 指标为最近 10 秒滑动窗口，空闲时自动回落到 0。
 
+## 在线更新
+
+后台“设置 → 软件更新”支持：
+
+- **更新源**：GitHub 官方，或国内加速 `https://gh-proxy.com/`（元数据与安装包都走代理）。
+- **检查更新**：显示当前版本、最新版本、发布时间、安装包和更新说明。
+- **一键更新并重启**：下载对应平台的 Release 资产，校验 `SHA256SUMS`，替换当前二进制并自动重启。
+
+说明：
+
+- 更新只接受 GitHub Release 中符合 `oneapi-<tag>-<platform>` 命名的官方资产，并强制校验 SHA256。
+- Linux/macOS 使用 `exec` 原进程重启，Windows 在服务退出后启动新进程。
+- 容器部署不建议自更新，程序会拒绝并提示拉取新镜像；可用 `ONEAPI_ALLOW_SELF_UPDATE=1` 强制测试。
+- Windows 更新需要程序所在目录可写；运行目录外的数据目录（SQLite、master.key、.env）不会被修改。
+
 ## 自动发布
 
 打标签前确保 `Cargo.toml` 的 `version` 与标签一致（例如 `version = "0.1.0"` 对应 `v0.1.0`）：

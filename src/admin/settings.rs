@@ -16,6 +16,7 @@ pub struct SettingsOutput {
     pub usage_log_retention_days: i64,
     pub response_retention_days: i64,
     pub store_request_bodies: bool,
+    pub update_source: String,
 }
 
 impl SettingsOutput {
@@ -43,6 +44,11 @@ impl SettingsOutput {
             usage_log_retention_days: integer("usage_log_retention_days", 30),
             response_retention_days: integer("response_retention_days", 7),
             store_request_bodies: boolean("store_request_bodies", false),
+            update_source: map
+                .get("update_source")
+                .filter(|value| value.as_str() == "github" || value.as_str() == "ghproxy")
+                .cloned()
+                .unwrap_or_else(|| "github".to_string()),
         }
     }
 }
@@ -63,6 +69,8 @@ pub struct SettingsInput {
     pub response_retention_days: Option<i64>,
     #[serde(default)]
     pub store_request_bodies: Option<bool>,
+    #[serde(default)]
+    pub update_source: Option<String>,
 }
 
 pub async fn get(
@@ -140,6 +148,16 @@ pub async fn update(
             if value { "true" } else { "false" },
         )
         .await?;
+    }
+
+    if let Some(value) = input.update_source {
+        let value = value.trim();
+        if !matches!(value, "github" | "ghproxy") {
+            return Err(AppError::BadRequest(
+                "update_source must be github or ghproxy".to_string(),
+            ));
+        }
+        setting::upsert(&state.db, "update_source", value).await?;
     }
 
     let rows = setting::all(&state.db).await?;

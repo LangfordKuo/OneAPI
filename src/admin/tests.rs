@@ -41,6 +41,7 @@ async fn test_state() -> (TempDir, AppState) {
             db,
             crypto,
             live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
+            updates: std::sync::Arc::new(crate::state::UpdateState::default()),
             started_at: chrono::Utc::now(),
         },
     )

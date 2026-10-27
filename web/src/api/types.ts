@@ -43,6 +43,7 @@ export interface Settings {
   usage_log_retention_days: number;
   response_retention_days: number;
   store_request_bodies: boolean;
+  update_source: 'github' | 'ghproxy';
 }
 
 export interface Admin {
@@ -166,5 +167,24 @@ export interface SetupResult {
   username: string;
   env_written: boolean;
   env_path: string;
+  message: string;
+}
+
+export interface UpdateInfo {
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  release_notes: string | null;
+  published_at: string | null;
+  html_url: string | null;
+  asset_name: string | null;
+  asset_url: string | null;
+  checksums_url: string | null;
+  source: 'github' | 'ghproxy';
+}
+
+export interface UpdateApplyResult {
+  updated_to: string;
+  asset_name: string;
   message: string;
 }

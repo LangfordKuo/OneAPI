@@ -1,17 +1,26 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Alert,
   App,
   Button,
   Card,
+  Descriptions,
   Form,
   Input,
   InputNumber,
+  Select,
   Space,
   Switch,
+  Tag,
+  Typography,
 } from 'antd';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../api/client';
-import type { Settings } from '../api/types';
+import type {
+  Settings,
+  UpdateApplyResult,
+  UpdateInfo,
+} from '../api/types';
 
 interface PasswordValues {
   current_password: string;
@@ -24,6 +33,8 @@ export default function SettingsPage() {
   const queryClient = useQueryClient();
   const [form] = Form.useForm<Settings>();
   const [passwordForm] = Form.useForm<PasswordValues>();
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
 
   const settingsQuery = useQuery({
     queryKey: ['settings'],
@@ -42,6 +53,26 @@ export default function SettingsPage() {
       message.success('设置已保存');
       form.setFieldsValue(data);
       queryClient.setQueryData(['settings'], data);
+    },
+    onError: (error) =>
+      message.error(error instanceof Error ? error.message : String(error)),
+  });
+
+  const checkUpdateMutation = useMutation({
+    mutationFn: () => api.get<UpdateInfo>('/api/update/check'),
+    onSuccess: (data) => {
+      setUpdateInfo(data);
+      setUpdateMessage(null);
+    },
+    onError: (error) =>
+      message.error(error instanceof Error ? error.message : String(error)),
+  });
+
+  const applyUpdateMutation = useMutation({
+    mutationFn: () => api.post<UpdateApplyResult>('/api/update/apply'),
+    onSuccess: (data) => {
+      setUpdateMessage(data.message);
+      window.setTimeout(() => window.location.assign('/'), 3000);
     },
     onError: (error) =>
       message.error(error instanceof Error ? error.message : String(error)),
@@ -112,10 +143,99 @@ export default function SettingsPage() {
           >
             <Switch />
           </Form.Item>
+          <Form.Item
+            name="update_source"
+            label="更新源"
+            extra="修改后请先保存设置，再检查更新"
+          >
+            <Select
+              options={[
+                { value: 'github', label: 'GitHub 官方' },
+                { value: 'ghproxy', label: '国内加速（gh-proxy.com）' },
+              ]}
+            />
+          </Form.Item>
           <Button type="primary" htmlType="submit" loading={saveMutation.isPending}>
             保存设置
           </Button>
         </Form>
+      </Card>
+
+      <Card title="软件更新">
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Space>
+            <Button
+              onClick={() => checkUpdateMutation.mutate()}
+              loading={checkUpdateMutation.isPending}
+            >
+              检查更新
+            </Button>
+            {updateInfo ? (
+              <Tag color={updateInfo.update_available ? 'orange' : 'green'}>
+                {updateInfo.update_available ? '发现新版本' : '已是最新版本'}
+              </Tag>
+            ) : null}
+          </Space>
+
+          {updateInfo ? (
+            <>
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="当前版本">
+                  {updateInfo.current_version}
+                </Descriptions.Item>
+                <Descriptions.Item label="最新版本">
+                  {updateInfo.latest_version}
+                </Descriptions.Item>
+                <Descriptions.Item label="更新源">
+                  {updateInfo.source === 'ghproxy'
+                    ? 'gh-proxy.com 加速'
+                    : 'GitHub 官方'}
+                </Descriptions.Item>
+                <Descriptions.Item label="发布时间">
+                  {updateInfo.published_at ?? '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="安装包" span={2}>
+                  {updateInfo.asset_name ?? '当前平台暂不支持'}
+                </Descriptions.Item>
+              </Descriptions>
+
+              {updateInfo.release_notes ? (
+                <>
+                  <Typography.Text strong>更新说明</Typography.Text>
+                  <pre className="code-block">{updateInfo.release_notes}</pre>
+                </>
+              ) : null}
+
+              {updateInfo.update_available ? (
+                <Button
+                  type="primary"
+                  danger
+                  onClick={() => applyUpdateMutation.mutate()}
+                  loading={applyUpdateMutation.isPending}
+                  disabled={!updateInfo.asset_name}
+                >
+                  一键更新并重启
+                </Button>
+              ) : null}
+            </>
+          ) : null}
+
+          {updateMessage ? (
+            <Alert
+              type="success"
+              showIcon
+              message={updateMessage}
+              description="服务会自动重启，页面将在几秒后刷新。"
+            />
+          ) : null}
+
+          <Alert
+            type="info"
+            showIcon
+            message="更新说明"
+            description="更新会下载 SHA256SUMS 校验安装包，替换当前二进制并自动重启。容器部署请拉取新镜像；Windows 更新时需要保证程序目录可写。"
+          />
+        </Space>
       </Card>
 
       <Card title="修改密码">

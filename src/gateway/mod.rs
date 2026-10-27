@@ -227,6 +227,7 @@ mod tests {
             db,
             crypto,
             live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
+            updates: std::sync::Arc::new(crate::state::UpdateState::default()),
             started_at: chrono::Utc::now(),
         };
         (temp, state)

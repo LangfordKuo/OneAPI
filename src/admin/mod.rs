@@ -10,6 +10,7 @@ mod playground;
 mod query;
 mod settings;
 mod setup;
+mod update;
 
 #[cfg(test)]
 mod tests;
@@ -55,5 +56,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/setup/status", get(setup::status))
         .route("/api/setup", post(setup::setup))
         .route("/api/metrics/stream", get(metrics::stream))
+        .route("/api/update/check", get(update::check))
+        .route("/api/update/apply", post(update::apply))
         .layer(middleware::from_fn(csrf::guard))
 }
