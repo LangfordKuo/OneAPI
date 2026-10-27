@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-27T18:31:01Z",
+  "updated_at": "2026-10-27T18:54:29Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -83,15 +83,15 @@
     },
     "README.md": {
       "role": "index",
-      "sha256": "7f27b976ca14c06f5939b944afdeea431bec12fe3f3c8475f818692cf980297d",
-      "size": 4437,
-      "normalized_sha256": "7f27b976ca14c06f5939b944afdeea431bec12fe3f3c8475f818692cf980297d"
+      "sha256": "778199e9ecd2f2f3c3ed9bebfa38694306af956c6435a6d8766fb12458bebe25",
+      "size": 4467,
+      "normalized_sha256": "778199e9ecd2f2f3c3ed9bebfa38694306af956c6435a6d8766fb12458bebe25"
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "1de88437660076e4ada71140be360c17d2be1d0ef6798a76130499cdbfc06923",
-      "size": 48457,
-      "normalized_sha256": "1de88437660076e4ada71140be360c17d2be1d0ef6798a76130499cdbfc06923"
+      "sha256": "0c38bfb517f3aeb88062395ed10f2ced2b256c8aa938f4ffe593ea9c3280f5f7",
+      "size": 48610,
+      "normalized_sha256": "0c38bfb517f3aeb88062395ed10f2ced2b256c8aa938f4ffe593ea9c3280f5f7"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -119,15 +119,15 @@
     },
     "docs/IMPLEMENTATION_PLAN.md": {
       "role": "index",
-      "sha256": "8061552582a107c1a487380eae658f46d50e1fa006c2fe2a5f97bad098061b4d",
-      "size": 23680,
-      "normalized_sha256": "8061552582a107c1a487380eae658f46d50e1fa006c2fe2a5f97bad098061b4d"
+      "sha256": "b458d202f2224c0dfecb00c34d914c583351d45dc4a08bc2429d514c64687954",
+      "size": 23838,
+      "normalized_sha256": "b458d202f2224c0dfecb00c34d914c583351d45dc4a08bc2429d514c64687954"
     },
     "docs/PROGRESS.md": {
       "role": "index",
-      "sha256": "c95c35211b63059537d7922b760c6094f3f32018a5145d43e9c1d887716fc675",
-      "size": 28044,
-      "normalized_sha256": "c95c35211b63059537d7922b760c6094f3f32018a5145d43e9c1d887716fc675"
+      "sha256": "fea171be266e6dc67eedfc7934a060a0923c29d915bfa88f2b041c3e0143d1df",
+      "size": 28537,
+      "normalized_sha256": "fea171be266e6dc67eedfc7934a060a0923c29d915bfa88f2b041c3e0143d1df"
     },
     "docs/REVIEW_PLAN.md": {
       "role": "index",
@@ -197,9 +197,9 @@
     },
     "src/admin/logs.rs": {
       "role": "index",
-      "sha256": "dea51149055ec9a63bda9494b2474b0ab0d6b5b174090c7068c941ec4586693f",
-      "size": 5740,
-      "normalized_sha256": "dea51149055ec9a63bda9494b2474b0ab0d6b5b174090c7068c941ec4586693f"
+      "sha256": "aee4805744320d313fb39e5da744be1c3eee86cb395377db87b3ee5c4c926190",
+      "size": 7606,
+      "normalized_sha256": "aee4805744320d313fb39e5da744be1c3eee86cb395377db87b3ee5c4c926190"
     },
     "src/admin/metrics.rs": {
       "role": "index",
@@ -239,9 +239,9 @@
     },
     "src/admin/tests.rs": {
       "role": "index",
-      "sha256": "c2314902e0de418f599cd19b98694d6c4cf8b1cc4b6f89a31f19e6b17aa4cf26",
-      "size": 23410,
-      "normalized_sha256": "c2314902e0de418f599cd19b98694d6c4cf8b1cc4b6f89a31f19e6b17aa4cf26"
+      "sha256": "6e84770801caa02b003b05cccfe2d78795b0cab8542ab26ee3ac6c3eb6ad8e36",
+      "size": 23984,
+      "normalized_sha256": "6e84770801caa02b003b05cccfe2d78795b0cab8542ab26ee3ac6c3eb6ad8e36"
     },
     "src/admin/update.rs": {
       "role": "index",
@@ -527,9 +527,9 @@
     },
     "web/src/api/types.ts": {
       "role": "index",
-      "sha256": "e7c754716af8cc3e4b42390c06c578390a1828ba0a3bf005f9e646537467b510",
-      "size": 4199,
-      "normalized_sha256": "e7c754716af8cc3e4b42390c06c578390a1828ba0a3bf005f9e646537467b510"
+      "sha256": "3cb12daa3d423112c8d68d3865dcce1064bc5d40606242e33dfd1e2949ea0f7a",
+      "size": 4235,
+      "normalized_sha256": "3cb12daa3d423112c8d68d3865dcce1064bc5d40606242e33dfd1e2949ea0f7a"
     },
     "web/src/components/DashboardCharts.tsx": {
       "role": "index",
@@ -581,9 +581,9 @@
     },
     "web/src/pages/Logs.tsx": {
       "role": "index",
-      "sha256": "f387afe32e9b373592d290dc3e4fa038efda94d4b40983a17c6c42a8335fa67f",
-      "size": 15456,
-      "normalized_sha256": "f387afe32e9b373592d290dc3e4fa038efda94d4b40983a17c6c42a8335fa67f"
+      "sha256": "79a7a1137007e280084be663e421d36d15fd081cb5463e59b802c44720ed1bdd",
+      "size": 16041,
+      "normalized_sha256": "79a7a1137007e280084be663e421d36d15fd081cb5463e59b802c44720ed1bdd"
     },
     "web/src/pages/Placeholder.tsx": {
       "role": "index",

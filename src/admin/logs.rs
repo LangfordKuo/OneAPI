@@ -65,6 +65,7 @@ pub struct LogEntry {
     pub reasoning_tokens: Option<i64>,
     pub latency_ms: i64,
     pub first_token_ms: Option<i64>,
+    pub tokens_per_second: Option<f64>,
     pub created_at: i64,
     pub api_key_name: Option<String>,
     pub channel_name: Option<String>,
@@ -95,11 +96,35 @@ impl From<UsageLogRow> for LogEntry {
             reasoning_tokens: row.reasoning_tokens,
             latency_ms: row.latency_ms,
             first_token_ms: row.first_token_ms,
+            tokens_per_second: tokens_per_second(
+                row.completion_tokens,
+                row.latency_ms,
+                row.first_token_ms,
+            ),
             created_at: row.created_at,
             api_key_name: row.api_key_name,
             channel_name: row.channel_name,
         }
     }
+}
+
+/// Output generation speed. For streams the first-token wait is excluded so the
+/// value reflects generation throughput; non-streaming requests use the whole
+/// request duration.
+fn tokens_per_second(
+    completion_tokens: Option<i64>,
+    latency_ms: i64,
+    first_token_ms: Option<i64>,
+) -> Option<f64> {
+    let tokens = completion_tokens.filter(|value| *value > 0)?;
+    let elapsed_ms = first_token_ms
+        .filter(|first| *first > 0 && *first < latency_ms)
+        .map(|first| latency_ms - first)
+        .unwrap_or(latency_ms);
+    if elapsed_ms <= 0 {
+        return None;
+    }
+    Some(tokens as f64 * 1000.0 / elapsed_ms as f64)
 }
 
 #[derive(Debug, Serialize)]
@@ -192,4 +217,34 @@ pub async fn detail(
         request_body,
         response_body,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tokens_per_second;
+
+    #[test]
+    fn non_streaming_speed_uses_total_latency() {
+        assert_eq!(tokens_per_second(Some(100), 2_000, None), Some(50.0));
+    }
+
+    #[test]
+    fn streaming_speed_excludes_first_token_wait() {
+        let value = tokens_per_second(Some(100), 2_000, Some(500)).expect("speed");
+        assert!((value - 66.666_666).abs() < 0.001);
+    }
+
+    #[test]
+    fn invalid_first_token_falls_back_to_total_latency() {
+        assert_eq!(tokens_per_second(Some(50), 1_000, Some(1_000)), Some(50.0));
+        assert_eq!(tokens_per_second(Some(50), 1_000, Some(1_500)), Some(50.0));
+        assert_eq!(tokens_per_second(Some(50), 1_000, Some(0)), Some(50.0));
+    }
+
+    #[test]
+    fn missing_tokens_or_zero_latency_has_no_speed() {
+        assert_eq!(tokens_per_second(None, 1_000, None), None);
+        assert_eq!(tokens_per_second(Some(0), 1_000, None), None);
+        assert_eq!(tokens_per_second(Some(10), 0, None), None);
+    }
 }

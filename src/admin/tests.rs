@@ -402,6 +402,16 @@ async fn logs_and_dashboard_read_usage() {
     assert_eq!(logs["items"][0]["model"], json!("gpt-test"));
     assert_eq!(logs["items"][0]["source"], json!("gateway"));
     assert_eq!(logs["items"][0]["channel_name"], json!("test-chat"));
+    let latency_ms = logs["items"][0]["latency_ms"].as_i64().expect("latency_ms");
+    if latency_ms > 0 {
+        let expected = 2.0 * 1000.0 / latency_ms as f64;
+        let speed = logs["items"][0]["tokens_per_second"]
+            .as_f64()
+            .expect("tokens_per_second");
+        assert!((speed - expected).abs() < 0.001);
+    } else {
+        assert!(logs["items"][0]["tokens_per_second"].is_null());
+    }
     let request_id = logs["items"][0]["request_id"]
         .as_str()
         .expect("request id")
@@ -411,6 +421,10 @@ async fn logs_and_dashboard_read_usage() {
         admin_get(router.clone(), &format!("/api/logs/{request_id}"), &token).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["total_tokens"], json!(5));
+    assert_eq!(
+        detail["tokens_per_second"], logs["items"][0]["tokens_per_second"],
+        "detail and list must report the same speed"
+    );
 
     let (status, summary) =
         admin_get(router.clone(), "/api/dashboard/summary?range=24h", &token).await;
