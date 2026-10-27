@@ -5,6 +5,7 @@ mod csrf;
 mod dashboard;
 mod keys;
 mod logs;
+mod metrics;
 mod playground;
 mod query;
 mod settings;
@@ -53,5 +54,6 @@ pub fn routes() -> Router<AppState> {
         .route("/api/playground", post(playground::proxy))
         .route("/api/setup/status", get(setup::status))
         .route("/api/setup", post(setup::setup))
+        .route("/api/metrics/stream", get(metrics::stream))
         .layer(middleware::from_fn(csrf::guard))
 }

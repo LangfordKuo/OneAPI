@@ -588,6 +588,10 @@ pub async fn proxy_with_identity(
                 (Body::from(text.clone()), text)
             };
 
+            if let Some(output_tokens) = usage.output_tokens {
+                state.live.add_tokens(Some(channel.id), output_tokens);
+            }
+
             ctx.record(
                 state,
                 Some(channel),

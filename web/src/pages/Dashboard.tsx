@@ -23,6 +23,7 @@ import type {
   LogList,
   Timeseries,
 } from '../api/types';
+import { useLiveMetrics } from '../hooks/useLiveMetrics';
 
 const DashboardCharts = lazy(() => import('../components/DashboardCharts'));
 
@@ -61,6 +62,7 @@ function formatNumber(value: number | null | undefined): string {
 
 export default function Dashboard() {
   const [range, setRange] = useState('24h');
+  const live = useLiveMetrics();
 
   const systemQuery = useQuery({
     queryKey: ['system'],
@@ -139,6 +141,17 @@ export default function Dashboard() {
           onChange={setRange}
         />
       </Space>
+
+      <Card style={{ marginBottom: 16 }}>
+        <Space align="baseline">
+          <Statistic
+            title="全站实时输出"
+            value={live.global_tok_s.toFixed(1)}
+            suffix="tok/s"
+          />
+          <Tag color={live.global_tok_s > 0 ? 'green' : 'default'}>实时</Tag>
+        </Space>
+      </Card>
 
       <Row gutter={[16, 16]}>
         <Col xs={12} md={8} xl={4}>

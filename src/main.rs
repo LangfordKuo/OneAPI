@@ -5,6 +5,7 @@ mod db;
 mod error;
 mod gateway;
 mod maintenance;
+mod metrics;
 mod models;
 #[allow(dead_code)]
 mod protocol;
@@ -66,6 +67,7 @@ async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
         config: Arc::new(config.clone()),
         db,
         crypto,
+        live: Arc::new(metrics::LiveMetrics::default()),
         started_at: chrono::Utc::now(),
     };
 

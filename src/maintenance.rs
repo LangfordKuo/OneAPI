@@ -121,6 +121,7 @@ mod tests {
                 config: Arc::new(config),
                 db,
                 crypto,
+                live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
                 started_at: chrono::Utc::now(),
             },
         )

@@ -157,6 +157,7 @@ StreamEvent { Start | BlockStart{index,kind} | TextDelta | ReasoningDelta |
 ```
 POST /api/auth/login|logout   GET /api/auth/me   PUT /api/auth/password
 GET /api/setup/status   POST /api/setup   # 首次运行安装向导（无会话）
+GET /api/metrics/stream   # 实时 tok/s SSE（管理员会话）
 GET|POST /api/channels        GET|PUT|DELETE /api/channels/:id
 POST /api/channels/test       POST /api/channels/fetch-models   # 支持未保存配置
 GET|POST /api/keys            PUT|DELETE /api/keys/:id
@@ -234,3 +235,4 @@ GET /healthz  /readyz
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。
 - 2026-10-27：新增 Web 安装向导：无管理员时首次访问进入安装页，创建管理员后写入 `<data_dir>/.env`（0600）并自动登录；支持 `.env` 从当前目录/数据目录加载，进程环境变量优先；设置 `ONEAPI_ADMIN_PASSWORD` 时仍可无界面引导。
 - 2026-10-27：M7 收尾：新增每 6 小时保留期清理（0 表示永久保留）、`oneapi reset-password` 子命令、请求/响应正文记录（单条 64KB，日志详情可查看）。
+- 2026-10-27：新增实时 tok/s：内存 10 秒滑动窗口，`GET /api/metrics/stream` 每秒推送全站与各渠道输出速率；前端渠道页与主页用 EventSource 订阅，流式请求增量估算并在结束时用 usage 校准。

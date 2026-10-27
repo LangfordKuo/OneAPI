@@ -109,6 +109,13 @@ ONEAPI_DATA_DIR=./data ./oneapi serve
 
 健康检查：`GET /healthz`、`GET /readyz`。
 
+## 实时 tok/s
+
+- 渠道页每行显示该渠道最近 10 秒的输出 tok/s；主页顶部显示全站实时输出 tok/s。
+- 通过 `GET /api/metrics/stream`（SSE）每秒推送，页面使用 EventSource 自动订阅，不需要刷新。
+- 非流式请求在完成时计入输出 tokens；流式请求按增量文本估算，并在使用量事件到达后用实际 completion tokens 校准。
+- 指标为最近 10 秒滑动窗口，空闲时自动回落到 0。
+
 ## 自动发布
 
 打标签前确保 `Cargo.toml` 的 `version` 与标签一致（例如 `version = "0.1.0"` 对应 `v0.1.0`）：

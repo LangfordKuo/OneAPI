@@ -226,6 +226,7 @@ mod tests {
             config: Arc::new(config),
             db,
             crypto,
+            live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
             started_at: chrono::Utc::now(),
         };
         (temp, state)
@@ -431,6 +432,7 @@ mod tests {
         assert_eq!(channel, Some(channel_id));
         assert_eq!(prompt, Some(10));
         assert_eq!(completion, Some(5));
+        assert!(state.live.snapshot().global_tok_s > 0.0);
     }
 
     #[tokio::test]

@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：M7 已完成，准备发布 `v0.1.0`
+- 当前阶段：v0.1.0 已发布；新增实时 tok/s 指标
 - 当前分支：`main`
-- 最近提交：`6f50308 feat: 新增 Web 首次安装向导与 .env 自动生成`
+- 最近发布：`v0.1.0`（`18ec45f`）
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -142,6 +142,14 @@
 - 请求/响应正文记录：设置页开启后，非流式与流式请求都会保存正文到 `request_details`，单条最多 64KB；日志详情接口可直接读取。进程级验证 Chat 非流式与 SSE 流式均写入且可回读。
 - `cargo fmt` / `clippy --all-targets -D warnings` / `cargo test`：通过，65 个测试。
 - `npm run build` 与 `cargo build --release`：通过。
+
+## Post-v0.1.0 实时指标验证
+
+- 新增内存滑动窗口指标（10 秒、按秒分桶），非流式请求在完成时计入 completion tokens；流式请求在文本/推理/工具参数增量中估算 tokens，结束时用 usage 校准。
+- 新增 `GET /api/metrics/stream` SSE：每秒推送 `{timestamp, global_tok_s, channels:[{channel_id,tok_s}]}`，需要管理员会话。
+- 渠道页新增“实时 tok/s”列与全站汇总标签；主页新增“全站实时输出”卡片；前端通过 EventSource 订阅，自动重连，无需刷新页面。
+- `cargo fmt` / `clippy -D warnings` / `cargo test`：通过，67 个测试。
+- 进程级验证：非流式请求后 SSE 推送 `global_tok_s=0.2`、渠道 `tok_s=0.2`；慢速流式请求进行中 SSE 依次推送 0.1 → 0.4 → 0.7 tok/s。
 
 ## AOCI 状态
 

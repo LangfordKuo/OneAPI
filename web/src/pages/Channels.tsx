@@ -16,7 +16,7 @@ import {
   Typography,
 } from 'antd';
 import type { TableColumnsType } from 'antd';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type {
   Channel,
@@ -25,6 +25,7 @@ import type {
   ModelFetchResult,
 } from '../api/types';
 import KeyValueList from '../components/KeyValueList';
+import { useLiveMetrics } from '../hooks/useLiveMetrics';
 
 interface MappingRow {
   key: string;
@@ -88,6 +89,11 @@ export default function Channels() {
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [modelModalOpen, setModelModalOpen] = useState(false);
+  const live = useLiveMetrics();
+  const liveRates = useMemo(
+    () => new Map(live.channels.map((item) => [item.channel_id, item.tok_s])),
+    [live],
+  );
 
   const channelsQuery = useQuery({
     queryKey: ['channels'],
@@ -228,6 +234,17 @@ export default function Channels() {
       ),
     },
     {
+      title: '实时 tok/s',
+      key: 'live_tok_s',
+      width: 130,
+      render: (_, record) => {
+        const rate = liveRates.get(record.id) ?? 0;
+        return (
+          <Tag color={rate > 0 ? 'green' : 'default'}>{rate.toFixed(1)} tok/s</Tag>
+        );
+      },
+    },
+    {
       title: '操作',
       render: (_, record) => (
         <Space>
@@ -260,6 +277,9 @@ export default function Channels() {
         <Typography.Text type="secondary">
           同一个模型可以配置多个渠道，请求会按优先级和权重路由。
         </Typography.Text>
+        <Tag color={live.global_tok_s > 0 ? 'green' : 'default'}>
+          全站实时 {live.global_tok_s.toFixed(1)} tok/s
+        </Tag>
       </Space>
       <Table
         rowKey="id"

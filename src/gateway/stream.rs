@@ -183,6 +183,8 @@ async fn run(
     });
 
     let mut tokens = Usage::default();
+    let mut pending_chars: u64 = 0;
+    let mut estimated_tokens: u64 = 0;
     let mut response_capture: Vec<u8> = Vec::new();
     let mut first_token_at: Option<Instant> = None;
     let mut client_disconnected = false;
@@ -235,6 +237,10 @@ async fn run(
             job.client_wants_usage,
             job.response_id.as_deref(),
             job.store_response,
+            &job.state.live,
+            job.channel_id,
+            &mut pending_chars,
+            &mut estimated_tokens,
             &frame,
             &mut decoder,
             &mut encoder,
@@ -356,6 +362,13 @@ async fn run(
         }
     }
 
+    if let Some(actual) = tokens.output_tokens {
+        let extra = actual.saturating_sub(estimated_tokens);
+        if extra > 0 {
+            job.state.live.add_tokens(Some(job.channel_id), extra);
+        }
+    }
+
     let status_code = if client_disconnected {
         499
     } else if stream_error.is_some() {
@@ -428,6 +441,10 @@ async fn process_frame(
     client_wants_usage: bool,
     response_id: Option<&str>,
     store_response: bool,
+    live: &crate::metrics::LiveMetrics,
+    channel_id: i64,
+    pending_chars: &mut u64,
+    estimated_tokens: &mut u64,
     frame: &SseFrame,
     decoder: &mut StreamDecoder,
     encoder: &mut Option<StreamEncoder>,
@@ -440,6 +457,7 @@ async fn process_frame(
         let mut observed_error = None;
         if let Ok(events) = decoder.decode(frame) {
             for event in events {
+                account_stream_tokens(live, channel_id, &event, pending_chars, estimated_tokens);
                 match event {
                     StreamEvent::Usage(usage) => tokens.merge(&usage),
                     StreamEvent::Error {
@@ -489,6 +507,7 @@ async fn process_frame(
     };
 
     for event in events {
+        account_stream_tokens(live, channel_id, &event, pending_chars, estimated_tokens);
         if let StreamEvent::Usage(usage) = &event {
             tokens.merge(usage);
         }
@@ -524,6 +543,32 @@ async fn process_frame(
     }
 
     FrameOutcome::Ok
+}
+
+fn account_stream_tokens(
+    live: &crate::metrics::LiveMetrics,
+    channel_id: i64,
+    event: &StreamEvent,
+    pending_chars: &mut u64,
+    estimated_tokens: &mut u64,
+) {
+    let chars = match event {
+        StreamEvent::TextDelta { text, .. } => text.chars().count() as u64,
+        StreamEvent::ReasoningDelta { text, .. } => text.chars().count() as u64,
+        StreamEvent::ToolInputDelta { partial_json, .. } => partial_json.chars().count() as u64,
+        _ => 0,
+    };
+    if chars == 0 {
+        return;
+    }
+
+    *pending_chars += chars;
+    let tokens = *pending_chars / 4;
+    if tokens > 0 {
+        *pending_chars -= tokens * 4;
+        *estimated_tokens += tokens;
+        live.add_tokens(Some(channel_id), tokens);
+    }
 }
 
 async fn send_bytes(
@@ -782,6 +827,7 @@ mod tests {
                 config: std::sync::Arc::new(config),
                 db,
                 crypto,
+                live: std::sync::Arc::new(crate::metrics::LiveMetrics::default()),
                 started_at: chrono::Utc::now(),
             },
         )
@@ -890,7 +936,7 @@ mod tests {
 
         // First chunk yields a valid event, then the upstream stays open forever.
         let first = b"data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt\",\"created\":1,\
-                       \"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n";
+                       \"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n";
         let stream: ByteStream = Box::pin(
             stream::once(async move { Ok::<Bytes, std::io::Error>(Bytes::from_static(first)) })
                 .chain(stream::pending()),
@@ -954,7 +1000,7 @@ mod tests {
 
         let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
             Ok(Bytes::from_static(
-                b"data: {\"id\":\"c\",\"model\":\"gpt\",\"created\":1,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                b"data: {\"id\":\"c\",\"model\":\"gpt\",\"created\":1,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n",
             )),
             Ok(Bytes::from_static(
                 b"data: {\"id\":\"c\",\"model\":\"gpt\",\"created\":1,\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
@@ -970,7 +1016,7 @@ mod tests {
             .await
             .expect("body");
         let body = String::from_utf8_lossy(&bytes);
-        assert!(body.contains("\"content\":\"hi\""));
+        assert!(body.contains("\"content\":\"hello\""));
         assert!(!body.contains("\"usage\""));
         assert!(body.contains("[DONE]"));
     }
@@ -983,7 +1029,7 @@ mod tests {
 
         let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
             Ok(Bytes::from_static(
-                b"data: {\"id\":\"c\",\"model\":\"gpt\",\"created\":1,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                b"data: {\"id\":\"c\",\"model\":\"gpt\",\"created\":1,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n",
             )),
             Ok(Bytes::from_static(b"data: [DONE]\n\n")),
         ];
@@ -997,7 +1043,7 @@ mod tests {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
-        assert!(String::from_utf8_lossy(&bytes).contains("hi"));
+        assert!(String::from_utf8_lossy(&bytes).contains("hello"));
 
         let (request_body, response_body): (String, String) =
             sqlx::query_as("SELECT request_body, response_body FROM request_details LIMIT 1")
@@ -1005,7 +1051,8 @@ mod tests {
                 .await
                 .expect("request detail");
         assert_eq!(request_body, "{\"model\":\"gpt\"}");
-        assert!(response_body.contains("\"content\":\"hi\""));
+        assert!(response_body.contains("\"content\":\"hello\""));
+        assert!(state.live.snapshot().global_tok_s > 0.0);
     }
 
     #[tokio::test]
