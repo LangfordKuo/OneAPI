@@ -21,7 +21,7 @@ M0–M6 已完成：脚手架、管理基础、三协议非流式/流式网关�
 | macOS | amd64 | `macos-15-intel` | `oneapi-<tag>-macos-amd64.tar.gz` |
 | macOS | arm64 | `macos-14` | `oneapi-<tag>-macos-arm64.tar.gz` |
 
-同时构建并推送 `linux/amd64`、`linux/arm64` 多架构 Docker 镜像到 GitHub Container Registry。镜像直接使用同一次构建产出的 Linux 二进制（`Dockerfile.release`），不会在 QEMU 下二次编译；本地源码构建仍使用 `Dockerfile`。
+同时构建并推送 `linux/amd64`、`linux/arm64` 多架构 Docker 镜像到 GitHub Container Registry。Linux 产物使用 **musl 静态链接**（`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`），不依赖 glibc，可在 Debian 11、Ubuntu 20.04、Alpine 等较老或精简系统运行。镜像直接使用同一次构建产出的 Linux 二进制（`Dockerfile.release`），不会在 QEMU 下二次编译；本地源码构建仍使用 `Dockerfile`。
 
 Actions artifact 上传的是原始二进制，Release 任务只打包一次为最终 `tar.gz`/`zip`，不会再出现“压缩包里套压缩包”。
 

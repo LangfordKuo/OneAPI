@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-27T06:58:05Z",
+  "updated_at": "2026-10-27T07:11:06Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -29,9 +29,9 @@
     },
     ".github/workflows/release.yml": {
       "role": "index",
-      "sha256": "5a9cb1b0b3dc74fa95aedb9134dc21f74c0afc6fb44ddf345ace4f0c37602c08",
-      "size": 6899,
-      "normalized_sha256": "5a9cb1b0b3dc74fa95aedb9134dc21f74c0afc6fb44ddf345ace4f0c37602c08"
+      "sha256": "3aa224991e6b6ca10029beeec8463ebfc5c3347a87f7db773cf978bd635ca724",
+      "size": 7340,
+      "normalized_sha256": "3aa224991e6b6ca10029beeec8463ebfc5c3347a87f7db773cf978bd635ca724"
     },
     ".gitignore": {
       "role": "index",
@@ -83,15 +83,15 @@
     },
     "README.md": {
       "role": "index",
-      "sha256": "891ae85bb719adc3e3d93097fb3ad0ac4f9ce2d27b3ee9a43de8056ed44b6ff6",
-      "size": 5008,
-      "normalized_sha256": "891ae85bb719adc3e3d93097fb3ad0ac4f9ce2d27b3ee9a43de8056ed44b6ff6"
+      "sha256": "44d9498441c27b49158ffa2906a726a6577384ae9c25f4033a2cb3f47e453165",
+      "size": 5207,
+      "normalized_sha256": "44d9498441c27b49158ffa2906a726a6577384ae9c25f4033a2cb3f47e453165"
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "f235462e08a6a7b717dca228bbfadfe3569c14e5fb41604592b31f47dc1f8af5",
-      "size": 36054,
-      "normalized_sha256": "f235462e08a6a7b717dca228bbfadfe3569c14e5fb41604592b31f47dc1f8af5"
+      "sha256": "021d564979ad881ad1cbf81cb8a1d585246a3f80948806dbf34c7e4ca180449a",
+      "size": 36193,
+      "normalized_sha256": "021d564979ad881ad1cbf81cb8a1d585246a3f80948806dbf34c7e4ca180449a"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -119,15 +119,15 @@
     },
     "docs/IMPLEMENTATION_PLAN.md": {
       "role": "index",
-      "sha256": "7b2cc90f59f8e3ca8135ef2be3053e783f44f0fb83e03e419480a17f2536c86b",
-      "size": 20527,
-      "normalized_sha256": "7b2cc90f59f8e3ca8135ef2be3053e783f44f0fb83e03e419480a17f2536c86b"
+      "sha256": "961a5712ba7cbef57c7db29d148bcf2f85d83e01579cce0330452ebb431bf22a",
+      "size": 20588,
+      "normalized_sha256": "961a5712ba7cbef57c7db29d148bcf2f85d83e01579cce0330452ebb431bf22a"
     },
     "docs/PROGRESS.md": {
       "role": "index",
-      "sha256": "34aa5bf87e2b3c5bd21219ff6c603c8989c4194572f63d24492cee118810efb6",
-      "size": 13783,
-      "normalized_sha256": "34aa5bf87e2b3c5bd21219ff6c603c8989c4194572f63d24492cee118810efb6"
+      "sha256": "17ff1ae5a5770a9121c4a5e9a32c935e8f236178686d16bc34da3e00834ce49f",
+      "size": 14169,
+      "normalized_sha256": "17ff1ae5a5770a9121c4a5e9a32c935e8f236178686d16bc34da3e00834ce49f"
     },
     "migrations/0001_init.sql": {
       "role": "index",
