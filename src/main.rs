@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod error;
 mod gateway;
+mod maintenance;
 mod models;
 #[allow(dead_code)]
 mod protocol;
@@ -36,6 +37,12 @@ struct Cli {
 enum Command {
     /// Start the HTTP server
     Serve,
+    /// Reset the administrator password
+    ResetPassword {
+        /// New password; read from stdin when omitted
+        #[arg(long)]
+        password: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -43,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => serve(cli.data_dir).await,
+        Command::ResetPassword { password } => reset_password(cli.data_dir, password).await,
     }
 }
 
@@ -60,6 +68,8 @@ async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
         crypto,
         started_at: chrono::Utc::now(),
     };
+
+    maintenance::spawn(state.clone());
 
     let app = app::router(state);
     let listener = tokio::net::TcpListener::bind(config.addr)
@@ -103,4 +113,40 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("shutdown signal received");
+}
+
+async fn reset_password(data_dir: Option<PathBuf>, password: Option<String>) -> anyhow::Result<()> {
+    let config = Config::from_env(data_dir)?;
+    let db = db::connect(&config).await?;
+
+    let admin = models::admin::get(&db).await?.ok_or_else(|| {
+        anyhow::anyhow!("no admin account found; start the server and complete setup first")
+    })?;
+
+    let password = match password {
+        Some(password) => password,
+        None => {
+            use std::io::Write;
+            eprint!("New password: ");
+            std::io::stderr().flush().ok();
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            line.trim_end_matches(['\r', '\n']).to_string()
+        }
+    };
+
+    if password.chars().count() < 8 {
+        anyhow::bail!("password must be at least 8 characters");
+    }
+
+    let password_hash = security::hash_password(&password)?;
+    models::admin::update_password(&db, admin.id, &password_hash).await?;
+    models::session::delete_all_for_admin(&db, admin.id).await?;
+
+    println!(
+        "Password updated for admin `{}`; all sessions were signed out.",
+        admin.username
+    );
+
+    Ok(())
 }

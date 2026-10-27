@@ -7,14 +7,13 @@ use serde_json::{json, Value};
 
 use crate::protocol::Protocol;
 
-pub fn client_error(
+pub fn client_error_value(
     protocol: Protocol,
-    status: StatusCode,
     message: impl Into<String>,
     error_type: &str,
-) -> Response {
+) -> Value {
     let message = message.into();
-    let body = match protocol {
+    match protocol {
         Protocol::Anthropic => json!({
             "type": "error",
             "error": {"type": error_type, "message": message},
@@ -22,9 +21,20 @@ pub fn client_error(
         Protocol::Chat | Protocol::Responses => json!({
             "error": {"message": message, "type": error_type},
         }),
-    };
+    }
+}
 
-    (status, Json(body)).into_response()
+pub fn client_error(
+    protocol: Protocol,
+    status: StatusCode,
+    message: impl Into<String>,
+    error_type: &str,
+) -> Response {
+    (
+        status,
+        Json(client_error_value(protocol, message, error_type)),
+    )
+        .into_response()
 }
 
 pub fn upstream_error(protocol: Protocol, status: StatusCode, value: &Value) -> Response {

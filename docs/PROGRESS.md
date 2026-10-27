@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-27
-- 当前阶段：M7 进行中（CI/CD、多平台发布与 Web 安装向导已完成）
+- 当前阶段：M7 已完成，准备发布 `v0.1.0`
 - 当前分支：`main`
-- 最近提交：`c4351ab docs: 记录 Linux musl 静态产物验证`
+- 最近提交：`6f50308 feat: 新增 Web 首次安装向导与 .env 自动生成`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -15,7 +15,7 @@
 - [x] **M4 Responses 状态**：落库、`previous_response_id` 展开、GET/DELETE、Key 归属校验。
 - [x] **M5 流式**：SSE 解码/编码状态机、tee 透传、首 event 失败切换、断连记 499。
 - [x] **M6 前端**：登录、仪表盘、渠道、Key、日志、设置、Playground。
-- [ ] **M7 收尾**：Docker、README/部署文档、CI、保留期清理任务、`reset-password`、clippy/fmt 全绿。（CI/CD、多平台发布与 Web 安装向导已完成，剩余清理、命令与最终验收）
+- [x] **M7 收尾**：Docker、README/部署文档、CI、保留期清理任务、`reset-password`、clippy/fmt 全绿。
 
 ## 当前状态
 
@@ -28,7 +28,7 @@
 - M4 已完成：Responses 本地落库、`previous_response_id` 历史展开、GET/DELETE、Key 归属校验；`store=false` 不落库且后续引用返回 400。
 - M5 已完成：三协议 SSE 解码/编码、同协议 tee 透传、跨协议 6 条流路径、首 event 失败切换、逐 chunk 空闲超时、断连 499、Responses 流式落库与回读。
 - M6 已完成：请求日志页与详情抽屉、仪表盘统计/时序/占比/最近错误、Playground 三协议（含流式）、`/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`、路由级懒加载与暗色模式。
-- M7 进行中：已完成 GitHub Actions CI、Tag 触发的六平台 Release（Linux/Windows/macOS × amd64/arm64）与 GHCR 多架构 Docker 镜像；已完成 Web 安装向导（首次访问创建管理员、自动写 `<data_dir>/.env`、自动登录）；剩余保留期清理、`reset-password`、请求体记录开关与最终验收。
+- M7 已完成：GitHub Actions CI、Tag 触发的六平台 Release（Linux/Windows/macOS × amd64/arm64）、GHCR 多架构 Docker 镜像、Web 安装向导、保留期清理、`reset-password` 与请求/响应正文记录。
 - 已确认的产品决策见 `docs/IMPLEMENTATION_PLAN.md` 第 1 节。
 
 ## M0 验证记录
@@ -135,6 +135,14 @@
 - 进程级验证：首次启动 `/api/setup/status` 返回 `initialized=false`；提交安装后 `/api/auth/me` 立即 200，`.env` 权限为 `600` 且不含明文密码；仅用 `ONEAPI_DATA_DIR` 重启时从数据目录 `.env` 读取监听地址，管理员登录仍成功。
 - `.env` 不写入管理员密码（仅注释占位），密码只以 Argon2id 哈希存入 SQLite；如需重新引导空管理员表，设置 `ONEAPI_ADMIN_PASSWORD` 后启动。
 
+## M7 收尾验证记录
+
+- 保留期清理：服务启动时及之后每 6 小时执行；`usage_log_retention_days` 清理 `usage_logs` 与 `request_details`，`response_retention_days` 清理 `responses`，`0` 表示永久保留。单元测试覆盖旧/新数据边界与 0 禁用；进程级验证中旧 usage/detail 被删除、近期记录保留。
+- `reset-password`：新增 `oneapi reset-password --password ...`（也可从 stdin 读取），更新 Argon2id 哈希并删除该管理员全部会话；进程级验证旧密码返回 401、新密码 200。
+- 请求/响应正文记录：设置页开启后，非流式与流式请求都会保存正文到 `request_details`，单条最多 64KB；日志详情接口可直接读取。进程级验证 Chat 非流式与 SSE 流式均写入且可回读。
+- `cargo fmt` / `clippy --all-targets -D warnings` / `cargo test`：通过，65 个测试。
+- `npm run build` 与 `cargo build --release`：通过。
+
 ## AOCI 状态
 
 - 版本：`0.1.0-rc22`，二进制 `/usr/local/bin/aoci`。
@@ -145,9 +153,9 @@
 
 ## 下一步
 
-1. 完成 M7 剩余项：日志与 Responses 保留期清理、`reset-password` 子命令、请求体记录开关落地、最终部署与验收文档。
-2. 首次正式发版时推送 `v0.1.0`（需与 `Cargo.toml` 一致），观察 GitHub Actions 六平台构建与 GHCR 推送。
-3. M7 完成后更新本文件并做 AOCI 增量维护。
+1. 推送 `v0.1.0` 标签，触发 GitHub Actions 六平台构建、GitHub Release 与 GHCR 多架构镜像推送。
+2. 首次发布后检查 GHCR 包可见性，按需改为 public。
+3. 后续版本按 `Cargo.toml` 版本打标签，保留数据目录升级。
 
 ## 交接约定
 

@@ -918,6 +918,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_bodies_are_stored_when_enabled() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_success_body("hello")))
+            .mount(&server)
+            .await;
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let router = app::router(state.clone());
+        let body = json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "store me"}],
+        });
+        let (status, _) = send(
+            router.clone(),
+            "/v1/chat/completions",
+            Some(&key),
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_details")
+            .fetch_one(&state.db)
+            .await
+            .expect("count");
+        assert_eq!(count, 0);
+
+        models::setting::upsert(&state.db, "store_request_bodies", "true")
+            .await
+            .expect("setting");
+        let (status, _) = send(router, "/v1/chat/completions", Some(&key), body).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (request_body, response_body): (String, String) = sqlx::query_as(
+            "SELECT request_body, response_body FROM request_details
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_one(&state.db)
+        .await
+        .expect("request detail");
+        assert!(request_body.contains("store me"));
+        assert!(response_body.contains("hello"));
+    }
+
+    #[tokio::test]
     async fn models_list_aggregates_enabled_channels() {
         let (_temp, state) = test_state().await;
         let key = seed_key(&state).await;

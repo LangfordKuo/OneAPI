@@ -77,6 +77,11 @@ pub async fn proxy_with_identity(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let store_request_bodies = models::setting::get_bool(&state.db, "store_request_bodies", false)
+        .await
+        .unwrap_or(false);
+    let detail_request =
+        store_request_bodies.then(|| serde_json::to_string(&body).unwrap_or_default());
 
     let Some(model) = body
         .get("model")
@@ -84,10 +89,18 @@ pub async fn proxy_with_identity(
         .filter(|value| !value.is_empty())
         .map(str::to_string)
     else {
+        let message = "model is required";
+        store_request_detail(
+            state,
+            &request_id,
+            detail_request.as_deref(),
+            &error::client_error_value(inbound, message, "invalid_request_error").to_string(),
+        )
+        .await;
         return Ok(error::client_error(
             inbound,
             StatusCode::BAD_REQUEST,
-            "model is required",
+            message,
             "invalid_request_error",
         ));
     };
@@ -130,6 +143,18 @@ pub async fn proxy_with_identity(
                         Usage::default(),
                     )
                     .await;
+                    store_request_detail(
+                        state,
+                        &request_id,
+                        detail_request.as_deref(),
+                        &error::client_error_value(
+                            inbound,
+                            message.as_str(),
+                            "invalid_request_error",
+                        )
+                        .to_string(),
+                    )
+                    .await;
                     return Ok(error::client_error(
                         inbound,
                         StatusCode::BAD_REQUEST,
@@ -153,6 +178,13 @@ pub async fn proxy_with_identity(
                 StatusCode::BAD_REQUEST,
                 Some(("invalid_request_error", message)),
                 Usage::default(),
+            )
+            .await;
+            store_request_detail(
+                state,
+                &request_id,
+                detail_request.as_deref(),
+                &error::client_error_value(inbound, message, "invalid_request_error").to_string(),
             )
             .await;
             return Ok(error::client_error(
@@ -187,6 +219,13 @@ pub async fn proxy_with_identity(
             Usage::default(),
         )
         .await;
+        store_request_detail(
+            state,
+            &request_id,
+            detail_request.as_deref(),
+            &error::client_error_value(inbound, message, "invalid_request_error").to_string(),
+        )
+        .await;
         return Ok(error::client_error(
             inbound,
             StatusCode::NOT_FOUND,
@@ -209,6 +248,8 @@ pub async fn proxy_with_identity(
             client_request,
             started,
             client_wants_usage,
+            store_request_bodies,
+            detail_request.clone(),
         )
         .await;
     }
@@ -477,7 +518,7 @@ pub async fn proxy_with_identity(
                 usage
             };
 
-            let client_body = if inbound == Protocol::Responses {
+            let (client_body, client_text) = if inbound == Protocol::Responses {
                 let mut value = client_json.unwrap_or(Value::Null);
                 if !value.is_object() {
                     let message = "failed to build a Responses response";
@@ -489,6 +530,13 @@ pub async fn proxy_with_identity(
                         StatusCode::BAD_GATEWAY,
                         Some(("upstream_error", message)),
                         Usage::default(),
+                    )
+                    .await;
+                    store_request_detail(
+                        state,
+                        &request_id,
+                        detail_request.as_deref(),
+                        &error::client_error_value(inbound, message, "upstream_error").to_string(),
                     )
                     .await;
                     return Ok(error::client_error(
@@ -529,15 +577,15 @@ pub async fn proxy_with_identity(
                     }
                 }
 
-                Body::from(
-                    serde_json::to_vec(&value).map_err(|error| AppError::Internal(error.into()))?,
-                )
+                let text = serde_json::to_string(&value)
+                    .map_err(|error| AppError::Internal(error.into()))?;
+                (Body::from(text.clone()), text)
             } else if let Some(value) = client_json {
-                Body::from(
-                    serde_json::to_vec(&value).map_err(|error| AppError::Internal(error.into()))?,
-                )
+                let text = serde_json::to_string(&value)
+                    .map_err(|error| AppError::Internal(error.into()))?;
+                (Body::from(text.clone()), text)
             } else {
-                Body::from(text)
+                (Body::from(text.clone()), text)
             };
 
             ctx.record(
@@ -550,6 +598,8 @@ pub async fn proxy_with_identity(
                 usage,
             )
             .await;
+
+            store_request_detail(state, &request_id, detail_request.as_deref(), &client_text).await;
 
             let response = Response::builder()
                 .status(status)
@@ -584,6 +634,8 @@ pub async fn proxy_with_identity(
         )
         .await;
 
+        store_request_detail(state, &request_id, detail_request.as_deref(), &text).await;
+
         return Ok(match upstream_value {
             Some(value) => error::upstream_error(inbound, status, &value),
             None => error::client_error(inbound, status, message, error_type.as_str()),
@@ -601,10 +653,19 @@ pub async fn proxy_with_identity(
     )
     .await;
 
+    let message = format!("all upstream channels failed: {last_message}");
+    store_request_detail(
+        state,
+        &request_id,
+        detail_request.as_deref(),
+        &error::client_error_value(inbound, &message, &last_error_type).to_string(),
+    )
+    .await;
+
     Ok(error::client_error(
         inbound,
         StatusCode::BAD_GATEWAY,
-        format!("all upstream channels failed: {last_message}"),
+        message,
         &last_error_type,
     ))
 }
@@ -623,6 +684,8 @@ async fn proxy_stream(
     client_request: Option<Value>,
     started: Instant,
     client_wants_usage: bool,
+    store_request_bodies: bool,
+    detail_request: Option<String>,
 ) -> Result<Response, AppError> {
     let mut attempts = 0u32;
     let mut last_channel: Option<Channel> = None;
@@ -837,6 +900,8 @@ async fn proxy_stream(
             idle_timeout: upstream::stream_idle_timeout(channel),
             passthrough: upstream == inbound,
             client_wants_usage,
+            store_request_detail: store_request_bodies,
+            detail_request: detail_request.clone(),
             response_id: response_id.clone(),
             store_response: should_store,
             stored_request: client_request.clone(),
@@ -909,10 +974,19 @@ async fn proxy_stream(
     )
     .await;
 
+    let message = format!("all upstream channels failed: {last_message}");
+    store_request_detail(
+        state,
+        request_id,
+        detail_request.as_deref(),
+        &error::client_error_value(inbound, &message, &last_error_type).to_string(),
+    )
+    .await;
+
     Ok(error::client_error(
         inbound,
         StatusCode::BAD_GATEWAY,
-        format!("all upstream channels failed: {last_message}"),
+        message,
         &last_error_type,
     ))
 }
@@ -1030,6 +1104,26 @@ fn add_route_headers(response: &mut Response, channel: &Channel, upstream_model:
 fn with_route_headers(mut response: Response, channel: &Channel, upstream_model: &str) -> Response {
     add_route_headers(&mut response, channel, upstream_model);
     response
+}
+
+async fn store_request_detail(
+    state: &AppState,
+    request_id: &str,
+    request: Option<&str>,
+    response: &str,
+) {
+    let Some(request) = request else {
+        return;
+    };
+    if let Err(error) =
+        models::request_detail::insert(&state.db, request_id, request, response, now_ms()).await
+    {
+        tracing::warn!(
+            error = %error,
+            request_id = %request_id,
+            "failed to store request detail"
+        );
+    }
 }
 
 fn protocol_for_kind(kind: &str) -> Protocol {

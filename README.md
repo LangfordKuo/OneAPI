@@ -6,7 +6,7 @@ OneAPI 是一个自托管的 AI API 网关：在后台配置上游渠道，客�
 
 ## 当前进度
 
-M0–M6 已完成：脚手架、管理基础、三协议非流式/流式网关、Responses 本地状态、请求日志、仪表盘、Playground 与多架构发布流水线。M7 已完成 Web 安装向导与 CI/CD；剩余保留期清理、请求体记录开关与最终验收。详细进度见 `docs/PROGRESS.md`。
+M0–M7 已完成：脚手架、管理基础、三协议非流式/流式网关、Responses 本地状态、请求日志、仪表盘、Playground、Web 安装向导、CI/CD 与多架构发布、保留期清理、`reset-password` 与请求体记录。详细进度见 `docs/PROGRESS.md`。
 
 ## 支持的平台
 
@@ -150,6 +150,21 @@ docker compose up --build
 ```
 
 数据持久化在 `./data`，服务监听 `3000`。
+
+## 维护
+
+- **保留期清理**：服务每 6 小时自动清理一次。用量日志和请求/响应正文按 `usage_log_retention_days`，Responses 按 `response_retention_days`；设置为 `0` 表示永久保留。
+- **重置管理员密码**：
+
+```bash
+./oneapi reset-password --data-dir ./data --password 'new-strong-password'
+# 或不带 --password，从标准输入读取
+./oneapi reset-password --data-dir ./data
+```
+
+重置后会注销该管理员的全部会话。
+
+- **请求/响应正文记录**：默认关闭；在设置页开启后，日志详情可查看请求与响应正文，单条最多保存 64KB。
 
 ## 文档
 

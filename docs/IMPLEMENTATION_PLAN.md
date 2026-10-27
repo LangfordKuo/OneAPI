@@ -147,7 +147,7 @@ StreamEvent { Start | BlockStart{index,kind} | TextDelta | ReasoningDelta |
 
 - API Key：`sk-` + 48 位 base62；库里只存 SHA-256 哈希 + 前缀用于展示；创建时仅返回一次明文。
 - 管理员：Argon2id 密码；登录后签发随机 opaque session，存哈希到 `sessions`，HttpOnly + SameSite=Lax Cookie（HTTPS 时 Secure），7 天过期，登出即删。
-- 初始化：首次启动且无管理员时，浏览器访问进入 Web 安装页，创建管理员后自动写入 `<data_dir>/.env` 并登录；也支持设置 `ONEAPI_ADMIN_USER/PASSWORD` 无界面自动初始化。未设置密码时不再生成随机密码，而是等待 Web 安装。提供 `oneapi reset-password` 子命令（M7 剩余）。
+- 初始化：首次启动且无管理员时，浏览器访问进入 Web 安装页，创建管理员后自动写入 `<data_dir>/.env` 并登录；也支持设置 `ONEAPI_ADMIN_USER/PASSWORD` 无界面自动初始化。未设置密码时不再生成随机密码，而是等待 Web 安装。提供 `oneapi reset-password` 子命令。
 - 上游 Key 用 AES-256-GCM 加密存储（`v1:nonce:ciphertext`），主密钥来自 `ONEAPI_SECRET`，否则自动生成 `data/master.key`（0600）；接口返回一律掩码。
 - CSRF：SameSite + 对 `/api` 写请求校验 Origin；日志脱敏 Authorization/x-api-key。
 - CORS：`/v1/*` 允许任意 Origin（Bearer 鉴权，不携带 Cookie）；`/api/*` 同源。
@@ -233,3 +233,4 @@ GET /healthz  /readyz
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。
 - 2026-10-27：新增 Web 安装向导：无管理员时首次访问进入安装页，创建管理员后写入 `<data_dir>/.env`（0600）并自动登录；支持 `.env` 从当前目录/数据目录加载，进程环境变量优先；设置 `ONEAPI_ADMIN_PASSWORD` 时仍可无界面引导。
+- 2026-10-27：M7 收尾：新增每 6 小时保留期清理（0 表示永久保留）、`oneapi reset-password` 子命令、请求/响应正文记录（单条 64KB，日志详情可查看）。

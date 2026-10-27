@@ -63,6 +63,8 @@ pub struct StreamJob {
     pub client_wants_usage: bool,
     pub response_id: Option<String>,
     pub store_response: bool,
+    pub store_request_detail: bool,
+    pub detail_request: Option<String>,
     pub stored_request: Option<Value>,
     pub stream: ByteStream,
 }
@@ -181,6 +183,7 @@ async fn run(
     });
 
     let mut tokens = Usage::default();
+    let mut response_capture: Vec<u8> = Vec::new();
     let mut first_token_at: Option<Instant> = None;
     let mut client_disconnected = false;
     let mut stream_error: Option<(String, String)> = None;
@@ -236,6 +239,7 @@ async fn run(
             &mut decoder,
             &mut encoder,
             &tx,
+            &mut response_capture,
             &mut tokens,
             &mut first_token_at,
         )
@@ -257,14 +261,15 @@ async fn run(
         if synthesize_error {
             if let Some((error_type, message)) = stream_error.clone() {
                 let frame = error_frame(job.inbound, &error_type, &message);
-                let _ = send_bytes(&tx, Bytes::from(frame.into_bytes())).await;
+                let _ =
+                    send_bytes(&tx, Bytes::from(frame.into_bytes()), &mut response_capture).await;
             }
         } else if stream_error.is_none() {
             let finish = decoder.finish();
             if let Some(encoder) = encoder.as_mut() {
                 for event in finish {
                     for text in encoder.encode(&event) {
-                        if send_bytes(&tx, Bytes::from(text.into_bytes()))
+                        if send_bytes(&tx, Bytes::from(text.into_bytes()), &mut response_capture)
                             .await
                             .is_err()
                         {
@@ -326,6 +331,27 @@ async fn run(
                         "failed to persist Responses state"
                     );
                 }
+            }
+        }
+    }
+
+    if job.store_request_detail {
+        if let Some(request) = &job.detail_request {
+            let response = String::from_utf8_lossy(&response_capture);
+            if let Err(error) = models::request_detail::insert(
+                &job.state.db,
+                &job.request_id,
+                request,
+                &response,
+                models::now_ms(),
+            )
+            .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    request_id = %job.request_id,
+                    "failed to store streaming request detail"
+                );
             }
         }
     }
@@ -406,6 +432,7 @@ async fn process_frame(
     decoder: &mut StreamDecoder,
     encoder: &mut Option<StreamEncoder>,
     tx: &mpsc::Sender<Bytes>,
+    capture: &mut Vec<u8>,
     tokens: &mut Usage,
     first_token_at: &mut Option<Instant>,
 ) -> FrameOutcome {
@@ -435,7 +462,7 @@ async fn process_frame(
         };
 
         if !bytes.is_empty() {
-            if send_bytes(tx, bytes).await.is_err() {
+            if send_bytes(tx, bytes, capture).await.is_err() {
                 return FrameOutcome::Disconnected;
             }
             if first_token_at.is_none() && frame_has_content(upstream, frame) {
@@ -480,7 +507,7 @@ async fn process_frame(
         };
 
         for text in encoder.encode(&event) {
-            if send_bytes(tx, Bytes::from(text.into_bytes()))
+            if send_bytes(tx, Bytes::from(text.into_bytes()), capture)
                 .await
                 .is_err()
             {
@@ -499,7 +526,16 @@ async fn process_frame(
     FrameOutcome::Ok
 }
 
-async fn send_bytes(tx: &mpsc::Sender<Bytes>, bytes: Bytes) -> Result<(), ()> {
+async fn send_bytes(
+    tx: &mpsc::Sender<Bytes>,
+    bytes: Bytes,
+    capture: &mut Vec<u8>,
+) -> Result<(), ()> {
+    let remaining = models::request_detail::MAX_DETAIL_BYTES.saturating_sub(capture.len());
+    if remaining > 0 {
+        capture.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+    }
+
     tokio::select! {
         _ = tx.closed() => Err(()),
         result = tx.send(bytes) => result.map_err(|_| ()),
@@ -801,6 +837,8 @@ mod tests {
             client_wants_usage: false,
             response_id: None,
             store_response: false,
+            store_request_detail: false,
+            detail_request: None,
             stored_request: None,
             stream,
         }
@@ -935,6 +973,39 @@ mod tests {
         assert!(body.contains("\"content\":\"hi\""));
         assert!(!body.contains("\"usage\""));
         assert!(body.contains("[DONE]"));
+    }
+
+    #[tokio::test]
+    async fn streaming_request_detail_is_captured() {
+        let (_temp, state) = test_state().await;
+        let channel_id = seed_channel(&state).await;
+        let api_key_id = seed_key(&state).await;
+
+        let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+            Ok(Bytes::from_static(
+                b"data: {\"id\":\"c\",\"model\":\"gpt\",\"created\":1,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            )),
+            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+        ];
+        let stream: ByteStream = Box::pin(stream::iter(chunks));
+
+        let mut stream_job = job(state.clone(), channel_id, api_key_id, stream);
+        stream_job.store_request_detail = true;
+        stream_job.detail_request = Some("{\"model\":\"gpt\"}".to_string());
+
+        let response = start(stream_job).await.expect("stream starts");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(String::from_utf8_lossy(&bytes).contains("hi"));
+
+        let (request_body, response_body): (String, String) =
+            sqlx::query_as("SELECT request_body, response_body FROM request_details LIMIT 1")
+                .fetch_one(&state.db)
+                .await
+                .expect("request detail");
+        assert_eq!(request_body, "{\"model\":\"gpt\"}");
+        assert!(response_body.contains("\"content\":\"hi\""));
     }
 
     #[tokio::test]

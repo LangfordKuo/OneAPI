@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod api_key;
 pub mod channel;
+pub mod request_detail;
 pub mod response;
 pub mod session;
 pub mod setting;

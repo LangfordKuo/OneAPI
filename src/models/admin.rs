@@ -23,6 +23,12 @@ pub async fn find_by_username(pool: &SqlitePool, username: &str) -> sqlx::Result
         .await
 }
 
+pub async fn get(pool: &SqlitePool) -> sqlx::Result<Option<Admin>> {
+    sqlx::query_as("SELECT id, username, password_hash, created_at FROM admin WHERE id = 1")
+        .fetch_optional(pool)
+        .await
+}
+
 pub async fn create(
     pool: &SqlitePool,
     username: &str,

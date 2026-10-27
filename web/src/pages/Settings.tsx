@@ -90,17 +90,25 @@ export default function SettingsPage() {
           <Form.Item name="stream_idle_timeout_seconds" label="流式空闲超时（秒）">
             <InputNumber min={1} style={{ width: '100%' }} />
           </Form.Item>
-          <Form.Item name="usage_log_retention_days" label="用量日志保留天数">
+          <Form.Item
+            name="usage_log_retention_days"
+            label="用量日志保留天数"
+            extra="0 表示永久保留"
+          >
             <InputNumber min={0} style={{ width: '100%' }} />
           </Form.Item>
-          <Form.Item name="response_retention_days" label="Responses 保留天数">
+          <Form.Item
+            name="response_retention_days"
+            label="Responses 保留天数"
+            extra="0 表示永久保留"
+          >
             <InputNumber min={0} style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item
             name="store_request_bodies"
             label="记录请求/响应体"
             valuePropName="checked"
-            extra="默认关闭；开启后会把请求与响应体截断保存到数据库"
+            extra="默认关闭；开启后保存请求/响应正文，单条最多 64KB，可在日志详情查看"
           >
             <Switch />
           </Form.Item>
