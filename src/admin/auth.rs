@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::{
+    client_ip,
     error::AppError,
     models::{self, admin::Admin},
     security,
@@ -99,14 +100,19 @@ impl FromRequestParts<AppState> for ClientAddr {
 
     async fn from_request_parts(
         parts: &mut Parts,
-        _state: &AppState,
+        state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        Ok(Self(
-            parts
-                .extensions
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|ConnectInfo(addr)| addr.ip()),
-        ))
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| addr.ip());
+        let header = models::setting::get(&state.db, client_ip::SETTING_KEY)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        Ok(Self(client_ip::resolve(&parts.headers, &header, peer)))
     }
 }
 

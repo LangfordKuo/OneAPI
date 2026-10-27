@@ -49,7 +49,7 @@ docker compose up -d --build
 从 [Releases](https://github.com/LangfordKuo/OneAPI/releases) 下载对应平台的压缩包并解压：
 
 ```bash
-tar xzf oneapi-v0.1.3-linux-amd64.tar.gz
+tar xzf oneapi-v0.1.4-linux-amd64.tar.gz
 ONEAPI_DATA_DIR=./data ./oneapi serve
 ```
 
@@ -83,6 +83,8 @@ ONEAPI_DATA_DIR=./data ./oneapi serve
 | `ONEAPI_LOG_LEVEL` | 日志级别 | `info` |
 | `ONEAPI_LOG_JSON` | 设为 `1` 输出 JSON 日志 | 关闭 |
 | `ONEAPI_DATABASE_URL` | 显式指定 SQLite URL | 数据目录内的 `oneapi.db` |
+
+管理后台的「设置」页可以指定从哪个请求头读取真实客户端 IP，例如 Cloudflare 的 `CF-Connecting-IP`、反向代理的 `X-Forwarded-For` 或 `X-Real-IP`。该地址用于登录失败限速；留空时使用 TCP 对端地址。只有确认所有流量都经过可信代理时才应配置，否则客户端可以伪造该请求头绕过限速。
 
 健康检查接口：`GET /healthz`、`GET /readyz`。
 

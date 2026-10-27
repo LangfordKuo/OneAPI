@@ -44,6 +44,7 @@ export interface Settings {
   response_retention_days: number;
   store_request_bodies: boolean;
   update_source: 'github' | 'ghproxy';
+  client_ip_header: string;
 }
 
 export interface Admin {

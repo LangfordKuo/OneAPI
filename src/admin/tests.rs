@@ -13,7 +13,7 @@ use wiremock::{
 };
 
 use crate::{
-    app,
+    app, client_ip,
     config::Config,
     db,
     models::{self, channel::ChannelWrite, now_ms},
@@ -172,6 +172,55 @@ async fn admin_post(
         .uri(path)
         .header("content-type", "application/json")
         .header("cookie", format!("oneapi_session={token}"))
+        .body(Body::from(serde_json::to_vec(&body).expect("json")))
+        .expect("request");
+    let response = router.oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+async fn admin_put(
+    router: axum::Router,
+    path: &str,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("PUT")
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("cookie", format!("oneapi_session={token}"))
+        .body(Body::from(serde_json::to_vec(&body).expect("json")))
+        .expect("request");
+    let response = router.oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+async fn admin_post_with_client_ip(
+    router: axum::Router,
+    path: &str,
+    body: Value,
+    header: &str,
+    ip: &str,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .header(header, ip)
         .body(Body::from(serde_json::to_vec(&body).expect("json")))
         .expect("request");
     let response = router.oneshot(request).await.expect("response");
@@ -531,6 +580,89 @@ async fn login_is_rate_limited_after_repeated_failures() {
         "/api/auth/login",
         "",
         json!({"username": "admin", "password": "password123"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn client_ip_header_setting_is_validated_and_saved() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let router = app::router(state.clone());
+
+    let (status, body) = admin_put(
+        router.clone(),
+        "/api/settings",
+        &token,
+        json!({"client_ip_header": "CF-Connecting-IP"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["client_ip_header"], json!("cf-connecting-ip"));
+
+    let (status, _) = admin_put(
+        router.clone(),
+        "/api/settings",
+        &token,
+        json!({"client_ip_header": "bad header"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (_, body) = admin_get(router, "/api/settings", &token).await;
+    assert_eq!(body["client_ip_header"], json!("cf-connecting-ip"));
+}
+
+#[tokio::test]
+async fn login_limiter_uses_configured_client_ip_header() {
+    let (_temp, state) = test_state().await;
+    admin_token(&state).await;
+    models::setting::upsert(&state.db, client_ip::SETTING_KEY, "cf-connecting-ip")
+        .await
+        .expect("setting");
+    let router = app::router(state);
+
+    for index in 0..5 {
+        let (status, _) = admin_post_with_client_ip(
+            router.clone(),
+            "/api/auth/login",
+            json!({"username": "admin", "password": "wrong-password"}),
+            "cf-connecting-ip",
+            &format!("203.0.113.{index}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    let (status, _) = admin_post_with_client_ip(
+        router.clone(),
+        "/api/auth/login",
+        json!({"username": "admin", "password": "password123"}),
+        "cf-connecting-ip",
+        "203.0.113.99",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for _ in 0..5 {
+        let (status, _) = admin_post_with_client_ip(
+            router.clone(),
+            "/api/auth/login",
+            json!({"username": "admin", "password": "wrong-password"}),
+            "cf-connecting-ip",
+            "198.51.100.7",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    let (status, _) = admin_post_with_client_ip(
+        router,
+        "/api/auth/login",
+        json!({"username": "admin", "password": "password123"}),
+        "cf-connecting-ip",
+        "198.51.100.7",
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
   App,
+  AutoComplete,
   Button,
   Card,
   Descriptions,
@@ -98,7 +99,12 @@ export default function SettingsPage() {
         <Form
           form={form}
           layout="vertical"
-          onFinish={(values: Settings) => saveMutation.mutate(values)}
+          onFinish={(values: Settings) =>
+            saveMutation.mutate({
+              ...values,
+              client_ip_header: values.client_ip_header ?? '',
+            })
+          }
           style={{ maxWidth: 560 }}
         >
           <Form.Item
@@ -152,6 +158,25 @@ export default function SettingsPage() {
               options={[
                 { value: 'github', label: 'GitHub 官方' },
                 { value: 'ghproxy', label: '国内加速（gh-proxy.com）' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            name="client_ip_header"
+            label="客户端 IP 请求头"
+            extra="仅当所有流量都经过可信反向代理或 Cloudflare 时配置；留空则使用 TCP 对端地址。伪造该请求头可绕过登录限速。"
+          >
+            <AutoComplete
+              allowClear
+              placeholder="例如 CF-Connecting-IP"
+              options={[
+                {
+                  value: 'cf-connecting-ip',
+                  label: 'CF-Connecting-IP（Cloudflare）',
+                },
+                { value: 'x-forwarded-for', label: 'X-Forwarded-For' },
+                { value: 'x-real-ip', label: 'X-Real-IP' },
+                { value: 'true-client-ip', label: 'True-Client-IP' },
               ]}
             />
           </Form.Item>

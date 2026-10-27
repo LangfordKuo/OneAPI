@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
-use crate::{error::AppError, models::setting, state::AppState};
+use crate::{client_ip, error::AppError, models::setting, state::AppState};
 
 use super::auth::AdminSession;
 
@@ -17,6 +17,7 @@ pub struct SettingsOutput {
     pub response_retention_days: i64,
     pub store_request_bodies: bool,
     pub update_source: String,
+    pub client_ip_header: String,
 }
 
 impl SettingsOutput {
@@ -49,6 +50,7 @@ impl SettingsOutput {
                 .filter(|value| value.as_str() == "github" || value.as_str() == "ghproxy")
                 .cloned()
                 .unwrap_or_else(|| "github".to_string()),
+            client_ip_header: map.get(client_ip::SETTING_KEY).cloned().unwrap_or_default(),
         }
     }
 }
@@ -71,6 +73,8 @@ pub struct SettingsInput {
     pub store_request_bodies: Option<bool>,
     #[serde(default)]
     pub update_source: Option<String>,
+    #[serde(default)]
+    pub client_ip_header: Option<String>,
 }
 
 pub async fn get(
@@ -158,6 +162,15 @@ pub async fn update(
             ));
         }
         setting::upsert(&state.db, "update_source", value).await?;
+    }
+
+    if let Some(value) = input.client_ip_header {
+        let Some(header) = client_ip::parse_header_name(&value) else {
+            return Err(AppError::BadRequest(
+                "client_ip_header is not a valid HTTP header name".to_string(),
+            ));
+        };
+        setting::upsert(&state.db, client_ip::SETTING_KEY, &header).await?;
     }
 
     state.cache.invalidate_defaults();

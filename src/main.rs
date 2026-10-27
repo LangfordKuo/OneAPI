@@ -1,5 +1,6 @@
 mod admin;
 mod app;
+mod client_ip;
 mod config;
 mod db;
 mod error;

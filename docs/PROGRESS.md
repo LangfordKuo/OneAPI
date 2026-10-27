@@ -1,9 +1,9 @@
 # OneAPI 进度
 
-- 最后更新：2026-10-27
-- 当前阶段：阶段 A–E3 已发布 v0.1.2，v0.1.3 为日志筛选修复补丁（分支 `fix/log-filters`）
-- 当前分支：`fix/log-filters`
-- 最近发布：`v0.1.3`
+- 最后更新：2026-10-28
+- 当前阶段：v0.1.4 已发布（新增可配置客户端 IP 请求头，`main`）
+- 当前分支：`main`
+- 最近发布：`v0.1.4`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -178,6 +178,22 @@
 - 修复日志列表筛选只作用于 `total`、不作用于返回行的问题：`usage_logs` 行查询缺少 WHERE 入口，筛选片段被并入最后一个 `LEFT JOIN` 的 ON 子句，导致仪表盘“最近错误”混入 200 请求，日志页切换筛选后当前页内容不变。
 - 补充筛选回归测试：`status=error` 仅返回 `>=400`、`status=success` 仅返回 `<400`、`model` 过滤与不存在的模型返回空列表。
 - 验证：89 个测试通过，clippy/fmt/lint/build 通过；release 二进制实测筛选结果与 `total` 一致（错误 2 行、成功 13 行、不存在的模型 0 行）。
+
+## 真实客户端 IP 请求头
+
+- 新增设置项 `client_ip_header`：后台「设置」页可指定从哪个请求头读取客户端 IP，留空时使用 TCP 对端地址。
+- 支持 `CF-Connecting-IP`（Cloudflare）、`X-Forwarded-For`（取列表中第一个可解析地址）、`X-Real-IP`、`True-Client-IP`，也接受任意合法 HTTP 头名；头缺失或值无法解析时回退 TCP 对端地址。
+- 登录失败限速改为按解析后的 IP + 用户名计数，解决反向代理或 Cloudflare 后所有请求共享代理 IP 的问题。
+- 安全边界：只有在所有流量都经过可信代理时才应配置；直接暴露服务时客户端可伪造该请求头绕过限速，设置页与 README 均有提示。
+- 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（97 个测试）与前端 `npm run lint`、`npm run build` 全部通过。
+
+## v0.1.4 发布记录
+
+- 版本号从 `0.1.3` 升至 `0.1.4`，发布真实客户端 IP 请求头设置。
+- 新增 `client_ip_header` 设置：后台可指定 `CF-Connecting-IP`、`X-Forwarded-For`、`X-Real-IP`、`True-Client-IP` 或任意合法头名；留空使用 TCP 对端地址。
+- 登录失败限速改为按解析后的客户端 IP + 用户名计数；头缺失或值无效时回退 TCP 对端地址。
+- 新增 6 个解析单元测试与 2 个后台集成测试，覆盖头名校验、保存回读、XFF 多值、IPv6/端口、无效值回退与按请求头分桶限速。
+- 验证：97 个测试通过；`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`npm run lint`、`npm run build` 全部通过；release 二进制端到端实测 54 项断言通过。
 
 ## 审查计划阶段 A（v0.1.2 修复与一致性）
 
