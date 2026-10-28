@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     error::AppError,
-    models::{self, channel::Channel, now_ms},
+    models::{self, api_key::ApiKey, channel::Channel, now_ms},
     protocol::{Protocol, UnifiedRequest, Usage},
     state::{AppState, ProbeAttempt},
     upstream,
@@ -26,17 +26,21 @@ use super::{
     usage::{self, UsageRecord},
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ProxyIdentity {
     pub api_key_id: Option<i64>,
     pub source: &'static str,
+    allowed_channel_ids: Vec<i64>,
+    allowed_models: Vec<String>,
 }
 
 impl ProxyIdentity {
-    pub fn gateway(api_key_id: i64) -> Self {
+    pub fn gateway(key: &ApiKey) -> Self {
         Self {
-            api_key_id: Some(api_key_id),
+            api_key_id: Some(key.id),
             source: "gateway",
+            allowed_channel_ids: key.channel_ids(),
+            allowed_models: key.model_names(),
         }
     }
 
@@ -44,7 +48,21 @@ impl ProxyIdentity {
         Self {
             api_key_id: None,
             source: "playground",
+            allowed_channel_ids: Vec::new(),
+            allowed_models: Vec::new(),
         }
+    }
+
+    fn allows_model(&self, model: &str) -> bool {
+        self.allowed_models.is_empty()
+            || self
+                .allowed_models
+                .iter()
+                .any(|item| item == "*" || item == model)
+    }
+
+    fn allows_channel(&self, channel_id: i64) -> bool {
+        self.allowed_channel_ids.is_empty() || self.allowed_channel_ids.contains(&channel_id)
     }
 }
 
@@ -57,7 +75,7 @@ pub async fn proxy(
 ) -> Result<Response, AppError> {
     proxy_with_identity(
         state,
-        ProxyIdentity::gateway(auth.key.id),
+        ProxyIdentity::gateway(&auth.key),
         inbound,
         headers,
         body,
@@ -114,6 +132,26 @@ pub async fn proxy_with_identity(
         started,
         attempts: 0,
     };
+
+    if !identity.allows_model(&model) {
+        let message = "model is not allowed for this API key";
+        ctx.record(
+            state,
+            None,
+            None,
+            inbound,
+            StatusCode::FORBIDDEN,
+            Some(("permission_error", message)),
+            Usage::default(),
+        )
+        .await;
+        return Ok(error::client_error(
+            inbound,
+            StatusCode::FORBIDDEN,
+            message,
+            "permission_error",
+        ));
+    }
 
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let client_wants_usage = body
@@ -205,6 +243,10 @@ pub async fn proxy_with_identity(
     };
 
     let channels = state.cache.channels(&state.db).await?;
+    let channels = channels
+        .into_iter()
+        .filter(|channel| identity.allows_channel(channel.id))
+        .collect();
     let candidates = select::candidates(channels, &model, inbound);
     if candidates.is_empty() {
         let message = "no channel available for this model";

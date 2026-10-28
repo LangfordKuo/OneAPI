@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-28
-- 当前阶段：v0.1.7 已发布（渠道协议内分页与 Token 图表修复，`main`）
+- 当前阶段：v0.1.8 已发布（API Key 渠道/模型/Token 限额，`main`）
 - 当前分支：`main`
-- 最近发布：`v0.1.7`
+- 最近发布：`v0.1.8`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -209,6 +209,15 @@
 - 设置页渠道表单改为多选协议，并显示当前可选的转换目标；自定义请求头与模型映射仍由整个渠道共享。
 - `count_tokens` 只在渠道原生支持 Anthropic 时转发，否则保持原有字符估算。
 - 验证：新增 4 个协议选择单元测试、2 个网关集成测试（原生匹配不转换、缺失协议走 fallback）与 1 个渠道 CRUD 测试；108 个测试通过。
+
+## v0.1.8 发布记录
+
+- 版本号从 `0.1.7` 升至 `0.1.8`，API Key 新增三类可选限制，留空即不限制。
+- 可用渠道：按渠道 ID 限制路由候选；模型目录同样只展示允许渠道能提供的模型。
+- 可用模型：按模型名限制，支持 `*` 通配；网关请求与 `/v1/models` 均按限制过滤，未授权模型返回 403 `permission_error`。
+- Token 上限：`token_usage` 累计 total_tokens，写入 usage_logs 的同一事务内累加；达到上限自动置 `enabled=0`，后续请求返回 403。迁移 `0006_api_key_limits.sql` 会按历史 usage_logs 回填现有 Key 的用量。
+- Key 页支持创建/编辑限制，列表展示渠道/模型摘要、用量进度、上限与「已超限」状态。
+- 验证：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test`（122 个测试）、`npm run typecheck`、`npm run lint`、`npm run build` 全部通过；运行时验证模型限制 403、模型目录过滤、渠道限制选路、Token 达限自动停用，Playwright 验证创建/编辑/列表展示。
 
 ## v0.1.7 发布记录
 

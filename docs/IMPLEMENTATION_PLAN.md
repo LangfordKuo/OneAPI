@@ -1,6 +1,6 @@
 # OneAPI 实施计划
 
-- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度，v0.1.7 渠道按协议内分页并修复 Token 图表轴
+- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度，v0.1.7 渠道按协议内分页并修复 Token 图表轴，v0.1.8 API Key 支持渠道/模型/Token 限额
 - 最后更新：2026-10-27
 - 关联文档：`docs/PROGRESS.md`
 - 适用仓库：`/root/OneAPI`
@@ -71,7 +71,7 @@ SQLite，时间统一存 unix 毫秒 `INTEGER`。
 - `admin(id=1, username, password_hash, created_at)`
 - `sessions(token_hash PK, admin_id, created_at, expires_at)`
 - `channels(id, name, kind, kinds TEXT JSON, fallback_kind, protocol_configs TEXT JSON, base_url, api_key_enc, auth_header TEXT 'bearer'|'x-api-key', models TEXT JSON, model_mapping TEXT JSON, extra_headers TEXT JSON, proxy_url, priority INT, weight INT, timeout_ms, enabled, last_error, last_error_at, disabled_until, consecutive_failures, created_at, updated_at)`：`protocol_configs` 为每个协议保存一套 `{protocol, mode: native|convert, target, base_url, api_key_enc, auth_header, models, model_mapping, extra_headers}`；`mode=convert` 时使用 `target` 指向的原生协议配置。旧列保留为第一个原生协议的兼容视图，旧数据由启动时的 backfill 自动生成三条路由。
-- `api_keys(id, name, key_hash UNIQUE, key_prefix, enabled, expires_at, last_used_at, created_at)`
+- `api_keys(id, name, key_hash UNIQUE, key_prefix, enabled, expires_at, last_used_at, allowed_channel_ids TEXT JSON, allowed_models TEXT JSON, token_limit INT, token_usage INT, created_at)`：两个 JSON 数组为空表示不限制；`token_limit` 为空/0 表示不限制，`token_usage` 累计该 Key 的 total_tokens，达到上限时自动置 `enabled=0`。
 - `usage_logs(id, request_id, source 'gateway'|'playground', api_key_id, channel_id, model, upstream_model, inbound_protocol, upstream_protocol, stream, status_code, attempts, error_type, error_message, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, latency_ms, first_token_ms, created_at)`
 - `responses(id 'resp_...' PK, api_key_id, model, request_json, response_json, status, created_at)`
 - `request_details(request_id PK, request_body, response_body, created_at)`（可选，默认关闭，截断 64KB）
@@ -145,7 +145,7 @@ StreamEvent { Start | BlockStart{index,kind} | TextDelta | ReasoningDelta |
 
 ## 7. 认证与安全
 
-- API Key：`sk-` + 48 位 base62；库里只存 SHA-256 哈希 + 前缀用于展示；创建时仅返回一次明文。
+- API Key：`sk-` + 48 位 base62；库里只存 SHA-256 哈希 + 前缀用于展示；创建时仅返回一次明文。可选限制：允许的渠道 ID、允许的模型名（空数组表示全部，模型支持 `*`）、累计 Token 上限（空/0 表示不限）；用量在写入 usage_logs 的同一事务累加，达到上限自动停用，网关返回 403 `permission_error`。
 - 管理员：Argon2id 密码；登录后签发随机 opaque session，存哈希到 `sessions`，HttpOnly + SameSite=Lax Cookie（HTTPS 时 Secure），7 天过期，登出即删。
 - 初始化：首次启动且无管理员时，浏览器访问进入 Web 安装页，创建管理员后自动写入 `<data_dir>/.env` 并登录；也支持设置 `ONEAPI_ADMIN_USER/PASSWORD` 无界面自动初始化。未设置密码时不再生成随机密码，而是等待 Web 安装。提供 `oneapi reset-password` 子命令。
 - 上游 Key 用 AES-256-GCM 加密存储（`v1:nonce:ciphertext`），主密钥来自 `ONEAPI_SECRET`，否则自动生成 `data/master.key`（0600）；接口返回一律掩码。
@@ -179,7 +179,7 @@ GET /healthz  /readyz
 会话状态驱动首屏：`App` 依次查询安装状态与 `/api/auth/me`，未安装渲染安装向导，未登录渲染登录页，登录后进入带侧边栏的后台路由（`/`、`/channels`、`/keys`、`/logs`、`/playground`、`/settings`）。UI 采用 shadcn/ui（base-nova，Base UI 原语）+ Tailwind CSS 4 的 CSS 变量主题；侧边栏在移动端折叠为 Sheet，暗色模式由 next-themes 切换。
 
 - 渠道页：表格（名称/原生协议/地址/模型数/优先级/状态/实时 tok/s）；抽屉表单把三个协议做成内分页，每页独立配置 Base URL、Key、auth_header、模型、model_mapping、自定义头；每页的「转换目标」可选「不转换」或另一个原生协议，选转换后隐藏本页详细配置并复用目标页配置；priority/weight、超时、代理、启用为渠道级共用。表单内“测试连通性”“拉取模型”作用于当前协议页，拉取结果回填当前页。
-- Key 页：创建弹窗一次性展示完整 Key（CodeBlock + 复制）；启用/禁用/删除；显示前缀、最后使用时间。
+- Key 页：创建/编辑弹窗一次性展示完整 Key（CodeBlock + 复制）；可配置可用渠道、可用模型与 Token 上限，留空即不限制；列表显示限制摘要、累计用量/上限与「已超限」状态；启用/禁用/删除；显示前缀、最后使用时间。
 - 日志页：时间范围/模型/请求 ID/渠道/Key/状态/协议/来源/流式筛选 + 分页 + 详情抽屉（token、耗时、首 token、错误、可选请求响应体）；窄屏隐藏次要列，行点击仍可查看全部字段。
 - 仪表盘：统计卡 + Recharts 请求/错误时序与 Token 柱状图 + 模型/渠道占比环形图 + 最近错误 + 系统信息。
 - Playground：选协议、模型（datalist 可输入）、系统提示、多轮消息、流式开关；用 fetch + ReadableStream 自写 SSE 解析，展示文本/推理/工具调用与耗时/token/命中渠道。
@@ -247,6 +247,7 @@ GET /healthz  /readyz
 - 2026-10-28：实时 tok/s 改为最近 1 秒实测值，移除 10 秒滑动窗口；`/api/metrics/stream` 每次推送上一完整秒的 token 增量，流结束或空闲一秒后归零。
 - 2026-10-28：版本升至 `0.1.6`，发布 shadcn/ui 前端重写、网站域名设置与 1 秒实时速度。
 - 2026-10-28：渠道按协议内分页，每协议独立 Base URL/Key/模型等并支持转换到原生协议；Token 图表 Y 轴改用万/亿紧凑格式。版本升至 `0.1.7`。
+- 2026-10-28：API Key 新增可选限制：允许的渠道、允许的模型与累计 Token 上限；限制在网关选路/鉴权与用量写入时生效，达到上限自动停用。版本升至 `0.1.8`。
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。

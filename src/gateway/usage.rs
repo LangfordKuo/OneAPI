@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use sqlx::{Executor, Sqlite, SqlitePool};
 use tokio::sync::mpsc;
 
-use crate::{protocol::Usage, state::AppState};
+use crate::{models, protocol::Usage, state::AppState};
 
 pub struct UsageRecord<'a> {
     pub request_id: &'a str,
@@ -113,7 +115,13 @@ pub async fn record(state: &AppState, record: &UsageRecord<'_>) {
 }
 
 pub async fn insert(pool: &SqlitePool, record: &UsageRecord<'_>) -> sqlx::Result<()> {
-    insert_one(pool, &OwnedUsageRecord::from(record)).await
+    let owned = OwnedUsageRecord::from(record);
+    let mut tx = pool.begin().await?;
+    insert_one(&mut *tx, &owned).await?;
+    if let Some(api_key_id) = owned.api_key_id {
+        models::api_key::add_usage(&mut *tx, api_key_id, total_tokens(&owned.usage)).await?;
+    }
+    tx.commit().await
 }
 
 async fn insert_one<'e, E>(executor: E, record: &OwnedUsageRecord) -> sqlx::Result<()>
@@ -179,10 +187,29 @@ async fn write_loop(pool: SqlitePool, mut rx: mpsc::Receiver<OwnedUsageRecord>) 
 
 async fn write_batch(pool: &SqlitePool, batch: &[OwnedUsageRecord]) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
+    let mut key_usage: HashMap<i64, i64> = HashMap::new();
     for record in batch {
         insert_one(&mut *tx, record).await?;
+        if let Some(api_key_id) = record.api_key_id {
+            *key_usage.entry(api_key_id).or_default() += total_tokens(&record.usage);
+        }
+    }
+    for (api_key_id, tokens) in key_usage {
+        models::api_key::add_usage(&mut *tx, api_key_id, tokens).await?;
     }
     tx.commit().await
+}
+
+fn total_tokens(usage: &Usage) -> i64 {
+    let total = usage
+        .total_tokens
+        .or_else(|| match (usage.input_tokens, usage.output_tokens) {
+            (Some(input), Some(output)) => Some(input + output),
+            _ => None,
+        });
+    total
+        .and_then(|value| i64::try_from(value).ok())
+        .unwrap_or(0)
 }
 
 fn token(value: Option<u64>) -> Option<i64> {
@@ -244,5 +271,96 @@ mod tests {
         }
 
         panic!("queued usage record was not persisted");
+    }
+
+    #[tokio::test]
+    async fn queued_usage_updates_key_counter_and_disables_at_limit() {
+        let temp = TempDir::new().expect("temp dir");
+        let config = crate::config::Config {
+            addr: "127.0.0.1:0".parse().expect("address"),
+            data_dir: temp.path().to_path_buf(),
+            database_url: None,
+            database_path: temp.path().join("test.db"),
+            log_level: "error".to_string(),
+            cookie_secure: false,
+            trust_proxy: false,
+        };
+        let pool = crate::db::connect(&config).await.expect("database");
+        let key = crate::models::api_key::create_with_limits(
+            &pool,
+            &crate::models::api_key::ApiKeyCreate {
+                name: "quota",
+                key_hash: "hash",
+                key_prefix: "sk-test",
+                enabled: 1,
+                expires_at: None,
+                allowed_channel_ids: "[]",
+                allowed_models: "[]",
+                token_limit: Some(8),
+                created_at: crate::models::now_ms(),
+            },
+        )
+        .await
+        .expect("key");
+        let writer = UsageWriter::start(pool.clone());
+
+        let record = |tokens: u64| OwnedUsageRecord {
+            request_id: format!("req-{tokens}"),
+            source: "gateway".to_string(),
+            api_key_id: Some(key.id),
+            channel_id: None,
+            model: "gpt-test".to_string(),
+            upstream_model: None,
+            inbound_protocol: "chat".to_string(),
+            upstream_protocol: "chat".to_string(),
+            stream: false,
+            status_code: 200,
+            attempts: 1,
+            error_type: None,
+            error_message: None,
+            usage: Usage {
+                total_tokens: Some(tokens),
+                ..Usage::default()
+            },
+            latency_ms: 5,
+            first_token_ms: None,
+            created_at: crate::models::now_ms(),
+        };
+
+        writer.try_enqueue(record(5));
+        wait_for_usage(&pool, 5).await;
+        let (usage, enabled): (i64, i64) =
+            sqlx::query_as("SELECT token_usage, enabled FROM api_keys WHERE id = ?")
+                .bind(key.id)
+                .fetch_one(&pool)
+                .await
+                .expect("key row");
+        assert_eq!(usage, 5);
+        assert_eq!(enabled, 1);
+
+        writer.try_enqueue(record(5));
+        wait_for_usage(&pool, 10).await;
+        let (usage, enabled): (i64, i64) =
+            sqlx::query_as("SELECT token_usage, enabled FROM api_keys WHERE id = ?")
+                .bind(key.id)
+                .fetch_one(&pool)
+                .await
+                .expect("key row");
+        assert_eq!(usage, 10);
+        assert_eq!(enabled, 0);
+    }
+
+    async fn wait_for_usage(pool: &SqlitePool, expected: i64) {
+        for _ in 0..100 {
+            let usage: i64 = sqlx::query_scalar("SELECT token_usage FROM api_keys LIMIT 1")
+                .fetch_one(pool)
+                .await
+                .expect("usage");
+            if usage == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("key usage did not reach {expected}");
     }
 }

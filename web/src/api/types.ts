@@ -47,6 +47,10 @@ export interface ApiKey {
   enabled: boolean;
   expires_at: number | null;
   last_used_at: number | null;
+  allowed_channel_ids: number[];
+  allowed_models: string[];
+  token_limit: number | null;
+  token_usage: number;
   created_at: number;
   key?: string;
 }

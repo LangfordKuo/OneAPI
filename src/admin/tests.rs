@@ -146,6 +146,24 @@ async fn send_gateway(
     )
 }
 
+async fn gateway_get(router: axum::Router, path: &str, key: &str) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::empty())
+        .expect("request");
+    let response = router.oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 async fn admin_get(router: axum::Router, path: &str, token: &str) -> (StatusCode, Value) {
     let request = Request::builder()
         .method("GET")
@@ -1041,6 +1059,274 @@ async fn conversion_target_must_be_a_native_protocol() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn api_key_restrictions_are_validated_and_updated() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let router = app::router(state.clone());
+
+    let (status, channel) = admin_post(
+        router.clone(),
+        "/api/channels",
+        &token,
+        json!({
+            "name": "restriction-target",
+            "kind": "openai_chat",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "upstream-key",
+            "models": ["gpt-test"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let channel_id = channel["id"].as_i64().expect("channel id");
+
+    let (status, body) = admin_post(
+        router.clone(),
+        "/api/keys",
+        &token,
+        json!({
+            "name": "restricted",
+            "allowed_channel_ids": [channel_id],
+            "allowed_models": ["gpt-test", "*", "gpt-test"],
+            "token_limit": 1000,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["allowed_channel_ids"], json!([channel_id]));
+    assert_eq!(body["allowed_models"], json!(["gpt-test", "*"]));
+    assert_eq!(body["token_limit"], json!(1000));
+    assert_eq!(body["token_usage"], json!(0));
+    let key_id = body["id"].as_i64().expect("key id");
+
+    let (status, _) = admin_post(
+        router.clone(),
+        "/api/keys",
+        &token,
+        json!({"name": "bad-channel", "allowed_channel_ids": [9999]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = admin_post(
+        router.clone(),
+        "/api/keys",
+        &token,
+        json!({"name": "bad-limit", "token_limit": -1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = admin_put(
+        router,
+        &format!("/api/keys/{key_id}"),
+        &token,
+        json!({
+            "allowed_channel_ids": [],
+            "allowed_models": [],
+            "token_limit": null,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["allowed_channel_ids"], json!([]));
+    assert_eq!(body["allowed_models"], json!([]));
+    assert_eq!(body["token_limit"], json!(null));
+}
+
+#[tokio::test]
+async fn api_key_model_restriction_blocks_unlisted_models() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let router = app::router(state.clone());
+
+    admin_post(
+        router.clone(),
+        "/api/channels",
+        &token,
+        json!({
+            "name": "catalog",
+            "kind": "openai_chat",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "upstream-key",
+            "models": ["gpt-test"],
+        }),
+    )
+    .await;
+
+    let (_, limited_key) = admin_post(
+        router.clone(),
+        "/api/keys",
+        &token,
+        json!({"name": "model-limited", "allowed_models": ["other-model"]}),
+    )
+    .await;
+    let limited = limited_key["key"].as_str().expect("key").to_string();
+
+    let (status, body) = send_gateway(
+        router.clone(),
+        "/v1/chat/completions",
+        &limited,
+        json!({"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["type"], json!("permission_error"));
+
+    let (status, models) = gateway_get(router.clone(), "/v1/models", &limited).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models["data"], json!([]));
+
+    let (_, allowed_key) = admin_post(
+        router.clone(),
+        "/api/keys",
+        &token,
+        json!({"name": "model-allowed", "allowed_models": ["gpt-test"]}),
+    )
+    .await;
+    let allowed = allowed_key["key"].as_str().expect("key").to_string();
+    let (status, models) = gateway_get(router, "/v1/models", &allowed).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models["data"][0]["id"], json!("gpt-test"));
+}
+
+#[tokio::test]
+async fn api_key_channel_restriction_limits_selection() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let allowed_server = MockServer::start().await;
+    let blocked_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat_response("from-allowed")))
+        .mount(&allowed_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat_response("from-blocked")))
+        .mount(&blocked_server)
+        .await;
+
+    let router = app::router(state.clone());
+    let (_, allowed_channel) = admin_post(
+        router.clone(),
+        "/api/channels",
+        &token,
+        json!({
+            "name": "allowed",
+            "kind": "openai_chat",
+            "base_url": format!("{}/v1", allowed_server.uri()),
+            "api_key": "allowed-key",
+            "models": ["gpt-test"],
+            "priority": 0,
+        }),
+    )
+    .await;
+    let allowed_id = allowed_channel["id"].as_i64().expect("channel id");
+
+    admin_post(
+        router.clone(),
+        "/api/channels",
+        &token,
+        json!({
+            "name": "blocked",
+            "kind": "openai_chat",
+            "base_url": format!("{}/v1", blocked_server.uri()),
+            "api_key": "blocked-key",
+            "models": ["gpt-test"],
+            "priority": 100,
+        }),
+    )
+    .await;
+
+    let (_, key) = admin_post(
+        router.clone(),
+        "/api/keys",
+        &token,
+        json!({"name": "channel-limited", "allowed_channel_ids": [allowed_id]}),
+    )
+    .await;
+    let key = key["key"].as_str().expect("key").to_string();
+
+    let (status, body) = send_gateway(
+        router,
+        "/v1/chat/completions",
+        &key,
+        json!({"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        json!("from-allowed")
+    );
+}
+
+#[tokio::test]
+async fn api_key_token_limit_disables_after_usage() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat_response("ok")))
+        .mount(&server)
+        .await;
+
+    let router = app::router(state.clone());
+    admin_post(
+        router.clone(),
+        "/api/channels",
+        &token,
+        json!({
+            "name": "quota",
+            "kind": "openai_chat",
+            "base_url": format!("{}/v1", server.uri()),
+            "api_key": "upstream-key",
+            "models": ["gpt-test"],
+        }),
+    )
+    .await;
+
+    let (_, key) = admin_post(
+        router.clone(),
+        "/api/keys",
+        &token,
+        json!({"name": "quota-key", "token_limit": 8}),
+    )
+    .await;
+    let key = key["key"].as_str().expect("key").to_string();
+
+    for _ in 0..2 {
+        let (status, _) = send_gateway(
+            router.clone(),
+            "/v1/chat/completions",
+            &key,
+            json!({"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let (status, body) = send_gateway(
+        router.clone(),
+        "/v1/chat/completions",
+        &key,
+        json!({"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["type"], json!("permission_error"));
+
+    let (status, keys) = admin_get(router, "/api/keys", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(keys[0]["token_usage"], json!(10));
+    assert_eq!(keys[0]["token_limit"], json!(8));
+    assert_eq!(keys[0]["enabled"], json!(false));
 }
 
 #[tokio::test]
