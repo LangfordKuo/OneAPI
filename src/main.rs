@@ -48,13 +48,27 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Command::Serve) {
-        Command::Serve => serve(cli.data_dir).await,
-        Command::ResetPassword { password } => reset_password(cli.data_dir, password).await,
-    }
+    let data_dir = cli.data_dir.clone();
+    let command = cli.command.unwrap_or(Command::Serve);
+
+    // `env::set_var` mutates process-global state and is not thread-safe, so
+    // the .env files must be loaded before the runtime spawns worker threads.
+    let data_dir = config::load_env_before_startup(data_dir)?;
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to build the async runtime")?
+        .block_on(async move {
+            match command {
+                Command::Serve => serve(Some(data_dir)).await,
+                Command::ResetPassword { password } => {
+                    reset_password(Some(data_dir), password).await
+                }
+            }
+        })
 }
 
 async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {

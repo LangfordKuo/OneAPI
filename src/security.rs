@@ -1,4 +1,10 @@
-use std::{fs, io::Write, path::Path, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    fs,
+    io::Write,
+    path::Path,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -21,6 +27,9 @@ const NONCE_LEN: usize = 12;
 #[derive(Clone)]
 pub struct Crypto {
     key: [u8; MASTER_KEY_LEN],
+    /// Decrypting a key just to render a mask shows up when listing channels;
+    /// the ciphertext is content-addressed, so entries never go stale.
+    mask_cache: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl std::fmt::Debug for Crypto {
@@ -30,12 +39,17 @@ impl std::fmt::Debug for Crypto {
 }
 
 impl Crypto {
+    fn new(key: [u8; MASTER_KEY_LEN]) -> Self {
+        Self {
+            key,
+            mask_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
     pub fn load_or_create(data_dir: &Path) -> Result<Self> {
         if let Ok(secret) = std::env::var("ONEAPI_SECRET") {
             if !secret.trim().is_empty() {
-                return Ok(Self {
-                    key: sha256_bytes(secret.as_bytes()),
-                });
+                return Ok(Self::new(sha256_bytes(secret.as_bytes())));
             }
         }
 
@@ -65,7 +79,7 @@ impl Crypto {
             }
         };
 
-        Ok(Self { key })
+        Ok(Self::new(key))
     }
 
     pub fn encrypt(&self, plaintext: &str) -> Result<String> {
@@ -120,17 +134,37 @@ impl Crypto {
     }
 
     pub fn mask(&self, encoded: &str) -> String {
-        match self.decrypt(encoded) {
+        if let Some(cached) = self
+            .mask_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(encoded).cloned())
+        {
+            return cached;
+        }
+
+        let masked = match self.decrypt(encoded) {
             Ok(plaintext) => {
                 let chars: Vec<char> = plaintext.chars().collect();
                 if chars.len() <= 4 {
-                    return "••••".to_string();
+                    "••••".to_string()
+                } else {
+                    let suffix: String = chars[chars.len() - 4..].iter().collect();
+                    format!("••••{suffix}")
                 }
-                let suffix: String = chars[chars.len() - 4..].iter().collect();
-                format!("••••{suffix}")
             }
             Err(_) => "••••".to_string(),
+        };
+
+        if let Ok(mut cache) = self.mask_cache.lock() {
+            // Ciphertext is unique per key version, so a tiny cache is enough;
+            // clear it wholesale instead of tracking LRU order.
+            if cache.len() >= 256 {
+                cache.clear();
+            }
+            cache.insert(encoded.to_string(), masked.clone());
         }
+        masked
     }
 }
 
@@ -259,9 +293,7 @@ mod tests {
 
     #[test]
     fn secret_encryption_round_trip() {
-        let key = Crypto {
-            key: [7u8; MASTER_KEY_LEN],
-        };
+        let key = Crypto::new([7u8; MASTER_KEY_LEN]);
         let encrypted = key.encrypt("sk-upstream-secret").unwrap();
         assert!(encrypted.starts_with("v1:"));
         assert_eq!(key.decrypt(&encrypted).unwrap(), "sk-upstream-secret");
@@ -270,9 +302,7 @@ mod tests {
 
     #[test]
     fn short_secrets_are_fully_masked() {
-        let key = Crypto {
-            key: [7u8; MASTER_KEY_LEN],
-        };
+        let key = Crypto::new([7u8; MASTER_KEY_LEN]);
         for secret in ["a", "abc", "abcd"] {
             let encrypted = key.encrypt(secret).unwrap();
             assert_eq!(key.mask(&encrypted), "••••");

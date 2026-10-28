@@ -30,6 +30,14 @@ pub struct Channel {
     pub updated_at: i64,
 }
 
+impl Channel {
+    /// Whether this row may still carry failure state that a successful
+    /// attempt has to clear. Healthy rows can skip the write entirely.
+    pub fn has_failure_state(&self) -> bool {
+        self.consecutive_failures != 0 || self.last_error.is_some() || self.disabled_until.is_some()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChannelWrite {
     pub name: String,
@@ -114,8 +122,38 @@ impl PreparedChannel {
         }
     }
 
-    pub fn resolve_route(&self, inbound_kind: &str) -> Option<ResolvedRoute> {
-        resolve_route_from(&self.configs, inbound_kind)
+    /// Route to a config index without cloning the configuration. The routing
+    /// hot path only needs the upstream protocol name and the target config.
+    pub fn resolve_route_ref(&self, inbound_kind: &str) -> Option<(&str, usize)> {
+        let inbound_index = self
+            .configs
+            .iter()
+            .position(|config| config.protocol == inbound_kind)?;
+        let inbound = &self.configs[inbound_index];
+        match inbound.mode {
+            ProtocolMode::Native => {
+                if inbound.base_url.is_empty() {
+                    return None;
+                }
+                Some((inbound.protocol.as_str(), inbound_index))
+            }
+            ProtocolMode::Convert => {
+                let target = inbound.target.as_deref()?;
+                if target == inbound_kind {
+                    return None;
+                }
+                let index = self.configs.iter().position(|config| {
+                    config.protocol == target
+                        && config.mode == ProtocolMode::Native
+                        && !config.base_url.is_empty()
+                })?;
+                Some((self.configs[index].protocol.as_str(), index))
+            }
+        }
+    }
+
+    pub fn config_at(&self, index: usize) -> &ProtocolConfig {
+        &self.configs[index]
     }
 }
 
@@ -701,6 +739,23 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    #[test]
+    fn detects_failure_state_that_a_success_must_clear() {
+        let mut channel = config_channel(r#"["openai_chat"]"#, None, "openai_chat");
+        assert!(!channel.has_failure_state());
+
+        channel.consecutive_failures = 1;
+        assert!(channel.has_failure_state());
+
+        channel.consecutive_failures = 0;
+        channel.last_error = Some("boom".to_string());
+        assert!(channel.has_failure_state());
+
+        channel.last_error = None;
+        channel.disabled_until = Some(1);
+        assert!(channel.has_failure_state());
     }
 
     #[test]

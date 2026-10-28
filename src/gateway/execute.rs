@@ -171,6 +171,15 @@ pub async fn proxy_with_identity(
         let requested_store = body.get("store").and_then(Value::as_bool).unwrap_or(true);
         let should_store = requested_store && identity.api_key_id.is_some();
 
+        // Snapshot the client's own turn before expansion. Storing the expanded
+        // history would make every row repeat the whole conversation (O(n²)
+        // growth) and lose `previous_response_id`, which the chain walk needs.
+        let client_snapshot = if should_store {
+            Some(body.clone())
+        } else {
+            None
+        };
+
         if let Some(api_key_id) = identity.api_key_id {
             body = match responses_state::expand_previous(state, api_key_id, body).await {
                 Ok(value) => value,
@@ -243,7 +252,7 @@ pub async fn proxy_with_identity(
         if let Some(object) = body.as_object_mut() {
             object.insert("store".into(), json!(false));
         }
-        client_request = Some(body.clone());
+        client_request = client_snapshot;
         should_store
     } else {
         false
@@ -310,7 +319,7 @@ pub async fn proxy_with_identity(
         .await;
     }
 
-    let mut last_channel: Option<Channel> = None;
+    let mut last_channel: Option<i64> = None;
     let mut last_upstream_model: Option<String> = None;
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
@@ -325,7 +334,7 @@ pub async fn proxy_with_identity(
             last_message = "request deadline exceeded".to_string();
             break;
         }
-        let _probe = match state.probes.acquire(&candidate.channel, now_ms()) {
+        let probe_lease = match state.probes.acquire(candidate.channel(), now_ms()) {
             ProbeAttempt::NotNeeded => None,
             ProbeAttempt::Acquired(lease) => Some(lease),
             ProbeAttempt::Busy => {
@@ -334,9 +343,9 @@ pub async fn proxy_with_identity(
             }
         };
         ctx.attempts += 1;
-        let channel = &candidate.channel;
+        let channel = candidate.channel();
         let upstream = protocol_for_kind(&candidate.upstream_kind);
-        last_channel = Some(channel.clone());
+        last_channel = Some(channel.id);
         last_upstream_model = Some(candidate.upstream_model.clone());
         last_upstream = upstream;
 
@@ -360,7 +369,7 @@ pub async fn proxy_with_identity(
                         let message = error.to_string();
                         ctx.record(
                             state,
-                            Some(channel),
+                            Some(channel.id),
                             Some(&candidate.upstream_model),
                             upstream,
                             StatusCode::BAD_REQUEST,
@@ -392,7 +401,7 @@ pub async fn proxy_with_identity(
                     let message = error.to_string();
                     ctx.record(
                         state,
-                        Some(channel),
+                        Some(channel.id),
                         Some(&candidate.upstream_model),
                         upstream,
                         StatusCode::BAD_REQUEST,
@@ -425,7 +434,7 @@ pub async fn proxy_with_identity(
 
         let request = match upstream::build_request(
             &client,
-            &candidate.upstream_config,
+            candidate.upstream_config(),
             &state.crypto,
             &candidate.upstream_kind,
             &request_body,
@@ -463,14 +472,20 @@ pub async fn proxy_with_identity(
         let upstream_value = serde_json::from_slice::<Value>(&body_bytes).ok();
 
         if status.is_success() {
-            state.mark_channel_success(channel.id).await;
+            let may_have_failure = probe_lease.is_some()
+                || channel.has_failure_state()
+                || state.cache.channel_has_failure_override(channel.id);
+            state
+                .mark_channel_success_if_needed(channel.id, may_have_failure)
+                .await;
 
             let mut client_json: Option<Value> = None;
             let usage = if upstream == inbound {
+                // Only the usage block is needed here; converting the whole
+                // response into the IR would copy every content part.
                 let usage = upstream_value
                     .as_ref()
-                    .and_then(|value| upstream.parse_response(value).ok())
-                    .map(|response| response.usage)
+                    .map(|value| response_usage(upstream, value))
                     .unwrap_or_default();
 
                 if inbound == Protocol::Responses {
@@ -480,7 +495,7 @@ pub async fn proxy_with_identity(
                         state.mark_channel_failure(channel.id, message).await;
                         ctx.record(
                             state,
-                            Some(channel),
+                            Some(channel.id),
                             Some(&candidate.upstream_model),
                             upstream,
                             StatusCode::BAD_GATEWAY,
@@ -504,7 +519,7 @@ pub async fn proxy_with_identity(
                     state.mark_channel_failure(channel.id, message).await;
                     ctx.record(
                         state,
-                        Some(channel),
+                        Some(channel.id),
                         Some(&candidate.upstream_model),
                         upstream,
                         StatusCode::BAD_GATEWAY,
@@ -526,7 +541,7 @@ pub async fn proxy_with_identity(
                         let message = error.to_string();
                         ctx.record(
                             state,
-                            Some(channel),
+                            Some(channel.id),
                             Some(&candidate.upstream_model),
                             upstream,
                             StatusCode::BAD_GATEWAY,
@@ -553,7 +568,7 @@ pub async fn proxy_with_identity(
                         let message = error.to_string();
                         ctx.record(
                             state,
-                            Some(channel),
+                            Some(channel.id),
                             Some(&candidate.upstream_model),
                             upstream,
                             StatusCode::BAD_GATEWAY,
@@ -579,7 +594,7 @@ pub async fn proxy_with_identity(
                     let message = "failed to build a Responses response";
                     ctx.record(
                         state,
-                        Some(channel),
+                        Some(channel.id),
                         Some(&candidate.upstream_model),
                         upstream,
                         StatusCode::BAD_GATEWAY,
@@ -678,7 +693,7 @@ pub async fn proxy_with_identity(
 
             ctx.record(
                 state,
-                Some(channel),
+                Some(channel.id),
                 Some(&candidate.upstream_model),
                 upstream,
                 status,
@@ -722,7 +737,7 @@ pub async fn proxy_with_identity(
 
         ctx.record(
             state,
-            Some(channel),
+            Some(channel.id),
             Some(&candidate.upstream_model),
             upstream,
             status,
@@ -776,7 +791,7 @@ pub async fn proxy_with_identity(
 
     ctx.record(
         state,
-        last_channel.as_ref(),
+        last_channel,
         last_upstream_model.as_deref(),
         last_upstream,
         StatusCode::BAD_GATEWAY,
@@ -825,7 +840,7 @@ async fn proxy_stream(
     defaults: models::setting::GatewayDefaults,
 ) -> Result<Response, AppError> {
     let mut attempts = 0u32;
-    let mut last_channel: Option<Channel> = None;
+    let mut last_channel: Option<i64> = None;
     let mut last_upstream_model: Option<String> = None;
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
@@ -841,7 +856,7 @@ async fn proxy_stream(
             last_message = "request deadline exceeded".to_string();
             break;
         }
-        let probe = match state.probes.acquire(&candidate.channel, now_ms()) {
+        let probe = match state.probes.acquire(candidate.channel(), now_ms()) {
             ProbeAttempt::NotNeeded => None,
             ProbeAttempt::Acquired(lease) => Some(lease),
             ProbeAttempt::Busy => {
@@ -850,9 +865,9 @@ async fn proxy_stream(
             }
         };
         attempts += 1;
-        let channel = &candidate.channel;
+        let channel = candidate.channel();
         let upstream = protocol_for_kind(&candidate.upstream_kind);
-        last_channel = Some(channel.clone());
+        last_channel = Some(channel.id);
         last_upstream_model = Some(candidate.upstream_model.clone());
         last_upstream = upstream;
 
@@ -877,7 +892,7 @@ async fn proxy_stream(
                             request_id,
                             &identity,
                             model,
-                            Some(channel),
+                            Some(channel.id),
                             Some(&candidate.upstream_model),
                             inbound,
                             upstream,
@@ -915,7 +930,7 @@ async fn proxy_stream(
                         request_id,
                         &identity,
                         model,
-                        Some(channel),
+                        Some(channel.id),
                         Some(&candidate.upstream_model),
                         inbound,
                         upstream,
@@ -972,7 +987,7 @@ async fn proxy_stream(
         let response = loop {
             let request = match upstream::build_request(
                 &client,
-                &candidate.upstream_config,
+                candidate.upstream_config(),
                 &state.crypto,
                 &candidate.upstream_kind,
                 &request_body,
@@ -1035,7 +1050,7 @@ async fn proxy_stream(
                 request_id,
                 &identity,
                 model,
-                Some(channel),
+                Some(channel.id),
                 Some(&candidate.upstream_model),
                 inbound,
                 upstream,
@@ -1058,6 +1073,10 @@ async fn proxy_stream(
                 .bytes_stream()
                 .map(|item| item.map_err(std::io::Error::other)),
         );
+
+        let clear_failure_state = probe.is_some()
+            || channel.has_failure_state()
+            || state.cache.channel_has_failure_override(channel.id);
 
         let job = StreamJob {
             state: state.clone(),
@@ -1083,6 +1102,7 @@ async fn proxy_stream(
             stored_request: client_request.clone(),
             stream: byte_stream,
             _probe: probe,
+            clear_failure_state,
         };
 
         match stream::start(job).await {
@@ -1107,7 +1127,7 @@ async fn proxy_stream(
                     request_id,
                     &identity,
                     model,
-                    Some(channel),
+                    Some(channel.id),
                     Some(&candidate.upstream_model),
                     inbound,
                     upstream,
@@ -1168,7 +1188,7 @@ async fn proxy_stream(
         request_id,
         &identity,
         model,
-        last_channel.as_ref(),
+        last_channel,
         last_upstream_model.as_deref(),
         inbound,
         last_upstream,
@@ -1204,7 +1224,7 @@ async fn record_stream_attempt(
     request_id: &str,
     identity: &ProxyIdentity,
     model: &str,
-    channel: Option<&Channel>,
+    channel_id: Option<i64>,
     upstream_model: Option<&str>,
     inbound: Protocol,
     upstream: Protocol,
@@ -1218,7 +1238,7 @@ async fn record_stream_attempt(
         request_id,
         source: identity.source,
         api_key_id: identity.api_key_id,
-        channel_id: channel.map(|channel| channel.id),
+        channel_id,
         model,
         upstream_model,
         inbound_protocol: inbound.as_str(),
@@ -1252,7 +1272,7 @@ impl RequestContext<'_> {
     async fn record(
         &self,
         state: &AppState,
-        channel: Option<&Channel>,
+        channel_id: Option<i64>,
         upstream_model: Option<&str>,
         upstream: Protocol,
         status: StatusCode,
@@ -1263,7 +1283,7 @@ impl RequestContext<'_> {
             request_id: self.request_id,
             source: self.source,
             api_key_id: self.api_key_id,
-            channel_id: channel.map(|channel| channel.id),
+            channel_id,
             model: self.client_model,
             upstream_model,
             inbound_protocol: self.inbound.as_str(),
@@ -1333,22 +1353,17 @@ async fn store_request_detail(
     let Some(request) = request else {
         return;
     };
-    if let Err(error) = models::request_detail::insert(
-        &state.db,
-        request_id,
-        api_key_id.unwrap_or(0),
-        request,
-        response,
-        now_ms(),
+    usage::record_detail(
+        state,
+        &usage::DetailRecord {
+            request_id,
+            api_key_id: api_key_id.unwrap_or(0),
+            request_body: request,
+            response_body: response,
+            created_at: now_ms(),
+        },
     )
-    .await
-    {
-        tracing::warn!(
-            error = %error,
-            request_id = %request_id,
-            "failed to store request detail"
-        );
-    }
+    .await;
 }
 
 fn protocol_for_kind(kind: &str) -> Protocol {
@@ -1356,6 +1371,20 @@ fn protocol_for_kind(kind: &str) -> Protocol {
         "openai_responses" => Protocol::Responses,
         "anthropic" => Protocol::Anthropic,
         _ => Protocol::Chat,
+    }
+}
+
+/// Read the usage block of a same-protocol response. This deliberately avoids
+/// `parse_response`, which would rebuild the whole payload in the IR just to
+/// obtain the token counters.
+fn response_usage(protocol: Protocol, value: &Value) -> Usage {
+    let Some(usage) = value.get("usage").and_then(Value::as_object) else {
+        return Usage::default();
+    };
+    match protocol {
+        Protocol::Chat => crate::protocol::chat::parse_usage(usage),
+        Protocol::Responses => crate::protocol::responses::parse_usage(usage),
+        Protocol::Anthropic => crate::protocol::anthropic::parse_usage(usage),
     }
 }
 
@@ -1412,7 +1441,31 @@ fn strip_include_usage(body: &mut Value) {
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
 
-    use super::{rejects_stream_options, resolve_request_id, strip_include_usage};
+    use super::{rejects_stream_options, resolve_request_id, response_usage, strip_include_usage};
+    use crate::protocol::Protocol;
+
+    #[test]
+    fn reads_usage_without_converting_the_whole_response() {
+        let chat = serde_json::json!({
+            "id": "chatcmpl-1",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        });
+        let usage = response_usage(Protocol::Chat, &chat);
+        assert_eq!(usage.input_tokens, Some(10));
+        assert_eq!(usage.output_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(15));
+
+        let anthropic = serde_json::json!({
+            "usage": {"input_tokens": 7, "output_tokens": 3},
+        });
+        let usage = response_usage(Protocol::Anthropic, &anthropic);
+        assert_eq!(usage.input_tokens, Some(7));
+        assert_eq!(usage.output_tokens, Some(3));
+        assert_eq!(usage.total_tokens, Some(10));
+
+        assert!(response_usage(Protocol::Chat, &serde_json::json!({"id": "x"})).is_empty());
+    }
 
     #[test]
     fn detects_include_usage_rejections() {

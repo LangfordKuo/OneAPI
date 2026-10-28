@@ -1,18 +1,21 @@
-use sqlx::SqlitePool;
+use sqlx::{Executor, Sqlite};
 
 pub const MAX_DETAIL_BYTES: usize = 64 * 1024;
 
 /// Store the request/response bodies for one request. `api_key_id` uses `0`
 /// for playground requests and legacy rows, so two API keys that happen to use
 /// the same client-supplied request id cannot overwrite each other.
-pub async fn insert(
-    pool: &SqlitePool,
+pub async fn insert<'e, E>(
+    executor: E,
     request_id: &str,
     api_key_id: i64,
     request_body: &str,
     response_body: &str,
     created_at: i64,
-) -> sqlx::Result<()> {
+) -> sqlx::Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     let request_body = truncate(request_body);
     let response_body = truncate(response_body);
 
@@ -30,7 +33,7 @@ pub async fn insert(
     .bind(request_body)
     .bind(response_body)
     .bind(created_at)
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(())

@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-28
-- 当前阶段：v0.1.10 已发布（审查优化收尾，`main`）
+- 当前阶段：v0.1.11 已发布（两轮复审收尾与文档归档，`main`）
 - 当前分支：`main`
-- 最近发布：`v0.1.10`
+- 最近发布：`v0.1.11`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -210,6 +210,13 @@
 - `count_tokens` 只在渠道原生支持 Anthropic 时转发，否则保持原有字符估算。
 - 验证：新增 4 个协议选择单元测试、2 个网关集成测试（原生匹配不转换、缺失协议走 fallback）与 1 个渠道 CRUD 测试；108 个测试通过。
 
+## v0.1.11 发布记录
+
+- 版本号从 `0.1.10` 升至 `0.1.11`。
+- 完成两轮全仓复审：SSE 单帧上限与裸 CR、Responses 透传零拷贝与轻量观测、健康渠道成功跳过写库、`count_tokens` 资源复用、同协议 usage 精简解析、Responses 增量历史存储与链式展开、请求详情并入写队列、渠道掩码缓存、选路 `Arc<PreparedChannel>`、缓存 single-flight、启动前加载 `.env`、`client_ip_header` 缓存等。
+- 归档并删除已完成的 `docs/REVIEW_PLAN.md` 与 `docs/OPTIMIZATION_PLAN.md`；后续能力与已知限制移入 `docs/IMPLEMENTATION_PLAN.md` §16。
+- 验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（177 个测试）与 `web/` `npm run build` 通过。
+
 ## v0.1.10 发布记录
 
 - 版本号从 `0.1.9` 升至 `0.1.10`，完成优化计划剩余项 P1-8、P2-6、P2-8、P3-8；P1-6（密钥派生 v2）按决定不处理。
@@ -221,7 +228,7 @@
 
 ## v0.1.9 发布记录
 
-- 版本号从 `0.1.8` 升至 `0.1.9`，完成 `docs/OPTIMIZATION_PLAN.md` 批次 1–5（含 P3-7）。
+- 版本号从 `0.1.8` 升至 `0.1.9`，完成优化清单批次 1–5（含 P3-7，原文件已归档至实施计划 §16）。
 - 安全：登录/改密限速、设置事务化、CSRF 转发头取值、短 Key 掩码；上游重定向限制与故障转移总预算；协议化 JSON 解析错误与 `include_usage` 兼容重试。
 - 性能：日志分页上限与可选总数、运行时缓存补齐、可配置连接池与 `/readyz` 队列指标、加权选路 O(n log n)、实时指标分片、SSE 字节级解析。
 - 前端与响应头：SSE 读取器与增量换行、Playground 流取消、Key 限额整数校验、全局 `nosniff`/`X-Frame-Options`/`Referrer-Policy`/CSP。
@@ -263,7 +270,7 @@
 
 ## 审查计划阶段 A（v0.1.2 修复与一致性）
 
-- 新增 `docs/REVIEW_PLAN.md`，按阶段记录审查结论与验收标准。
+- 新增审查计划，按阶段记录审查结论与验收标准（原文件已归档至实施计划 §16）。
 - 设置项接线：`default_max_tokens` 用于跨协议编码到 Anthropic 时的缺省值；`nonstream_timeout_seconds` / `stream_idle_timeout_seconds` 作为渠道未配置 `timeout_ms` 时的默认超时；`site_name` 通过公开 `GET /api/site` 用于登录页、安装页、侧边栏与浏览器标题。
 - 新增 `POST /v1/messages/count_tokens`：Anthropic 上游原样转发，其他上游按字符数估算并返回 Anthropic 形状。
 - 通配符渠道的模型列表回退到最近 30 天 `usage_logs` 中出现的模型；Playground 模型选择改为可自由输入的 AutoComplete。
@@ -358,11 +365,11 @@
 
 验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked` 通过。
 
-本轮未执行的安全/性能/兼容性事项已整理到 `docs/OPTIMIZATION_PLAN.md`，按 P1–P3 分级并给出建议批次。
+本轮未执行的安全/性能/兼容性事项整理到优化清单（原文件已归档至实施计划 §16）。
 
 ## 优化计划批次 1–5（2026-10-28）
 
-按 `docs/OPTIMIZATION_PLAN.md` 的顺序完成批次 1–5（含 P3-7），未修改已发布迁移。
+按优化清单（原文件已归档至实施计划 §16）的顺序完成批次 1–5（含 P3-7），未修改已发布迁移。
 
 - **批次 1（安全）**：登录对不存在的用户执行一次 dummy Argon2 校验以抹平时序差；改密复用登录限速（key 为 `password|{ip}|{admin_id}`）；设置更新改为先校验、再单事务写入；CSRF 的 `X-Forwarded-Host` 取最后一个非空值；长度 ≤4 的短 Key 掩码只返回 `••••`。
 - **批次 2（可用性与协议）**：上游 Client 的 3xx 只跟随同 host、最多 3 次；请求入口引入总预算（非流式 600s、流式提交前 60s），候选循环与首帧等待共用绝对 deadline；`/v1/*` 改用 `ApiJson`，解析失败返回各协议 JSON 错误；Chat 流式注入 `include_usage` 被上游 400 拒绝时去掉字段重试一次。
@@ -372,6 +379,37 @@
 - 验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（152 个测试）与 `web/` `npm run build` 均通过；`npm run lint` 为 0 error（仅 4 条既有 fast-refresh warning）。
 - 响应头与前端加载实测：以 `127.0.0.1:3110` 启动 debug 二进制，`/` 返回 4 个安全响应头；`index.html` 只引用 `/assets/*` 外部模块与样式（无内联脚本），5 个资源均返回 200；`/readyz` 返回 `database_pool_size=7` 与队列指标。当前环境没有 Playwright/浏览器驱动，控制台级 CSP 验证未执行。
 - 未纳入本轮：P1-6（密钥派生 v2）、P1-8（流式 Responses `store`）、P2-6（失败缓存抖动）、P2-8（大响应多次缓冲）、P3-8（更新信任边界），按计划需先出方案再排期。
+
+## 复审性能与稳定性修复（2026-10-28，未发布）
+
+基于 v0.1.10 的第二次全仓审查，按“先稳定性、再热路径分配、最后数据库压力”的顺序完成：
+
+- **SSE 单帧上限修正**：`SseParser::buffered_len` 现在计入未完成帧已收到的完整行（`raw`+`buffer`）。此前持续发送 `data:` 行但不发空行可绕过 8MB 单帧上限，导致内存无界增长。解析器同时支持裸 CR 行尾（跨 chunk 的 CR 保留到下一 chunk 再判定 CRLF）。
+- **流式透传减少解析与拷贝**：Responses 透传只对 `response.created/in_progress/completed/incomplete/failed` 等可能携带完整 response 对象的帧做 `id`/`store` 改写，`*.delta`/`*.added`/`*.done` 原字节转发；透传帧不再复制 `raw`（`Bytes::from(frame.raw)` 移动所有权）。
+- **成功路径不再无谓写库**：新增 `Channel::has_failure_state`、`RuntimeCache::channel_has_failure_override` 与 `AppState::mark_channel_success_if_needed`。只有半开探测、健康覆盖层有记录或缓存行仍带失败字段时才执行 `UPDATE channels`；健康渠道不再为 0 行更新获取 SQLite 单写者锁。
+- **`count_tokens` 资源复用**：改用 `state.clients` 的按渠道 Client（复用连接池/TLS）、`state.cache.defaults` 与 `read_body_limited_bytes`，不再每次请求新建 Client 或无界读取响应体。
+- **同协议响应只解析 usage**：新增 `response_usage`，同协议成功响应不再为取 token 计数而把整个响应转换成 IR。
+- **请求体按需克隆**：Responses 在 `store=false`（或 Playground）时不再克隆整个请求体；`client_request` 仅在确定要落库时生成。
+- **模型与选路**：`/v1/models` 的 Key 渠道白名单只解析一次；`select::candidates` 的白名单改用 `HashSet`。
+- **缓存与静态资源**：`RuntimeCache::channels` 增加 single-flight，TTL 到期时仅一个任务回源；内嵌前端资源改为借用 `Cow`，不再每次请求复制整个文件。
+- **仪表盘 1h 时序**：桶大小从 3600s 改为 60s，避免只画出 1–2 个点。
+
+验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（168 个测试）与 `web/` 下 `npm run build` 均通过。版本号未变更，改动基于 `v0.1.10`。
+
+## 复审追加项（2026-10-28，未发布）
+
+在上述复审基础上，继续完成当时列为“有意保留/低优先级”的项目：
+
+- **Responses 历史改为增量存储**：`responses.request_json` 现在保存客户端本轮请求（保留 `previous_response_id`），`expand_previous` 沿链回溯重建完整输入；旧版已展开的历史行没有 `previous_response_id`，会自然终止回溯并继续可用。新增 256 链、2000 项、16MB 三个上限，避免一次请求产生无界数据库工作。
+- **请求详情并入写队列**：`request_details` 与用量行共用 `UsageWriter` 的有界队列和批量事务，开启正文记录时不再为每个请求额外等待一次写事务；队列满或退出阶段回退同步写。
+- **Key 掩码缓存**：`Crypto::mask` 按密文缓存结果（密文内容寻址，上限 256 项），渠道列表不再逐协议解密。
+- **透传流式轻量观测**：`observe_passthrough` 每帧只解析一次并统计字符数，不再构建 IR 事件或复制 delta 字符串；Responses 终帧仍交给状态机以保留落库对象。
+- **SSE 帧改写保真**：改写 `id`/`store` 时保留 `id:`、`retry:` 与注释行。
+- **选路复用**：`RuntimeCache` 的元素改为 `Arc<PreparedChannel>`，`Candidate` 持有 Arc 与配置索引，不再逐候选克隆渠道行和协议配置；`last_channel` 只记录 id。
+- **启动顺序**：`.env` 在 tokio 运行时启动前加载，`Config::from_env` 不再调用 `env::set_var`。
+- **登录限速设置缓存**：`client_ip_header` 并入 `RuntimeCache`（30 秒，设置更新后失效），登录/改密不再每次查设置表。
+
+验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（177 个测试）与 `web/` 下 `npm run build` 均通过。审查阶段列出的问题至此全部处理完毕，剩余事项只有 P4 路线图。
 
 ## AOCI 状态
 
@@ -386,7 +424,7 @@
 1. 审查计划阶段 A–D 与 E3 已合并回 `main` 并发布 `v0.1.2`；`v0.1.3` 为日志筛选修复补丁。
 2. 阶段 E 剩余项（速率限制与额度、Prometheus `/metrics`、日志导出/重放、备份恢复、Playground 增强、多管理员/RBAC 与 PostgreSQL）仍是路线图。
 3. 后续版本按 `Cargo.toml` 版本打标签，保留数据目录升级。
-4. **优化清单 `docs/OPTIMIZATION_PLAN.md` 的批次 1–5 已完成**；剩余 P1-6、P1-8、P2-6、P2-8、P3-8 需先出方案，P4 为后续路线图。
+4. 审查计划与优化清单的可执行项已全部完成，两份计划文档已删除；后续能力与已知限制见 `docs/IMPLEMENTATION_PLAN.md` §16。
 
 ## 交接约定
 

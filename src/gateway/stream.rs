@@ -16,6 +16,7 @@ use tokio::time::timeout;
 use crate::{
     models,
     protocol::{
+        anthropic, chat,
         sse::{SseFrame, SseParser},
         Protocol, StreamDecoder, StreamEncodeOptions, StreamEncoder, StreamEvent, Usage,
     },
@@ -74,6 +75,10 @@ pub struct StreamJob {
     pub stream: ByteStream,
     /// Half-open trial lease for a recovering channel; held until the stream ends.
     pub _probe: Option<ProbeLease>,
+    /// Only touch `channels` after a success when this channel may actually
+    /// have failure state recorded; a healthy channel would otherwise pay for a
+    /// no-op UPDATE (and its SQLite write lock) on every request.
+    pub clear_failure_state: bool,
 }
 
 /// Clamp upstream error text before it reaches the client, the usage log, or
@@ -254,7 +259,9 @@ async fn run(
         return;
     }
 
-    job.state.mark_channel_success(job.channel_id).await;
+    job.state
+        .mark_channel_success_if_needed(job.channel_id, job.clear_failure_state)
+        .await;
 
     pending.push_front(first);
 
@@ -338,7 +345,7 @@ async fn run(
             job.channel_id,
             &mut pending_chars,
             &mut estimated_tokens,
-            &frame,
+            frame,
             &mut decoder,
             &mut encoder,
             &tx,
@@ -434,22 +441,17 @@ async fn run(
     if job.store_request_detail {
         if let Some(request) = &job.detail_request {
             let response = String::from_utf8_lossy(&response_capture);
-            if let Err(error) = models::request_detail::insert(
-                &job.state.db,
-                &job.request_id,
-                job.api_key_id.unwrap_or(0),
-                request,
-                &response,
-                models::now_ms(),
+            usage::record_detail(
+                &job.state,
+                &usage::DetailRecord {
+                    request_id: &job.request_id,
+                    api_key_id: job.api_key_id.unwrap_or(0),
+                    request_body: request,
+                    response_body: &response,
+                    created_at: models::now_ms(),
+                },
             )
-            .await
-            {
-                tracing::warn!(
-                    error = %error,
-                    request_id = %job.request_id,
-                    "failed to store streaming request detail"
-                );
-            }
+            .await;
         }
     }
 
@@ -606,8 +608,11 @@ fn rewrite_terminal_store(bytes: &Bytes) -> Bytes {
     }
 
     let mut output = Vec::with_capacity(bytes.len());
-    for frame in &frames {
-        output.extend_from_slice(&rewrite_responses_frame(frame, None, Some(false)));
+    for frame in frames {
+        match rewrite_responses_frame(&frame, None, Some(false)) {
+            Some(rewritten) => output.extend_from_slice(&rewritten),
+            None => output.extend_from_slice(&frame.raw),
+        }
     }
     Bytes::from(output)
 }
@@ -624,7 +629,7 @@ async fn process_frame(
     channel_id: i64,
     pending_chars: &mut u64,
     estimated_tokens: &mut u64,
-    frame: &SseFrame,
+    frame: SseFrame,
     decoder: &mut StreamDecoder,
     encoder: &mut Option<StreamEncoder>,
     tx: &mpsc::Sender<Bytes>,
@@ -633,36 +638,47 @@ async fn process_frame(
     first_token_at: &mut Option<Instant>,
 ) -> FrameOutcome {
     if passthrough {
-        let mut observed_error = None;
-        let mut terminal = false;
-        if let Ok(events) = decoder.decode(frame) {
-            for event in events {
-                account_stream_tokens(live, channel_id, &event, pending_chars, estimated_tokens);
-                match event {
-                    StreamEvent::Usage(usage) => tokens.merge(&usage),
-                    StreamEvent::Error {
-                        error_type,
-                        message,
-                    } => observed_error = Some((error_type, message)),
-                    StreamEvent::Done => terminal = true,
-                    _ => {}
+        let observation = observe_passthrough(upstream, &frame);
+        account_stream_chars(
+            live,
+            channel_id,
+            observation.chars,
+            pending_chars,
+            estimated_tokens,
+        );
+        if let Some(usage) = observation.usage {
+            tokens.merge(&usage);
+        }
+
+        // A stored Responses object is rebuilt from the terminal payload, so
+        // only that frame needs the stateful decoder. Everything else stays on
+        // the allocation-free observation path.
+        if upstream == Protocol::Responses && observation.terminal {
+            if let Ok(events) = decoder.decode(&frame) {
+                for event in events {
+                    if let StreamEvent::Usage(usage) = event {
+                        tokens.merge(&usage);
+                    }
                 }
             }
         }
 
-        if inbound == Protocol::Chat && !client_wants_usage && is_chat_usage_only(frame) {
+        if inbound == Protocol::Chat && !client_wants_usage && is_chat_usage_only(&frame) {
             return FrameOutcome::Ok;
         }
 
+        let has_content = first_token_at.is_none() && frame_has_content(upstream, &frame);
         let bytes = if inbound == Protocol::Responses {
-            rewrite_responses_frame(frame, response_id, Some(store_response))
+            let rewritten = rewrite_responses_frame(&frame, response_id, Some(store_response));
+            rewritten.unwrap_or_else(|| Bytes::from(frame.raw))
         } else {
-            Bytes::from(frame.raw.clone())
+            // Same protocol: forward the original bytes without copying them.
+            Bytes::from(frame.raw)
         };
 
         // Defer the terminal Responses frame so `store` reflects whether the
         // response was actually persisted.
-        if inbound == Protocol::Responses && terminal {
+        if inbound == Protocol::Responses && observation.terminal {
             return FrameOutcome::Completed(vec![bytes]);
         }
 
@@ -670,12 +686,12 @@ async fn process_frame(
             if send_bytes(tx, bytes, capture).await.is_err() {
                 return FrameOutcome::Disconnected;
             }
-            if first_token_at.is_none() && frame_has_content(upstream, frame) {
+            if has_content {
                 *first_token_at = Some(Instant::now());
             }
         }
 
-        if let Some((error_type, message)) = observed_error {
+        if let Some((error_type, message)) = observation.error {
             return FrameOutcome::Failed(error_type, message);
         }
 
@@ -686,7 +702,7 @@ async fn process_frame(
         return FrameOutcome::Ok;
     };
 
-    let events = match decoder.decode(frame) {
+    let events = match decoder.decode(&frame) {
         Ok(events) => events,
         Err(error) => {
             return FrameOutcome::Failed("conversion_error".to_string(), error.to_string())
@@ -756,6 +772,16 @@ fn account_stream_tokens(
         StreamEvent::ToolInputDelta { partial_json, .. } => partial_json.chars().count() as u64,
         _ => 0,
     };
+    account_stream_chars(live, channel_id, chars, pending_chars, estimated_tokens);
+}
+
+fn account_stream_chars(
+    live: &crate::metrics::LiveMetrics,
+    channel_id: i64,
+    chars: u64,
+    pending_chars: &mut u64,
+    estimated_tokens: &mut u64,
+) {
     if chars == 0 {
         return;
     }
@@ -767,6 +793,156 @@ fn account_stream_tokens(
         *estimated_tokens += tokens;
         live.add_tokens(Some(channel_id), tokens);
     }
+}
+
+#[derive(Default)]
+struct PassthroughObservation {
+    chars: u64,
+    usage: Option<Usage>,
+    error: Option<(String, String)>,
+    /// Responses `response.completed` / `response.incomplete`, i.e. the frame
+    /// that must be held back until persistence decides `store`.
+    terminal: bool,
+}
+
+/// Observe a frame on the same-protocol passthrough path.
+///
+/// Token accounting only needs character counts, so this parses the payload
+/// once and never builds IR events or copies delta strings. The stateful
+/// decoder is reserved for terminal Responses frames (storage needs the final
+/// object) and for cross-protocol conversion.
+fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObservation {
+    let mut observation = PassthroughObservation::default();
+
+    if protocol == Protocol::Chat && frame.data.trim() == "[DONE]" {
+        return observation;
+    }
+
+    let Ok(value) = serde_json::from_str::<Value>(&frame.data) else {
+        return observation;
+    };
+    let name = frame
+        .event
+        .as_deref()
+        .or_else(|| value.get("type").and_then(Value::as_str))
+        .unwrap_or("");
+
+    match protocol {
+        Protocol::Chat => {
+            if value.get("error").is_some() {
+                observation.error = Some(observed_error(&value));
+            }
+            if let Some(usage) = value.get("usage").and_then(Value::as_object) {
+                observation.usage = Some(chat::parse_usage(usage));
+            }
+
+            if let Some(delta) = value
+                .get("choices")
+                .and_then(Value::as_array)
+                .and_then(|choices| choices.first())
+                .and_then(|choice| choice.get("delta"))
+            {
+                observation.chars += char_count(delta.get("content"));
+                observation.chars += char_count(
+                    delta
+                        .get("reasoning_content")
+                        .or_else(|| delta.get("reasoning")),
+                );
+                if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                    for call in calls {
+                        observation.chars += char_count(
+                            call.get("function")
+                                .and_then(|function| function.get("arguments")),
+                        );
+                    }
+                }
+            }
+        }
+        Protocol::Anthropic => match name {
+            "message_start" => {
+                if let Some(usage) = value
+                    .get("message")
+                    .and_then(|message| message.get("usage"))
+                    .and_then(Value::as_object)
+                {
+                    observation.usage = Some(anthropic::parse_usage(usage));
+                }
+            }
+            "message_delta" => {
+                if let Some(usage) = value.get("usage").and_then(Value::as_object) {
+                    observation.usage = Some(anthropic::parse_usage(usage));
+                }
+            }
+            "content_block_delta" => {
+                if let Some(delta) = value.get("delta") {
+                    let text = match delta.get("type").and_then(Value::as_str).unwrap_or("") {
+                        "text_delta" => delta.get("text"),
+                        "thinking_delta" => delta.get("thinking"),
+                        "input_json_delta" => delta.get("partial_json"),
+                        _ => None,
+                    };
+                    observation.chars = char_count(text);
+                }
+            }
+            "error" => observation.error = Some(observed_error(&value)),
+            _ => {}
+        },
+        Protocol::Responses => {
+            match name {
+                "response.completed" | "response.incomplete" => observation.terminal = true,
+                "error" => observation.error = Some(observed_error(&value)),
+                "response.failed" => {
+                    if let Some(error) = value
+                        .get("response")
+                        .and_then(|response| response.get("error"))
+                    {
+                        observation.error = Some(observed_error(error));
+                    }
+                }
+                _ => {}
+            }
+
+            // Only the delta events the stateful decoder used to account for.
+            if matches!(
+                name,
+                "response.output_text.delta"
+                    | "response.function_call_arguments.delta"
+                    | "response.reasoning_summary_text.delta"
+                    | "response.reasoning_text.delta"
+            ) {
+                observation.chars = char_count(value.get("delta"));
+            }
+        }
+    }
+
+    observation
+}
+
+fn char_count(value: Option<&Value>) -> u64 {
+    value
+        .and_then(Value::as_str)
+        .map(|text| text.chars().count() as u64)
+        .unwrap_or(0)
+}
+
+/// Mirror `error_event`'s field extraction so passthrough and converted
+/// streams report the same error type/message.
+fn observed_error(value: &Value) -> (String, String) {
+    let error = value.get("error").unwrap_or(value);
+    (
+        error
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("code").and_then(Value::as_str))
+            .unwrap_or("upstream_error")
+            .to_string(),
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("message").and_then(Value::as_str))
+            .unwrap_or("upstream stream error")
+            .to_string(),
+    )
 }
 
 async fn send_bytes(
@@ -922,13 +1098,28 @@ fn is_chat_usage_only(frame: &SseFrame) -> bool {
         && value.get("usage").is_some()
 }
 
-fn rewrite_responses_frame(frame: &SseFrame, id: Option<&str>, store: Option<bool>) -> Bytes {
+/// Rewrite the `id`/`store` fields of a Responses frame. Returns `None` when
+/// the original bytes can be forwarded unchanged, which is the common case for
+/// the high-frequency delta events.
+fn rewrite_responses_frame(
+    frame: &SseFrame,
+    id: Option<&str>,
+    store: Option<bool>,
+) -> Option<Bytes> {
     if id.is_none() && store.is_none() {
-        return Bytes::from(frame.raw.clone());
+        return None;
+    }
+
+    // Delta/content events never carry a top-level `response` object, so
+    // parsing them would only burn CPU on every streamed token.
+    if frame.event.as_deref().is_some_and(|event| {
+        event.ends_with(".delta") || event.ends_with(".added") || event.ends_with(".done")
+    }) {
+        return None;
     }
 
     let Ok(mut value) = serde_json::from_str::<Value>(&frame.data) else {
-        return Bytes::from(frame.raw.clone());
+        return None;
     };
 
     let mut changed = false;
@@ -958,14 +1149,34 @@ fn rewrite_responses_frame(frame: &SseFrame, id: Option<&str>, store: Option<boo
     }
 
     if !changed {
-        return Bytes::from(frame.raw.clone());
+        return None;
     }
 
-    let encoded = match &frame.event {
-        Some(event) => format!("event: {event}\ndata: {value}\n\n"),
-        None => format!("data: {value}\n\n"),
-    };
-    Bytes::from(encoded.into_bytes())
+    // Keep `id:`, `retry:` and comment lines that the upstream sent alongside
+    // the event we are rewriting; only the event/data payload changed.
+    let mut encoded = preserve_sse_extra_lines(frame);
+    if let Some(event) = &frame.event {
+        encoded.push_str(&format!("event: {event}\n"));
+    }
+    encoded.push_str(&format!("data: {value}\n\n"));
+    Some(Bytes::from(encoded.into_bytes()))
+}
+
+/// Collect the SSE fields that a rewrite must not drop: comments, `id:` and
+/// `retry:`. Everything else (`event:`, `data:`, blank separators) is emitted
+/// by the caller from the rewritten payload.
+fn preserve_sse_extra_lines(frame: &SseFrame) -> String {
+    let mut output = String::new();
+    for line in frame.raw.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let is_comment = line.first() == Some(&b':');
+        if !is_comment && !line.starts_with(b"id:") && !line.starts_with(b"retry:") {
+            continue;
+        }
+        output.push_str(&String::from_utf8_lossy(line));
+        output.push('\n');
+    }
+    output
 }
 
 fn error_frame(protocol: Protocol, error_type: &str, message: &str) -> String {
@@ -1108,6 +1319,7 @@ mod tests {
             stored_request: None,
             stream,
             _probe: None,
+            clear_failure_state: false,
         }
     }
 
@@ -1128,7 +1340,8 @@ mod tests {
             raw: data.to_string().into_bytes(),
         };
 
-        let bytes = rewrite_responses_frame(&frame, Some("resp_local"), Some(true));
+        let bytes = rewrite_responses_frame(&frame, Some("resp_local"), Some(true))
+            .expect("terminal frame is rewritten");
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("\"id\":\"resp_local\""));
         assert!(text.contains("\"store\":true"));
@@ -1143,10 +1356,169 @@ mod tests {
             data: "{\"delta\":\"hi\"}".to_string(),
             raw: raw.clone(),
         };
+        assert!(rewrite_responses_frame(&frame, Some("resp_local"), Some(true)).is_none());
+    }
+
+    #[test]
+    fn responses_lifecycle_frames_keep_the_local_id() {
+        let data = json!({
+            "type": "response.in_progress",
+            "response": {"id": "resp_upstream", "object": "response", "store": false},
+        });
+        let frame = SseFrame {
+            event: Some("response.in_progress".to_string()),
+            data: data.to_string(),
+            raw: data.to_string().into_bytes(),
+        };
+        let bytes = rewrite_responses_frame(&frame, Some("resp_local"), Some(true))
+            .expect("lifecycle frame is rewritten");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("\"id\":\"resp_local\""));
+    }
+
+    #[test]
+    fn responses_item_done_frames_are_not_parsed() {
+        let data = json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "message", "id": "msg_1"},
+        });
+        let frame = SseFrame {
+            event: Some("response.output_item.done".to_string()),
+            data: data.to_string(),
+            raw: data.to_string().into_bytes(),
+        };
+        assert!(rewrite_responses_frame(&frame, Some("resp_local"), Some(true)).is_none());
+    }
+
+    #[test]
+    fn responses_rewrite_keeps_extra_sse_lines() {
+        let data = json!({
+            "type": "response.completed",
+            "response": {"id": "resp_upstream", "object": "response", "store": false},
+        });
+        let raw = format!(
+            ": keep-alive\nid: 7\nretry: 1000\nevent: response.completed\ndata: {data}\n\n"
+        )
+        .into_bytes();
+        let frame = SseFrame {
+            event: Some("response.completed".to_string()),
+            data: data.to_string(),
+            raw,
+        };
+
+        let bytes = rewrite_responses_frame(&frame, Some("resp_local"), Some(true))
+            .expect("terminal frame is rewritten");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains(": keep-alive\n"));
+        assert!(text.contains("id: 7\n"));
+        assert!(text.contains("retry: 1000\n"));
+        assert!(text.contains("\"id\":\"resp_local\""));
+        assert!(!text.contains("resp_upstream"));
+    }
+
+    #[test]
+    fn passthrough_observation_counts_content_and_usage() {
+        let data = json!({
+            "choices": [{"delta": {
+                "content": "hello",
+                "reasoning_content": "ab",
+                "tool_calls": [{"function": {"arguments": "{}"}}],
+            }}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        });
+        let frame = SseFrame {
+            event: None,
+            data: data.to_string(),
+            raw: Vec::new(),
+        };
+
+        let observation = observe_passthrough(Protocol::Chat, &frame);
+        assert_eq!(observation.chars, 9);
         assert_eq!(
-            rewrite_responses_frame(&frame, Some("resp_local"), Some(true)).to_vec(),
-            raw
+            observation.usage.and_then(|usage| usage.total_tokens),
+            Some(5)
         );
+        assert!(observation.error.is_none());
+        assert!(!observation.terminal);
+    }
+
+    #[test]
+    fn passthrough_observation_reports_errors_for_all_protocols() {
+        let chat = SseFrame {
+            event: None,
+            data: json!({"error": {"type": "rate_limit", "message": "slow down"}}).to_string(),
+            raw: Vec::new(),
+        };
+        assert_eq!(
+            observe_passthrough(Protocol::Chat, &chat).error,
+            Some(("rate_limit".to_string(), "slow down".to_string()))
+        );
+
+        let anthropic = SseFrame {
+            event: Some("error".to_string()),
+            data:
+                json!({"type": "error", "error": {"type": "overloaded_error", "message": "busy"}})
+                    .to_string(),
+            raw: Vec::new(),
+        };
+        assert_eq!(
+            observe_passthrough(Protocol::Anthropic, &anthropic).error,
+            Some(("overloaded_error".to_string(), "busy".to_string()))
+        );
+
+        let failed = SseFrame {
+            event: Some("response.failed".to_string()),
+            data: json!({"response": {"error": {"code": "server_error", "message": "boom"}}})
+                .to_string(),
+            raw: Vec::new(),
+        };
+        assert_eq!(
+            observe_passthrough(Protocol::Responses, &failed).error,
+            Some(("server_error".to_string(), "boom".to_string()))
+        );
+    }
+
+    #[test]
+    fn passthrough_observation_tracks_responses_terminal_frames() {
+        let completed = SseFrame {
+            event: Some("response.completed".to_string()),
+            data: json!({"type": "response.completed", "response": {"id": "resp_1"}}).to_string(),
+            raw: Vec::new(),
+        };
+        assert!(observe_passthrough(Protocol::Responses, &completed).terminal);
+
+        let delta = SseFrame {
+            event: Some("response.output_text.delta".to_string()),
+            data: json!({"type": "response.output_text.delta", "delta": "hi"}).to_string(),
+            raw: Vec::new(),
+        };
+        let observation = observe_passthrough(Protocol::Responses, &delta);
+        assert_eq!(observation.chars, 2);
+        assert!(!observation.terminal);
+    }
+
+    #[test]
+    fn passthrough_observation_reads_anthropic_usage_and_deltas() {
+        let start = SseFrame {
+            event: Some("message_start".to_string()),
+            data: json!({"message": {"usage": {"input_tokens": 4, "output_tokens": 0}}})
+                .to_string(),
+            raw: Vec::new(),
+        };
+        assert_eq!(
+            observe_passthrough(Protocol::Anthropic, &start)
+                .usage
+                .and_then(|usage| usage.input_tokens),
+            Some(4)
+        );
+
+        let thinking = SseFrame {
+            event: Some("content_block_delta".to_string()),
+            data: json!({"delta": {"type": "thinking_delta", "thinking": "abc"}}).to_string(),
+            raw: Vec::new(),
+        };
+        assert_eq!(observe_passthrough(Protocol::Anthropic, &thinking).chars, 3);
     }
 
     #[tokio::test]

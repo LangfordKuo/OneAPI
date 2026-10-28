@@ -205,6 +205,7 @@ pub async fn update(
     state.cache.invalidate_defaults();
     state.cache.invalidate_site_domain();
     state.cache.invalidate_site_name();
+    state.cache.invalidate_client_ip_header();
     state.clients.clear();
 
     let rows = setting::all(&state.db).await?;

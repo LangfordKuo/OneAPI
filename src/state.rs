@@ -25,12 +25,19 @@ use crate::{
 
 const CACHE_TTL: Duration = Duration::from_secs(30);
 
+/// Shared snapshot of the prepared channel list; each element is shared so a
+/// routing candidate can hold one channel without cloning it.
+type ChannelSnapshot = Arc<Vec<Arc<PreparedChannel>>>;
+
 /// Process-local cache for channel configuration and gateway defaults. Entries
 /// are invalidated by the admin write paths; the TTL is a safety net for direct
 /// database edits and multi-process deployments.
 #[derive(Debug, Default)]
 pub struct RuntimeCache {
-    channels: RwLock<Option<(Instant, Arc<Vec<PreparedChannel>>)>>,
+    channels: RwLock<Option<(Instant, ChannelSnapshot)>>,
+    /// Serializes cache reloads so a TTL expiry under concurrent traffic does
+    /// not run the channel query and JSON pre-parse once per waiting request.
+    channels_reload: tokio::sync::Mutex<()>,
     /// Routing overrides written by failure accounting. They are layered over
     /// the cached channel rows so a single failure does not force a full
     /// reload and re-parse of every channel.
@@ -38,13 +45,26 @@ pub struct RuntimeCache {
     defaults: RwLock<Option<(Instant, GatewayDefaults)>>,
     site_domain: RwLock<Option<(Instant, String)>>,
     site_name: RwLock<Option<(Instant, String)>>,
+    client_ip_header: RwLock<Option<(Instant, String)>>,
     recent_models: RwLock<Option<(Instant, Vec<String>)>>,
 }
 
 impl RuntimeCache {
     /// Cached channels with their protocol configuration already parsed. The
-    /// returned `Arc` is shared, so a request never clones the whole list.
-    pub async fn channels(&self, db: &SqlitePool) -> sqlx::Result<Arc<Vec<PreparedChannel>>> {
+    /// outer `Arc` is shared per request; each element is also `Arc`-wrapped so
+    /// routing candidates can hold one channel without cloning it.
+    pub async fn channels(&self, db: &SqlitePool) -> sqlx::Result<ChannelSnapshot> {
+        if let Some((loaded_at, channels)) =
+            self.channels.read().ok().and_then(|guard| guard.clone())
+        {
+            if loaded_at.elapsed() < CACHE_TTL {
+                return Ok(channels);
+            }
+        }
+
+        // Single-flight the reload: the first task refreshes, the rest wait and
+        // then reuse the snapshot instead of issuing their own query.
+        let _reload = self.channels_reload.lock().await;
         if let Some((loaded_at, channels)) =
             self.channels.read().ok().and_then(|guard| guard.clone())
         {
@@ -55,8 +75,12 @@ impl RuntimeCache {
 
         let reload_started = Instant::now();
         let channels = crate::models::channel::list(db).await?;
-        let prepared: Arc<Vec<PreparedChannel>> =
-            Arc::new(channels.into_iter().map(PreparedChannel::new).collect());
+        let prepared: ChannelSnapshot = Arc::new(
+            channels
+                .into_iter()
+                .map(|channel| Arc::new(PreparedChannel::new(channel)))
+                .collect(),
+        );
         if let Ok(mut guard) = self.channels.write() {
             *guard = Some((Instant::now(), prepared.clone()));
         }
@@ -123,6 +147,15 @@ impl RuntimeCache {
             .unwrap_or_default()
     }
 
+    /// Whether a failure has been recorded since the channel rows were cached.
+    /// Cheaper than [`channel_health`] because it does not build a snapshot.
+    pub fn channel_has_failure_override(&self, channel_id: i64) -> bool {
+        self.health
+            .read()
+            .map(|guard| guard.contains_key(&channel_id))
+            .unwrap_or(false)
+    }
+
     pub fn invalidate_defaults(&self) {
         if let Ok(mut guard) = self.defaults.write() {
             *guard = None;
@@ -176,6 +209,36 @@ impl RuntimeCache {
 
     pub fn invalidate_site_name(&self) {
         if let Ok(mut guard) = self.site_name.write() {
+            *guard = None;
+        }
+    }
+
+    /// Header used to resolve the client IP; read by the login limiter on every
+    /// attempt, so it goes through the same 30 second cache as the other
+    /// settings instead of a database round trip per request.
+    pub async fn client_ip_header(&self, db: &SqlitePool) -> sqlx::Result<String> {
+        if let Some((loaded_at, header)) = self
+            .client_ip_header
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+        {
+            if loaded_at.elapsed() < CACHE_TTL {
+                return Ok(header);
+            }
+        }
+
+        let header = crate::models::setting::get(db, crate::client_ip::SETTING_KEY)
+            .await?
+            .unwrap_or_default();
+        if let Ok(mut guard) = self.client_ip_header.write() {
+            *guard = Some((Instant::now(), header.clone()));
+        }
+        Ok(header)
+    }
+
+    pub fn invalidate_client_ip_header(&self) {
+        if let Ok(mut guard) = self.client_ip_header.write() {
             *guard = None;
         }
     }
@@ -306,6 +369,15 @@ impl AppState {
                 error = %error,
                 "failed to record channel success"
             ),
+        }
+    }
+
+    /// Clear failure state only when the channel may have any. A zero-row
+    /// UPDATE still opens a SQLite write transaction and takes the single
+    /// writer lock, so healthy channels must skip it entirely.
+    pub async fn mark_channel_success_if_needed(&self, channel_id: i64, may_have_failure: bool) {
+        if may_have_failure {
+            self.mark_channel_success(channel_id).await;
         }
     }
 }
