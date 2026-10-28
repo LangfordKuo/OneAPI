@@ -33,5 +33,9 @@ pub async fn connect(config: &Config) -> anyhow::Result<SqlitePool> {
         .await
         .context("failed to run database migrations")?;
 
+    crate::models::channel::backfill_protocol_configs(&pool)
+        .await
+        .context("failed to backfill per-protocol channel configs")?;
+
     Ok(pool)
 }

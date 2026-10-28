@@ -1,5 +1,18 @@
 export type ChannelKind = 'openai_chat' | 'openai_responses' | 'anthropic';
 export type ProtocolName = 'chat' | 'responses' | 'anthropic';
+export type ChannelProtocolMode = 'native' | 'convert';
+
+export interface ChannelProtocol {
+  protocol: ChannelKind;
+  mode: ChannelProtocolMode;
+  target: ChannelKind | null;
+  base_url: string;
+  auth_header: 'bearer' | 'x-api-key';
+  api_key_masked: string;
+  models: string[];
+  model_mapping: Record<string, string>;
+  extra_headers: Record<string, string>;
+}
 
 export interface Channel {
   id: number;
@@ -13,6 +26,7 @@ export interface Channel {
   models: string[];
   model_mapping: Record<string, string>;
   extra_headers: Record<string, string>;
+  protocols: ChannelProtocol[];
   proxy_url: string | null;
   priority: number;
   weight: number;

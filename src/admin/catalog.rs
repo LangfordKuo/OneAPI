@@ -24,13 +24,12 @@ pub async fn list(
         if channel.enabled == 0 {
             continue;
         }
-        let channel_models: Vec<String> = serde_json::from_str(&channel.models).unwrap_or_default();
-        for model in channel_models {
-            if model == "*" {
-                has_wildcard = true;
-            } else if !model.is_empty() {
-                result.insert(model);
-            }
+        let catalog = models::channel::catalog_models(&channel);
+        if catalog.has_wildcard {
+            has_wildcard = true;
+        }
+        for model in catalog.models {
+            result.insert(model);
         }
     }
 

@@ -4,7 +4,10 @@ use anyhow::{Context, Result};
 use axum::http::HeaderMap;
 use reqwest::{Client, RequestBuilder};
 
-use crate::{models::channel::Channel, security::Crypto};
+use crate::{
+    models::channel::{Channel, ProtocolConfig},
+    security::Crypto,
+};
 
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 
@@ -131,30 +134,30 @@ pub fn endpoint_path(kind: &str) -> &'static str {
     }
 }
 
-pub fn endpoint_url(channel: &Channel, kind: &str) -> String {
+pub fn endpoint_url(config: &ProtocolConfig, kind: &str) -> String {
     format!(
         "{}/{}",
-        channel.base_url.trim_end_matches('/'),
+        config.base_url.trim_end_matches('/'),
         endpoint_path(kind)
     )
 }
 
-pub fn models_url(channel: &Channel) -> String {
-    format!("{}/models", channel.base_url.trim_end_matches('/'))
+pub fn models_url(config: &ProtocolConfig) -> String {
+    format!("{}/models", config.base_url.trim_end_matches('/'))
 }
 
 pub fn apply_auth(
     request: RequestBuilder,
-    channel: &Channel,
+    config: &ProtocolConfig,
     crypto: &Crypto,
     kind: &str,
     client_headers: &HeaderMap,
 ) -> Result<RequestBuilder> {
     let api_key = crypto
-        .decrypt(&channel.api_key_enc)
+        .decrypt(&config.api_key_enc)
         .context("failed to decrypt channel API key")?;
 
-    let mut request = match channel.auth_header.as_str() {
+    let mut request = match config.auth_header.as_str() {
         "x-api-key" => request.header("x-api-key", api_key),
         _ => request.bearer_auth(api_key),
     };
@@ -168,9 +171,7 @@ pub fn apply_auth(
     }
 
     // Explicit channel headers win over client-supplied ones.
-    let headers: HashMap<String, String> =
-        serde_json::from_str(&channel.extra_headers).unwrap_or_default();
-    for (name, value) in headers {
+    for (name, value) in &config.extra_headers {
         if name.eq_ignore_ascii_case("anthropic-version") {
             has_anthropic_version = true;
         }
@@ -196,14 +197,14 @@ fn forwarded_headers(headers: &HeaderMap) -> Vec<(&'static str, Vec<u8>)> {
 
 pub fn build_request(
     client: &Client,
-    channel: &Channel,
+    config: &ProtocolConfig,
     crypto: &Crypto,
     kind: &str,
     body: &serde_json::Value,
     client_headers: &HeaderMap,
 ) -> Result<RequestBuilder> {
-    let request = client.post(endpoint_url(channel, kind)).json(body);
-    apply_auth(request, channel, crypto, kind, client_headers)
+    let request = client.post(endpoint_url(config, kind)).json(body);
+    apply_auth(request, config, crypto, kind, client_headers)
 }
 
 #[cfg(test)]

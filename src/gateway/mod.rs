@@ -82,11 +82,7 @@ async fn count_tokens(
         let channels = state.cache.channels(&state.db).await?;
         if let Some(candidate) = select::candidates(channels, model, Protocol::Anthropic)
             .into_iter()
-            .find(|candidate| {
-                models::channel::supported_kinds(&candidate.channel)
-                    .iter()
-                    .any(|kind| kind == "anthropic")
-            })
+            .find(|candidate| candidate.upstream_kind == "anthropic")
         {
             let defaults = models::setting::GatewayDefaults::load(&state.db).await?;
             let mut request_body = body.clone();
@@ -109,11 +105,11 @@ async fn count_tokens(
                 };
             let url = format!(
                 "{}/messages/count_tokens",
-                candidate.channel.base_url.trim_end_matches('/')
+                candidate.upstream_config.base_url.trim_end_matches('/')
             );
             let request = match upstream::apply_auth(
                 client.post(url).json(&request_body),
-                &candidate.channel,
+                &candidate.upstream_config,
                 &state.crypto,
                 "anthropic",
                 &headers,
@@ -271,13 +267,12 @@ async fn available_models(state: &AppState) -> sqlx::Result<Vec<String>> {
         if channel.enabled == 0 {
             continue;
         }
-        let channel_models: Vec<String> = serde_json::from_str(&channel.models).unwrap_or_default();
-        for model in channel_models {
-            if model == "*" {
-                has_wildcard = true;
-            } else if !model.is_empty() {
-                result.insert(model);
-            }
+        let catalog = models::channel::catalog_models(&channel);
+        if catalog.has_wildcard {
+            has_wildcard = true;
+        }
+        for model in catalog.models {
+            result.insert(model);
         }
     }
 
@@ -370,6 +365,7 @@ mod tests {
             kind: kind.to_string(),
             kinds: json!([kind]).to_string(),
             fallback_kind: kind.to_string(),
+            protocol_configs: "[]".to_string(),
             base_url: base_url.to_string(),
             api_key_enc: state
                 .crypto
@@ -410,6 +406,7 @@ mod tests {
             kind: kinds[0].to_string(),
             kinds: serde_json::to_string(kinds).expect("kinds json"),
             fallback_kind: fallback_kind.to_string(),
+            protocol_configs: "[]".to_string(),
             base_url: base_url.to_string(),
             api_key_enc: state
                 .crypto

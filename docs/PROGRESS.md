@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-28
-- 当前阶段：v0.1.6 已发布（shadcn/ui 前端重写、网站域名与 1 秒实时速度，`main`）
+- 当前阶段：v0.1.7 已发布（渠道协议内分页与 Token 图表修复，`main`）
 - 当前分支：`main`
-- 最近发布：`v0.1.6`
+- 最近发布：`v0.1.7`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -210,6 +210,15 @@
 - `count_tokens` 只在渠道原生支持 Anthropic 时转发，否则保持原有字符估算。
 - 验证：新增 4 个协议选择单元测试、2 个网关集成测试（原生匹配不转换、缺失协议走 fallback）与 1 个渠道 CRUD 测试；108 个测试通过。
 
+## v0.1.7 发布记录
+
+- 版本号从 `0.1.6` 升至 `0.1.7`，包含渠道按协议内分页与 Token 图表轴修复。
+- 渠道编辑改为 OpenAI Chat / OpenAI Responses / Anthropic 三个协议页，每页独立 Base URL、Key、鉴权头、模型、映射与自定义请求头；每页可「不转换」或转换到另一个原生协议，转换时复用目标协议配置。转换目标只能指向原生协议，至少保留一个原生协议。
+- 新增迁移 `0005_channel_protocol_configs.sql` 与启动 backfill；旧渠道升级后自动生成三条路由，行为不变，旧扁平 API 字段继续兼容。
+- 网关按入站协议解析最终使用的原生配置；模型目录汇总原生协议；探活与拉取模型可按当前协议页执行。
+- Token 用量图表 Y 轴改用「万 / 亿」紧凑格式并加宽，避免大数值超出卡片；Tooltip 保留千分位完整值。
+- 验证：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test`（117 个测试）、`npm run typecheck`、`npm run lint`、`npm run build` 全部通过；旧 v0.1.6 数据目录升级、三协议独立地址/Key、转换路由与 Playwright 交互均实测通过。
+
 ## v0.1.6 发布记录
 
 - 版本号从 `0.1.5` 升至 `0.1.6`，包含前端整体重写、网站域名设置与实时速度改造。
@@ -298,6 +307,15 @@
 - 实时 tok/s 移除 10 秒滑动窗口：内存改为“当前秒 + 上一完整秒”两个计数桶，SSE 每次推送上一完整秒的 token 增量；流式结束或空闲一秒后归零。前端提示改为「最近 1 秒实测」。
 - 慢速流式实测（5 tok/s）：SSE 连续推送 `global_tok_s=5.0`、`channel 1 tok_s=5.0`，结束后 1 秒内回到 0；非流式请求的 token 会在完成后显示 1 秒。
 - 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test`（113 个测试）通过；设置页保存域名、代理 Origin 放行、恶意 Origin 拒绝均通过 curl/Playwright 实测；前端 `npm run typecheck`、`npm run lint`、`npm run build` 通过。
+
+## 渠道按协议内分页（2026-10-28）
+
+- 渠道表单把 OpenAI Chat / OpenAI Responses / Anthropic 做成内分页，每页独立保存 `base_url`、加密 Key、`auth_header`、`models`、`model_mapping`、`extra_headers`；渠道级继续共用名称、启用、优先级/权重、超时与代理。
+- 每页「转换目标」支持「不转换」和另一个原生协议：选「不转换」展示本页详细配置；选某协议后隐藏本页配置，入站请求转换成该协议并完全复用目标页的地址、Key、模型与映射。转换目标只能指向 `mode=native` 的协议，禁止链式转换和循环。
+- 新增迁移 `0005_channel_protocol_configs.sql` 与 `protocol_configs` JSON 列；启动时 `backfill_protocol_configs` 为旧渠道生成三条路由（原 `kinds` 为 native，其余转换到原 `fallback_kind`），升级后行为不变。旧列保留为第一个原生协议的兼容视图。
+- 网关路由改为按入站协议解析 `native` 或 `convert -> target`，渠道选择与模型映射使用最终生效的原生配置；`/api/models` 与 `/v1/models` 汇总所有原生协议的模型；`count_tokens` 只在解析到 Anthropic 原生上游时转发。
+- 后端 API 兼容旧的扁平字段（`kinds`/`fallback_kind`/`base_url` 等），新客户端改传 `protocols` 数组；探测接口新增 `probe_protocol`，用当前 Tab 的路由测试/拉取模型。
+- 验证：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test`（117 个测试）通过；用旧 v0.1.6 数据目录启动验证 backfill；三个原生协议分别命中不同 Base URL 与不同 Key，Chat/Response 转换到 Chat 的路由与日志均正确；Playwright 验证内分页、转换隐藏配置、最后一个原生协议无法再转换、探活使用当前页配置。
 
 ## AOCI 状态
 

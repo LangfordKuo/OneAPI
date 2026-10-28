@@ -14,6 +14,27 @@ export function formatNumber(
   return value == null ? fallback : value.toLocaleString('zh-CN');
 }
 
+/** Compact axis/tooltip label: 12345 -> 1.2万, 120000000 -> 1.2亿. */
+export function formatCompactNumber(
+  value: number | null | undefined,
+): string {
+  if (value == null) {
+    return '-';
+  }
+  const abs = Math.abs(value);
+  if (abs >= 100_000_000) {
+    return `${trimTrailingZero(value / 100_000_000)}亿`;
+  }
+  if (abs >= 10_000) {
+    return `${trimTrailingZero(value / 10_000)}万`;
+  }
+  return value.toLocaleString('zh-CN');
+}
+
+function trimTrailingZero(value: number): string {
+  return value.toFixed(1).replace(/\.0$/, '');
+}
+
 export function formatLatency(value: number | null | undefined): string {
   return value == null ? '-' : `${value} ms`;
 }

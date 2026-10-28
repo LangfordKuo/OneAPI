@@ -1,6 +1,6 @@
 # OneAPI 实施计划
 
-- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度
+- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度，v0.1.7 渠道按协议内分页并修复 Token 图表轴
 - 最后更新：2026-10-27
 - 关联文档：`docs/PROGRESS.md`
 - 适用仓库：`/root/OneAPI`
@@ -70,7 +70,7 @@ SQLite，时间统一存 unix 毫秒 `INTEGER`。
 
 - `admin(id=1, username, password_hash, created_at)`
 - `sessions(token_hash PK, admin_id, created_at, expires_at)`
-- `channels(id, name, kind TEXT CHECK in ('openai_chat','openai_responses','anthropic'), kinds TEXT JSON, fallback_kind TEXT, base_url, api_key_enc, auth_header TEXT 'bearer'|'x-api-key', models TEXT JSON, model_mapping TEXT JSON, extra_headers TEXT JSON, proxy_url, priority INT, weight INT, timeout_ms, enabled, last_error, last_error_at, disabled_until, consecutive_failures, created_at, updated_at)`
+- `channels(id, name, kind, kinds TEXT JSON, fallback_kind, protocol_configs TEXT JSON, base_url, api_key_enc, auth_header TEXT 'bearer'|'x-api-key', models TEXT JSON, model_mapping TEXT JSON, extra_headers TEXT JSON, proxy_url, priority INT, weight INT, timeout_ms, enabled, last_error, last_error_at, disabled_until, consecutive_failures, created_at, updated_at)`：`protocol_configs` 为每个协议保存一套 `{protocol, mode: native|convert, target, base_url, api_key_enc, auth_header, models, model_mapping, extra_headers}`；`mode=convert` 时使用 `target` 指向的原生协议配置。旧列保留为第一个原生协议的兼容视图，旧数据由启动时的 backfill 自动生成三条路由。
 - `api_keys(id, name, key_hash UNIQUE, key_prefix, enabled, expires_at, last_used_at, created_at)`
 - `usage_logs(id, request_id, source 'gateway'|'playground', api_key_id, channel_id, model, upstream_model, inbound_protocol, upstream_protocol, stream, status_code, attempts, error_type, error_message, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, latency_ms, first_token_ms, created_at)`
 - `responses(id 'resp_...' PK, api_key_id, model, request_json, response_json, status, created_at)`
@@ -178,7 +178,7 @@ GET /healthz  /readyz
 
 会话状态驱动首屏：`App` 依次查询安装状态与 `/api/auth/me`，未安装渲染安装向导，未登录渲染登录页，登录后进入带侧边栏的后台路由（`/`、`/channels`、`/keys`、`/logs`、`/playground`、`/settings`）。UI 采用 shadcn/ui（base-nova，Base UI 原语）+ Tailwind CSS 4 的 CSS 变量主题；侧边栏在移动端折叠为 Sheet，暗色模式由 next-themes 切换。
 
-- 渠道页：表格（名称/协议/地址/模型数/优先级/状态/实时 tok/s）；抽屉表单含协议多选、base_url、Key、auth_header、模型标签、model_mapping 键值编辑器、priority/weight、超时、代理、自定义头、启用开关；表单内“测试连通性”“拉取模型”，拉取结果用对话框多选后回填。
+- 渠道页：表格（名称/原生协议/地址/模型数/优先级/状态/实时 tok/s）；抽屉表单把三个协议做成内分页，每页独立配置 Base URL、Key、auth_header、模型、model_mapping、自定义头；每页的「转换目标」可选「不转换」或另一个原生协议，选转换后隐藏本页详细配置并复用目标页配置；priority/weight、超时、代理、启用为渠道级共用。表单内“测试连通性”“拉取模型”作用于当前协议页，拉取结果回填当前页。
 - Key 页：创建弹窗一次性展示完整 Key（CodeBlock + 复制）；启用/禁用/删除；显示前缀、最后使用时间。
 - 日志页：时间范围/模型/请求 ID/渠道/Key/状态/协议/来源/流式筛选 + 分页 + 详情抽屉（token、耗时、首 token、错误、可选请求响应体）；窄屏隐藏次要列，行点击仍可查看全部字段。
 - 仪表盘：统计卡 + Recharts 请求/错误时序与 Token 柱状图 + 模型/渠道占比环形图 + 最近错误 + 系统信息。
@@ -241,10 +241,12 @@ GET /healthz  /readyz
 - 2026-10-28：版本升至 `0.1.4` 并发布上述客户端 IP 请求头功能。
 - 2026-10-28：日志列表与详情新增 `tokens_per_second`：输出 tokens 除以生成耗时，流式扣除首 token 等待；前端显示为 `tok/s`。
 - 2026-10-28：渠道支持多上游协议：新增 `kinds` 与 `fallback_kind`，入站协议匹配时原样转发，否则转换到配置的 fallback；迁移 `0004_channel_kinds.sql` 回填旧渠道。
+- 2026-10-28：渠道改为按协议内分页：新增 `protocol_configs`（迁移 `0005_channel_protocol_configs.sql`），每协议可有独立 Base URL/Key/鉴权头/模型/映射/请求头；转换目标可选「不转换」且只能指向原生协议，转换时复用目标协议配置。启动时自动为旧渠道生成三条路由，保持原有行为。
 - 2026-10-28：版本升至 `0.1.5`，发布日志 tok/s 与渠道多协议功能。
 - 2026-10-28：新增设置项 `site_domain`：反向代理后填写对外域名，CSRF 校验在 Origin 与请求 Host 不一致时额外接受该域名；两侧都归一化为 `host[:port]`，忽略协议、路径与 80/443 默认端口。设置页新增对应输入框。
 - 2026-10-28：实时 tok/s 改为最近 1 秒实测值，移除 10 秒滑动窗口；`/api/metrics/stream` 每次推送上一完整秒的 token 增量，流结束或空闲一秒后归零。
 - 2026-10-28：版本升至 `0.1.6`，发布 shadcn/ui 前端重写、网站域名设置与 1 秒实时速度。
+- 2026-10-28：渠道按协议内分页，每协议独立 Base URL/Key/模型等并支持转换到原生协议；Token 图表 Y 轴改用万/亿紧凑格式。版本升至 `0.1.7`。
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。
