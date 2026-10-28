@@ -29,6 +29,14 @@ use super::{
 const REQUEST_TOTAL_BUDGET: Duration = Duration::from_secs(600);
 /// Time allowed to receive the first upstream SSE frame before committing.
 const STREAM_COMMIT_BUDGET: Duration = Duration::from_secs(60);
+/// Maximum channels tried for one request. A personal deployment usually has
+/// a handful of channels; beyond this point a retry is unlikely to help and
+/// only multiplies latency and upstream calls.
+pub(crate) const MAX_FAILOVER_ATTEMPTS: u32 = 3;
+/// Wall-clock budget spent across failed attempts. It is checked only before
+/// starting the next channel, so a single slow but successful response is not
+/// cut short.
+const FAILOVER_BUDGET: Duration = Duration::from_secs(60);
 
 /// The first request-shaped failure seen while failing over. It is remembered
 /// so that when every channel fails the client receives the upstream status
@@ -382,6 +390,16 @@ pub async fn proxy_with_identity(
             last_message = "request deadline exceeded".to_string();
             break;
         }
+        if ctx.attempts >= MAX_FAILOVER_ATTEMPTS {
+            last_error_type = "upstream_error".to_string();
+            last_message = "failover attempt limit reached".to_string();
+            break;
+        }
+        if ctx.attempts > 0 && started.elapsed() >= FAILOVER_BUDGET {
+            last_error_type = "upstream_timeout".to_string();
+            last_message = "failover time budget exceeded".to_string();
+            break;
+        }
         let probe_lease = match state.probes.acquire(candidate.channel(), now_ms()) {
             ProbeAttempt::NotNeeded => None,
             ProbeAttempt::Acquired(lease) => Some(lease),
@@ -731,6 +749,15 @@ pub async fn proxy_with_identity(
         let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
         if penalizes_channel(status) {
             state.mark_channel_failure(channel.id, &message).await;
+        } else if client_error
+            .as_ref()
+            .is_some_and(|existing| existing.status == status && existing.error_type == error_type)
+        {
+            // The same request-shaped rejection from another channel means the
+            // payload itself is the problem; retrying further only adds load.
+            last_error_type = error_type;
+            last_message = message;
+            break;
         } else if client_error.is_none() {
             client_error = Some(ClientFailure::new(
                 status,
@@ -868,6 +895,16 @@ async fn proxy_stream(
         if Instant::now() >= deadline {
             last_error_type = "upstream_timeout".to_string();
             last_message = "request deadline exceeded".to_string();
+            break;
+        }
+        if attempts >= MAX_FAILOVER_ATTEMPTS {
+            last_error_type = "upstream_error".to_string();
+            last_message = "failover attempt limit reached".to_string();
+            break;
+        }
+        if attempts > 0 && started.elapsed() >= FAILOVER_BUDGET {
+            last_error_type = "upstream_timeout".to_string();
+            last_message = "failover time budget exceeded".to_string();
             break;
         }
         let probe = match state.probes.acquire(candidate.channel(), now_ms()) {
@@ -1045,6 +1082,13 @@ async fn proxy_stream(
 
             if penalizes_channel(status) {
                 state.mark_channel_failure(channel.id, &message).await;
+            } else if client_error.as_ref().is_some_and(|existing| {
+                existing.status == status && existing.error_type == error_type
+            }) {
+                // Same rejection on another channel: stop retrying this payload.
+                last_error_type = error_type;
+                last_message = message;
+                break 'candidates;
             } else if client_error.is_none() {
                 client_error = Some(ClientFailure::new(
                     status,

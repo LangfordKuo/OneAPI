@@ -1289,6 +1289,7 @@ async fn api_key_restrictions_are_validated_and_updated() {
             "allowed_channel_ids": [channel_id],
             "allowed_models": ["gpt-test", "*", "gpt-test"],
             "token_limit": 1000,
+            "daily_token_limit": 500,
         }),
     )
     .await;
@@ -1296,6 +1297,8 @@ async fn api_key_restrictions_are_validated_and_updated() {
     assert_eq!(body["allowed_channel_ids"], json!([channel_id]));
     assert_eq!(body["allowed_models"], json!(["gpt-test", "*"]));
     assert_eq!(body["token_limit"], json!(1000));
+    assert_eq!(body["daily_token_limit"], json!(500));
+    assert_eq!(body["daily_token_usage"], json!(0));
     assert_eq!(body["token_usage"], json!(0));
     let key_id = body["id"].as_i64().expect("key id");
 
@@ -1317,6 +1320,15 @@ async fn api_key_restrictions_are_validated_and_updated() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
+    let (status, _) = admin_post(
+        router.clone(),
+        "/api/keys",
+        &token,
+        json!({"name": "bad-daily-limit", "daily_token_limit": -1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
     let (status, body) = admin_put(
         router,
         &format!("/api/keys/{key_id}"),
@@ -1325,6 +1337,7 @@ async fn api_key_restrictions_are_validated_and_updated() {
             "allowed_channel_ids": [],
             "allowed_models": [],
             "token_limit": null,
+            "daily_token_limit": null,
         }),
     )
     .await;
@@ -1332,6 +1345,7 @@ async fn api_key_restrictions_are_validated_and_updated() {
     assert_eq!(body["allowed_channel_ids"], json!([]));
     assert_eq!(body["allowed_models"], json!([]));
     assert_eq!(body["token_limit"], json!(null));
+    assert_eq!(body["daily_token_limit"], json!(null));
 }
 
 #[tokio::test]

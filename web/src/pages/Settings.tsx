@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
+import { Download, Loader2, RefreshCw, ShieldCheck, Upload } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { api, ApiError } from '@/api/client';
@@ -9,6 +9,7 @@ import type {
   UpdateInfo,
 } from '@/api/types';
 import { CodeBlock } from '@/components/common/code-block';
+import { ConfirmDialog } from '@/components/common/confirm-dialog';
 import { Field } from '@/components/common/field';
 import { PageHeader } from '@/components/common/page-header';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -124,6 +125,9 @@ export default function SettingsPage() {
   const [passwordErrors, setPasswordErrors] = useState<
     Record<string, string>
   >({});
+  const [backupFile, setBackupFile] = useState<File | null>(null);
+  const [backupConfirmOpen, setBackupConfirmOpen] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
 
   const settingsQuery = useQuery({
     queryKey: ['settings'],
@@ -221,6 +225,75 @@ export default function SettingsPage() {
       return;
     }
     passwordMutation.mutate({ current: currentPassword, next: newPassword });
+  }
+
+  async function downloadBackup() {
+    setBackupBusy(true);
+    try {
+      const response = await fetch('/api/backup/export', {
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        let message = `导出失败（${response.status}）`;
+        try {
+          const value = (await response.json()) as {
+            error?: { message?: string };
+          };
+          message = value.error?.message ?? message;
+        } catch {
+          // Keep the status-based message for non-JSON responses.
+        }
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('content-disposition') ?? '';
+      const filename =
+        disposition.match(/filename="([^"]+)"/)?.[1] ?? 'oneapi-backup.db';
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast.success('备份已下载');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function importBackup() {
+    if (!backupFile) {
+      return;
+    }
+    setBackupBusy(true);
+    try {
+      const response = await fetch('/api/backup/import', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: backupFile,
+      });
+      const value = (await response.json().catch(() => null)) as {
+        error?: { message?: string };
+        message?: string;
+      } | null;
+      if (!response.ok) {
+        throw new Error(
+          value?.error?.message ?? `导入失败（${response.status}）`,
+        );
+      }
+      toast.success(value?.message ?? '导入成功，服务即将重启');
+      setBackupConfirmOpen(false);
+      setBackupFile(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBackupBusy(false);
+    }
   }
 
   return (
@@ -622,6 +695,62 @@ export default function SettingsPage() {
               更新时需要保证程序目录可写。
             </AlertDescription>
           </Alert>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-4">
+        <CardHeader>
+          <CardTitle>数据库备份</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            导出会下载一个一致的 SQLite 快照；导入会先校验文件，成功后自动重启并替换当前数据库。导入前当前数据库会保留在
+            data/backups 目录。
+          </p>
+          <div>
+            <Button
+              variant="outline"
+              onClick={downloadBackup}
+              disabled={backupBusy}
+            >
+              {backupBusy ? <Loader2 className="animate-spin" /> : <Download />}
+              导出备份
+            </Button>
+          </div>
+          <div className="space-y-2">
+            <Field
+              label="恢复数据库"
+              htmlFor="backup-import"
+              hint="选择之前导出的 .db 文件；上传后会先校验，再自动重启。"
+            >
+              <Input
+                id="backup-import"
+                type="file"
+                accept=".db,application/vnd.sqlite3"
+                onChange={(event) =>
+                  setBackupFile(event.target.files?.[0] ?? null)
+                }
+              />
+            </Field>
+            <Button
+              variant="destructive"
+              disabled={!backupFile || backupBusy}
+              onClick={() => setBackupConfirmOpen(true)}
+            >
+              <Upload />
+              导入并重启
+            </Button>
+          </div>
+          <ConfirmDialog
+            open={backupConfirmOpen}
+            onOpenChange={setBackupConfirmOpen}
+            title="用备份替换当前数据库？"
+            description="当前数据库会先自动备份到 data/backups，然后服务重启并加载上传的文件。重启期间请求会短暂失败。"
+            confirmLabel="导入并重启"
+            loading={backupBusy}
+            destructive
+            onConfirm={importBackup}
+          />
         </CardContent>
       </Card>
     </>

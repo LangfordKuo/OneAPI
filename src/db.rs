@@ -6,9 +6,15 @@ use sqlx::{
     SqlitePool,
 };
 
-use crate::config::Config;
+use crate::{backup, config::Config};
 
 pub async fn connect(config: &Config) -> anyhow::Result<SqlitePool> {
+    // A restored file is swapped in before the pool opens so the import never
+    // races with live connections or leaves an old WAL behind.
+    if let Some(path) = backup::prepare_import(config).await? {
+        tracing::info!(database = %path.display(), "using restored database");
+    }
+
     let mut options = match &config.database_url {
         Some(url) => SqliteConnectOptions::from_str(url)
             .context("ONEAPI_DATABASE_URL is not a valid SQLite URL")?,
@@ -28,7 +34,45 @@ pub async fn connect(config: &Config) -> anyhow::Result<SqlitePool> {
         .await
         .context("failed to connect to SQLite")?;
 
-    sqlx::migrate!("./migrations")
+    let integrity: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_all(&pool)
+        .await
+        .context("failed to check database integrity")?;
+    if !integrity.iter().all(|row| row == "ok") {
+        anyhow::bail!(
+            "database integrity check failed; restore a backup from {}",
+            backup::backup_dir(&config.data_dir).display()
+        );
+    }
+
+    let migrator = sqlx::migrate!("./migrations");
+    let has_migrations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(&pool)
+    .await
+    .context("failed to inspect the migration table")?;
+    if has_migrations > 0 {
+        let applied: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = 1")
+                .fetch_all(&pool)
+                .await
+                .context("failed to read applied migrations")?;
+        let pending = migrator
+            .iter()
+            .any(|migration| !applied.contains(&migration.version));
+        if pending {
+            let path = backup::snapshot(&pool, &config.data_dir, "oneapi")
+                .await
+                .context("failed to back up the database before migrations")?;
+            tracing::info!(
+                backup = %path.display(),
+                "database backed up before applying migrations"
+            );
+        }
+    }
+
+    migrator
         .run(&pool)
         .await
         .context("failed to run database migrations")?;

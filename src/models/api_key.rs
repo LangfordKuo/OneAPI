@@ -14,6 +14,9 @@ pub struct ApiKey {
     pub allowed_models: String,
     pub token_limit: Option<i64>,
     pub token_usage: i64,
+    pub daily_token_limit: Option<i64>,
+    pub daily_token_usage: i64,
+    pub daily_usage_day: i64,
     pub created_at: i64,
 }
 
@@ -37,6 +40,22 @@ impl ApiKey {
         self.token_limit
             .is_some_and(|limit| limit > 0 && self.token_usage >= limit)
     }
+
+    /// Daily usage resets lazily: a row from an earlier UTC day counts as zero
+    /// until the next usage write.
+    pub fn usage_today(&self, today: i64) -> i64 {
+        if self.daily_usage_day == today {
+            self.daily_token_usage
+        } else {
+            0
+        }
+    }
+
+    pub fn daily_limit_reached(&self, today: i64) -> bool {
+        self.daily_token_limit.is_some_and(|limit| {
+            limit > 0 && self.daily_usage_day == today && self.daily_token_usage >= limit
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -49,6 +68,7 @@ pub struct ApiKeyCreate<'a> {
     pub allowed_channel_ids: &'a str,
     pub allowed_models: &'a str,
     pub token_limit: Option<i64>,
+    pub daily_token_limit: Option<i64>,
     pub created_at: i64,
 }
 
@@ -60,10 +80,12 @@ pub struct ApiKeyUpdate<'a> {
     pub allowed_channel_ids: &'a str,
     pub allowed_models: &'a str,
     pub token_limit: Option<i64>,
+    pub daily_token_limit: Option<i64>,
 }
 
 const SELECT_COLUMNS: &str = "id, name, key_hash, key_prefix, enabled, expires_at, last_used_at,
-    allowed_channel_ids, allowed_models, token_limit, token_usage, created_at";
+    allowed_channel_ids, allowed_models, token_limit, token_usage, daily_token_limit,
+    daily_token_usage, daily_usage_day, created_at";
 
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<ApiKey>> {
     let query = format!("SELECT {SELECT_COLUMNS} FROM api_keys ORDER BY id DESC");
@@ -114,6 +136,7 @@ pub async fn create(
             allowed_channel_ids: "[]",
             allowed_models: "[]",
             token_limit: None,
+            daily_token_limit: None,
             created_at,
         },
     )
@@ -127,8 +150,8 @@ pub async fn create_with_limits(
     let result = sqlx::query(
         "INSERT INTO api_keys
          (name, key_hash, key_prefix, enabled, expires_at, allowed_channel_ids, allowed_models,
-          token_limit, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          token_limit, daily_token_limit, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(input.name)
     .bind(input.key_hash)
@@ -138,6 +161,7 @@ pub async fn create_with_limits(
     .bind(input.allowed_channel_ids)
     .bind(input.allowed_models)
     .bind(input.token_limit)
+    .bind(input.daily_token_limit)
     .bind(input.created_at)
     .execute(pool)
     .await?;
@@ -151,7 +175,7 @@ pub async fn update(pool: &SqlitePool, id: i64, input: &ApiKeyUpdate<'_>) -> sql
     let result = sqlx::query(
         "UPDATE api_keys SET
             name = ?, enabled = ?, expires_at = ?, allowed_channel_ids = ?, allowed_models = ?,
-            token_limit = ?
+            token_limit = ?, daily_token_limit = ?
          WHERE id = ?",
     )
     .bind(input.name)
@@ -160,6 +184,7 @@ pub async fn update(pool: &SqlitePool, id: i64, input: &ApiKeyUpdate<'_>) -> sql
     .bind(input.allowed_channel_ids)
     .bind(input.allowed_models)
     .bind(input.token_limit)
+    .bind(input.daily_token_limit)
     .bind(id)
     .execute(pool)
     .await?;
@@ -174,9 +199,11 @@ pub async fn disable(pool: &SqlitePool, id: i64) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// Add token usage and auto-disable the key when it reaches its limit. Runs
-/// inside the usage-log transaction so the counter and the log stay consistent.
-pub async fn add_usage<'e, E>(executor: E, id: i64, tokens: i64) -> sqlx::Result<()>
+/// Add token usage and auto-disable the key when it reaches its lifetime
+/// limit. Runs inside the usage-log transaction so the counter and the log
+/// stay consistent. Daily counters roll over lazily on the first write of a
+/// new UTC day.
+pub async fn add_usage<'e, E>(executor: E, id: i64, tokens: i64, now_ms: i64) -> sqlx::Result<()>
 where
     E: Executor<'e, Database = Sqlite>,
 {
@@ -184,8 +211,11 @@ where
         return Ok(());
     }
 
+    let day = now_ms / 86_400_000;
     sqlx::query(
         "UPDATE api_keys SET
+            daily_token_usage = CASE WHEN daily_usage_day = ? THEN daily_token_usage + ? ELSE ? END,
+            daily_usage_day = ?,
             token_usage = token_usage + ?,
             enabled = CASE
                 WHEN token_limit IS NOT NULL AND token_limit > 0
@@ -194,6 +224,10 @@ where
             END
          WHERE id = ?",
     )
+    .bind(day)
+    .bind(tokens)
+    .bind(tokens)
+    .bind(day)
     .bind(tokens)
     .bind(tokens)
     .bind(id)

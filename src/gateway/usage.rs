@@ -290,7 +290,13 @@ pub async fn insert(pool: &SqlitePool, record: &UsageRecord<'_>) -> sqlx::Result
     let mut tx = pool.begin().await?;
     insert_one(&mut *tx, &owned).await?;
     if let Some(api_key_id) = owned.api_key_id {
-        models::api_key::add_usage(&mut *tx, api_key_id, total_tokens(&owned.usage)).await?;
+        models::api_key::add_usage(
+            &mut *tx,
+            api_key_id,
+            total_tokens(&owned.usage),
+            owned.created_at,
+        )
+        .await?;
     }
     tx.commit().await
 }
@@ -387,8 +393,9 @@ async fn write_batch(pool: &SqlitePool, batch: &[WriteJob]) -> sqlx::Result<()> 
             }
         }
     }
+    let now = models::now_ms();
     for (api_key_id, tokens) in key_usage {
-        models::api_key::add_usage(&mut *tx, api_key_id, tokens).await?;
+        models::api_key::add_usage(&mut *tx, api_key_id, tokens, now).await?;
     }
     tx.commit().await
 }
@@ -629,6 +636,7 @@ mod tests {
                 allowed_channel_ids: "[]",
                 allowed_models: "[]",
                 token_limit: Some(8),
+                daily_token_limit: None,
                 created_at: crate::models::now_ms(),
             },
         )
