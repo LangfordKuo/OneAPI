@@ -1088,7 +1088,9 @@ async fn send_test(
     )?;
     let response = request.send().await?;
     let status = response.status();
-    let text = response.text().await.unwrap_or_default();
+    let text = upstream::read_body_limited(response)
+        .await
+        .unwrap_or_default();
     Ok((status, text))
 }
 
@@ -1108,7 +1110,9 @@ async fn send_models(
     )?;
     let response = request.send().await?;
     let status = response.status();
-    let text = response.text().await.unwrap_or_default();
+    let text = upstream::read_body_limited(response)
+        .await
+        .unwrap_or_default();
     Ok((status, text))
 }
 

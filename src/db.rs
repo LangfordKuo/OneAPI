@@ -23,7 +23,7 @@ pub async fn connect(config: &Config) -> anyhow::Result<SqlitePool> {
         .foreign_keys(true);
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(config.database_pool_size)
         .connect_with(options)
         .await
         .context("failed to connect to SQLite")?;

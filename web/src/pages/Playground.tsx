@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, Plus, Send, Trash2 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '@/api/client';
 import { readSse } from '@/api/sse';
 import type { ModelsOutput, ProtocolName } from '@/api/types';
@@ -429,6 +429,12 @@ export default function Playground() {
   const [result, setResult] = useState<PlaygroundResult>(EMPTY_RESULT);
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
   const [firstTokenMs, setFirstTokenMs] = useState<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Stop the upstream stream when the page unmounts.
+  useEffect(() => {
+    return () => abortRef.current?.abort();
+  }, []);
 
   const modelsQuery = useQuery({
     queryKey: ['models'],
@@ -512,6 +518,11 @@ export default function Playground() {
     setElapsedMs(null);
     setFirstTokenMs(null);
 
+    // Cancel the previous run so two streams never write into the same result.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     const started = performance.now();
     const acc: PlaygroundResult = { ...EMPTY_RESULT, tools: [] };
     let firstToken = false;
@@ -523,6 +534,7 @@ export default function Playground() {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(buildRequest()),
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -573,11 +585,17 @@ export default function Playground() {
         publish();
       }
     } catch (error) {
-      acc.error = error instanceof Error ? error.message : String(error);
-      publish();
+      // Aborts are expected when a newer run starts or the page unmounts.
+      if (!controller.signal.aborted) {
+        acc.error = error instanceof Error ? error.message : String(error);
+        publish();
+      }
     } finally {
-      setElapsedMs(Math.round(performance.now() - started));
-      setRunning(false);
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setElapsedMs(Math.round(performance.now() - started));
+        setRunning(false);
+      }
     }
   }
 

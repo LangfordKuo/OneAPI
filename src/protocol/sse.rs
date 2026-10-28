@@ -28,20 +28,35 @@ impl SseParser {
     pub fn push(&mut self, chunk: &[u8]) -> Vec<SseFrame> {
         self.buffer.extend_from_slice(chunk);
 
+        // Detach the buffer so line slices can be inspected while `self` is
+        // mutated by `process_line`; it is put back (compacted) at the end.
+        let mut buffer = std::mem::take(&mut self.buffer);
         let mut frames = Vec::new();
-        while let Some(position) = self.buffer.iter().position(|byte| *byte == b'\n') {
+        let mut start = 0usize;
+        while let Some(relative) = buffer[start..].iter().position(|byte| *byte == b'\n') {
+            let position = start + relative;
             let mut line_end = position;
-            if line_end > 0 && self.buffer[line_end - 1] == b'\r' {
+            if line_end > start && buffer[line_end - 1] == b'\r' {
                 line_end -= 1;
             }
-            let line = String::from_utf8_lossy(&self.buffer[..line_end]).to_string();
-            let consumed = position + 1;
-            self.raw.extend_from_slice(&self.buffer[..consumed]);
-            self.buffer.drain(..consumed);
-            self.process_line(&line, &mut frames);
+            self.raw.extend_from_slice(&buffer[start..=position]);
+            self.process_line(&buffer[start..line_end], &mut frames);
+            start = position + 1;
         }
 
+        // Compact once per chunk instead of draining the front for every line.
+        if start > 0 {
+            buffer.drain(..start);
+        }
+        self.buffer = buffer;
+
         frames
+    }
+
+    /// Bytes of a partially received frame. Callers use this to bound the
+    /// memory an upstream can pin by never terminating a line.
+    pub fn buffered_len(&self) -> usize {
+        self.buffer.len()
     }
 
     /// Flush a final frame when an upstream closes without a trailing blank line.
@@ -66,7 +81,7 @@ impl SseParser {
         frames
     }
 
-    fn process_line(&mut self, line: &str, frames: &mut Vec<SseFrame>) {
+    fn process_line(&mut self, line: &[u8], frames: &mut Vec<SseFrame>) {
         if line.is_empty() {
             if self.has_fields {
                 frames.push(SseFrame {
@@ -82,22 +97,27 @@ impl SseParser {
             return;
         }
 
-        if line.starts_with(':') {
+        if line[0] == b':' {
             return;
         }
 
-        let (field, value) = match line.split_once(':') {
-            Some((field, value)) => (field, value.strip_prefix(' ').unwrap_or(value)),
-            None => (line, ""),
+        // Work on bytes: most lines (`id:`, `retry:`, blank separators) never
+        // need a String, and only `event`/`data` values pay for UTF-8 decoding.
+        let (field, value) = match line.iter().position(|byte| *byte == b':') {
+            Some(index) => {
+                let value = &line[index + 1..];
+                (&line[..index], value.strip_prefix(b" ").unwrap_or(value))
+            }
+            None => (line, &b""[..]),
         };
 
         match field {
-            "event" => {
-                self.event = Some(value.to_string());
+            b"event" => {
+                self.event = Some(String::from_utf8_lossy(value).into_owned());
                 self.has_fields = true;
             }
-            "data" => {
-                self.data.push(value.to_string());
+            b"data" => {
+                self.data.push(String::from_utf8_lossy(value).into_owned());
                 self.has_fields = true;
             }
             _ => {

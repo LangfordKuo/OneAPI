@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::{Executor, Sqlite, SqlitePool};
 
 pub async fn all(pool: &SqlitePool) -> sqlx::Result<Vec<(String, String)>> {
     sqlx::query_as("SELECT key, value FROM settings ORDER BY key")
@@ -62,14 +62,17 @@ impl GatewayDefaults {
     }
 }
 
-pub async fn upsert(pool: &SqlitePool, key: &str, value: &str) -> sqlx::Result<()> {
+pub async fn upsert<'e, E>(executor: E, key: &str, value: &str) -> sqlx::Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES (?, ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
     .bind(key)
     .bind(value)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }

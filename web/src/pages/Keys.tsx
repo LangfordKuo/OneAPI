@@ -194,7 +194,7 @@ export default function Keys() {
     const limit = draft.tokenLimit.trim();
     if (limit) {
       const parsed = Number(limit);
-      if (!Number.isFinite(parsed) || parsed <= 0) {
+      if (!Number.isSafeInteger(parsed) || parsed <= 0) {
         nextErrors.tokenLimit = '请输入正整数，或留空表示不限制';
       }
     }

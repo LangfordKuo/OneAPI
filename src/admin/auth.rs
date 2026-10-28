@@ -106,13 +106,21 @@ impl FromRequestParts<AppState> for ClientAddr {
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(addr)| addr.ip());
-        let header = models::setting::get(&state.db, client_ip::SETTING_KEY)
+        // An explicitly configured header is trusted (the administrator opted
+        // in for a CDN/proxy). An empty setting defaults to X-Forwarded-For
+        // only for loopback/private peers, so a direct public client cannot
+        // spoof it.
+        let configured = models::setting::get(&state.db, client_ip::SETTING_KEY)
             .await
             .ok()
             .flatten()
             .unwrap_or_default();
 
-        Ok(Self(client_ip::resolve(&parts.headers, &header, peer)))
+        Ok(Self(client_ip::resolve_client_ip(
+            &parts.headers,
+            &configured,
+            peer,
+        )))
     }
 }
 
@@ -192,6 +200,9 @@ pub async fn login(
     }
 
     let Some(admin) = models::admin::find_by_username(&state.db, username).await? else {
+        // Keep the Argon2 cost identical to the wrong-password path so response
+        // timing does not reveal whether the username exists.
+        security::verify_password(security::dummy_password_hash(), &input.password);
         state.login_limiter.record_failure(&limiter_key);
         return Err(AppError::Unauthorized);
     };
@@ -233,11 +244,26 @@ pub async fn change_password(
     State(state): State<AppState>,
     session: AdminSession,
     jar: CookieJar,
+    client_addr: ClientAddr,
     Json(input): Json<ChangePasswordInput>,
 ) -> Result<(CookieJar, Json<AdminOutput>), AppError> {
+    let client_ip = client_addr
+        .0
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let limiter_key = format!("password|{client_ip}|{}", session.admin.id);
+    if let Some(wait) = state.login_limiter.blocked_for(&limiter_key) {
+        return Err(AppError::TooManyRequests(format!(
+            "too many failed password attempts; retry in {} seconds",
+            wait.as_secs().max(1)
+        )));
+    }
+
     if !security::verify_password(&session.admin.password_hash, &input.current_password) {
+        state.login_limiter.record_failure(&limiter_key);
         return Err(AppError::Unauthorized);
     }
+    state.login_limiter.record_success(&limiter_key);
 
     if input.new_password.chars().count() < 8 {
         return Err(AppError::BadRequest(

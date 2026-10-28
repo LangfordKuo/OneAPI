@@ -139,10 +139,14 @@ export default function Logs() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [selected, setSelected] = useState<LogEntry | null>(null);
+  // The COUNT(*) scan is skipped for pages after the first; keep the total
+  // from the first page so pagination stays stable while browsing.
+  const [knownTotal, setKnownTotal] = useState(0);
 
   function update<K extends keyof Filters>(key: K, value: Filters[K]) {
     setFilters((previous) => ({ ...previous, [key]: value }));
     setPage(1);
+    setKnownTotal(0);
   }
 
   const channelsQuery = useQuery({
@@ -170,6 +174,7 @@ export default function Logs() {
     if (filters.protocol !== 'all') params.set('protocol', filters.protocol);
     if (filters.source !== 'all') params.set('source', filters.source);
     if (filters.stream !== 'all') params.set('stream', filters.stream);
+    params.set('include_total', page === 1 ? 'true' : 'false');
     return `/api/logs?${params.toString()}`;
   }, [filters, page, pageSize]);
 
@@ -177,6 +182,8 @@ export default function Logs() {
     queryKey: ['logs', path],
     queryFn: () => api.get<LogList>(path),
   });
+
+  const total = logsQuery.data?.total;
 
   const detailQuery = useQuery({
     queryKey: ['log-detail', selected?.request_id],
@@ -370,6 +377,7 @@ export default function Logs() {
             onClick={() => {
               setFilters(INITIAL_FILTERS);
               setPage(1);
+              setKnownTotal(0);
             }}
           >
             <RotateCcw />
@@ -523,8 +531,15 @@ export default function Logs() {
               <Pagination
                 page={page}
                 pageSize={pageSize}
-                total={logsQuery.data?.total ?? 0}
-                onPageChange={setPage}
+                total={total ?? knownTotal}
+                onPageChange={(next) => {
+                  // Capture the first page's count before deep pages stop
+                  // requesting it.
+                  if (total != null) {
+                    setKnownTotal(total);
+                  }
+                  setPage(next);
+                }}
                 onPageSizeChange={(size) => {
                   setPageSize(size);
                   setPage(1);

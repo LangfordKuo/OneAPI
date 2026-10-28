@@ -119,7 +119,8 @@ export interface LogEntry {
 
 export interface LogList {
   items: LogEntry[];
-  total: number;
+  /** Null when the request skipped the COUNT(*) scan (deep pages). */
+  total: number | null;
   limit: number;
   offset: number;
 }

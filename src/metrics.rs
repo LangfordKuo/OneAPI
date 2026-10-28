@@ -1,35 +1,62 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, MutexGuard, RwLock,
+    },
 };
 
 use serde::Serialize;
 
 use crate::models::now_ms;
 
+/// Number of independent buckets per window. Every streaming chunk updates the
+/// live rate, so a single mutex becomes a cross-stream hotspot; spreading
+/// updates over shards keeps concurrent streams from serializing on it.
+const SHARDS: usize = 16;
+
 #[derive(Debug, Default)]
 pub struct LiveMetrics {
-    inner: Mutex<Inner>,
-}
-
-#[derive(Debug)]
-struct Inner {
-    global: Arc<Window>,
-    channels: HashMap<i64, Arc<Window>>,
-}
-
-impl Default for Inner {
-    fn default() -> Self {
-        Self {
-            global: Arc::new(Window::default()),
-            channels: HashMap::new(),
-        }
-    }
+    global: ShardedWindow,
+    channels: [RwLock<HashMap<i64, Arc<ShardedWindow>>>; SHARDS],
 }
 
 /// Instantaneous rate with one-second buckets. `rate(second)` reports the tokens
 /// counted in the most recently completed second (second - 1), without any
 /// sliding-window smoothing.
+#[derive(Debug)]
+struct ShardedWindow {
+    shards: [Window; SHARDS],
+    next: AtomicUsize,
+}
+
+impl Default for ShardedWindow {
+    fn default() -> Self {
+        Self {
+            shards: std::array::from_fn(|_| Window::default()),
+            next: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl ShardedWindow {
+    fn add(&self, second: i64, tokens: u64) {
+        let index = self.next.fetch_add(1, Ordering::Relaxed) % SHARDS;
+        self.shards[index].add(second, tokens);
+    }
+
+    fn rate(&self, second: i64) -> f64 {
+        self.shards.iter().map(|window| window.rate(second)).sum()
+    }
+
+    /// A channel is idle only when neither the completed nor the active bucket
+    /// holds tokens. The active bucket matters because a stream that just
+    /// started has not completed its first second yet.
+    fn is_idle(&self) -> bool {
+        self.shards.iter().all(Window::is_idle)
+    }
+}
+
 #[derive(Debug, Default)]
 struct Window {
     bucket: Mutex<Bucket>,
@@ -97,9 +124,6 @@ impl Window {
         }
     }
 
-    /// A channel is idle only when neither the completed nor the active bucket
-    /// holds tokens. The active bucket matters because a stream that just
-    /// started has not completed its first second yet.
     fn is_idle(&self) -> bool {
         let bucket = self.lock();
         bucket.previous_tokens == 0 && bucket.current_tokens == 0
@@ -120,10 +144,8 @@ pub struct LiveSnapshot {
 }
 
 impl LiveMetrics {
-    fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn shard_index(channel_id: i64) -> usize {
+        channel_id.rem_euclid(SHARDS as i64) as usize
     }
 
     pub fn add_tokens(&self, channel_id: Option<i64>, tokens: u64) {
@@ -134,17 +156,27 @@ impl LiveMetrics {
     }
 
     fn add_tokens_at(&self, channel_id: Option<i64>, tokens: u64, second: i64) {
-        let (global, channel) = {
-            let mut inner = self.lock();
-            let global = inner.global.clone();
-            let channel = channel_id.map(|id| inner.channels.entry(id).or_default().clone());
-            (global, channel)
+        self.global.add(second, tokens);
+        let Some(channel_id) = channel_id else {
+            return;
         };
 
-        global.add(second, tokens);
-        if let Some(window) = channel {
-            window.add(second, tokens);
-        }
+        let window = {
+            let shard = self.channels[Self::shard_index(channel_id)]
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            shard.get(&channel_id).cloned()
+        };
+        let window = match window {
+            Some(window) => window,
+            None => {
+                let mut shard = self.channels[Self::shard_index(channel_id)]
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                shard.entry(channel_id).or_default().clone()
+            }
+        };
+        window.add(second, tokens);
     }
 
     pub fn snapshot(&self) -> LiveSnapshot {
@@ -154,28 +186,22 @@ impl LiveMetrics {
     }
 
     fn snapshot_at(&self, second: i64) -> LiveSnapshot {
-        let (global, channels) = {
-            let inner = self.lock();
-            let global = inner.global.clone();
-            let channels: Vec<(i64, Arc<Window>)> = inner
-                .channels
-                .iter()
-                .map(|(id, window)| (*id, window.clone()))
-                .collect();
-            (global, channels)
-        };
-
         let mut rates = Vec::new();
         let mut stale = Vec::new();
-        for (channel_id, window) in channels {
-            let rate = window.rate(second);
-            if rate > 0.0 {
-                rates.push(ChannelRate {
-                    channel_id,
-                    tok_s: round_one(rate),
-                });
-            } else if window.is_idle() {
-                stale.push(channel_id);
+        for shard in &self.channels {
+            let channels = shard
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (channel_id, window) in channels.iter() {
+                let rate = window.rate(second);
+                if rate > 0.0 {
+                    rates.push(ChannelRate {
+                        channel_id: *channel_id,
+                        tok_s: round_one(rate),
+                    });
+                } else if window.is_idle() {
+                    stale.push(*channel_id);
+                }
             }
         }
         rates.sort_by(|left, right| {
@@ -185,16 +211,16 @@ impl LiveMetrics {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        if !stale.is_empty() {
-            let mut inner = self.lock();
-            for channel_id in stale {
-                inner.channels.remove(&channel_id);
-            }
+        for channel_id in stale {
+            let mut shard = self.channels[Self::shard_index(channel_id)]
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            shard.remove(&channel_id);
         }
 
         LiveSnapshot {
             timestamp: second * 1000,
-            global_tok_s: round_one(global.rate(second)),
+            global_tok_s: round_one(self.global.rate(second)),
             channels: rates,
         }
     }
@@ -249,5 +275,17 @@ mod tests {
         metrics.add_tokens_at(Some(2), 20, 1_000);
 
         assert_eq!(metrics.snapshot_at(1_001).global_tok_s, 50.0);
+    }
+
+    #[test]
+    fn shards_sum_to_the_same_rate() {
+        let metrics = LiveMetrics::default();
+
+        for _ in 0..64 {
+            metrics.add_tokens_at(Some(3), 10, 2_000);
+        }
+        let snapshot = metrics.snapshot_at(2_001);
+        assert_eq!(snapshot.global_tok_s, 640.0);
+        assert_eq!(snapshot.channels[0].tok_s, 640.0);
     }
 }

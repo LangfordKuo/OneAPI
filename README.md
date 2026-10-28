@@ -50,7 +50,7 @@ docker compose up -d --build
 从 [Releases](https://github.com/LangfordKuo/OneAPI/releases) 下载对应平台的压缩包并解压：
 
 ```bash
-tar xzf oneapi-v0.1.8-linux-amd64.tar.gz
+tar xzf oneapi-v0.1.9-linux-amd64.tar.gz
 ONEAPI_DATA_DIR=./data ./oneapi serve
 ```
 
@@ -85,7 +85,7 @@ ONEAPI_DATA_DIR=./data ./oneapi serve
 | `ONEAPI_LOG_JSON` | 设为 `1` 输出 JSON 日志 | 关闭 |
 | `ONEAPI_DATABASE_URL` | 显式指定 SQLite URL | 数据目录内的 `oneapi.db` |
 
-管理后台的「设置」页可以指定从哪个请求头读取真实客户端 IP，例如 Cloudflare 的 `CF-Connecting-IP`、反向代理的 `X-Forwarded-For` 或 `X-Real-IP`。该地址用于登录失败限速；留空时使用 TCP 对端地址。只有确认所有流量都经过可信代理时才应配置，否则客户端可以伪造该请求头绕过限速。
+管理后台的「设置」页可以指定从哪个请求头读取真实客户端 IP，例如 Cloudflare 的 `CF-Connecting-IP`、反向代理的 `X-Forwarded-For` 或 `X-Real-IP`。该地址用于登录失败限速。留空时默认读取 `X-Forwarded-For`，但只对来自回环或内网地址（同机反代、Docker/Kubernetes 网络、Cloudflare Tunnel）的请求生效；显式填写任意请求头后视为管理员已确认可信，会直接采用，不再看对端地址——这适用于 CDN 从公网地址直接回源 `3000` 端口的部署。显式配置时请确保源站端口只接受 CDN/反向代理访问，否则直接访问的客户端可以伪造该头绕过登录限速。头缺失或值无法解析时仍回退 TCP 对端地址。
 
 同一页面的「网站域名」用于反向代理场景：填写浏览器实际访问的域名（如 `https://api.example.com` 或 `api.example.com`）。当 Nginx 等反向代理没有把外部 Host 透传给后端时，写请求的 CSRF 校验会额外接受该域名；协议、路径与 80/443 默认端口会被忽略，留空则只校验请求 Host。
 

@@ -151,9 +151,40 @@ impl Usage {
     pub fn recompute_total(&mut self) {
         if self.total_tokens.is_none() {
             if let (Some(input), Some(output)) = (self.input_tokens, self.output_tokens) {
-                self.total_tokens = Some(input + output);
+                self.total_tokens = Some(input.saturating_add(output));
             }
         }
+    }
+
+    /// Fill counters the upstream omitted with local estimates. Reported values
+    /// always win; this only prevents a missing usage block from being billed as
+    /// zero tokens.
+    pub fn fill_missing(&mut self, input_tokens: u64, output_tokens: u64) {
+        if self.input_tokens.is_none() {
+            self.input_tokens = Some(input_tokens);
+        }
+        if self.output_tokens.is_none() {
+            self.output_tokens = Some(output_tokens);
+        }
+        self.recompute_total();
+    }
+
+    /// Like [`fill_missing`], but also replaces a zero output count with the
+    /// estimate. Streaming usage often arrives before generation finishes, and a
+    /// client that disconnects early must still be accounted for.
+    pub fn fill_partial_estimate(&mut self, input_tokens: u64, output_tokens: u64) {
+        if self.input_tokens.is_none() {
+            self.input_tokens = Some(input_tokens);
+        }
+        match self.output_tokens {
+            None => self.output_tokens = Some(output_tokens),
+            Some(0) if output_tokens > 0 => self.output_tokens = Some(output_tokens),
+            Some(_) => {}
+        }
+        if self.total_tokens == Some(0) {
+            self.total_tokens = None;
+        }
+        self.recompute_total();
     }
 
     /// Later stream events carry more complete counters than earlier ones, so a
@@ -292,4 +323,46 @@ pub fn has_image(parts: &[ContentPart]) -> bool {
     parts
         .iter()
         .any(|part| matches!(part, ContentPart::Image { .. }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Usage;
+
+    #[test]
+    fn fill_missing_keeps_reported_counters() {
+        let mut usage = Usage {
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            total_tokens: None,
+            ..Usage::default()
+        };
+        usage.fill_missing(999, 999);
+        assert_eq!(usage.input_tokens, Some(10));
+        assert_eq!(usage.output_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(15));
+    }
+
+    #[test]
+    fn fill_missing_populates_an_empty_usage_block() {
+        let mut usage = Usage::default();
+        usage.fill_missing(12, 34);
+        assert_eq!(usage.input_tokens, Some(12));
+        assert_eq!(usage.output_tokens, Some(34));
+        assert_eq!(usage.total_tokens, Some(46));
+    }
+
+    #[test]
+    fn partial_estimate_replaces_premature_zero_output() {
+        let mut usage = Usage {
+            input_tokens: Some(10),
+            output_tokens: Some(0),
+            total_tokens: None,
+            ..Usage::default()
+        };
+        usage.fill_partial_estimate(999, 42);
+        assert_eq!(usage.input_tokens, Some(10));
+        assert_eq!(usage.output_tokens, Some(42));
+        assert_eq!(usage.total_tokens, Some(52));
+    }
 }

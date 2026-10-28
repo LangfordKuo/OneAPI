@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use axum::{extract::State, Json};
 use serde::Serialize;
 
-use crate::{error::AppError, models, state::AppState};
+use crate::{error::AppError, state::AppState};
 
 use super::auth::AdminSession;
 
@@ -20,22 +20,20 @@ pub async fn list(
     let mut result = BTreeSet::new();
     let mut has_wildcard = false;
 
-    for channel in channels {
-        if channel.enabled == 0 {
+    for prepared in channels.iter() {
+        if prepared.channel.enabled == 0 {
             continue;
         }
-        let catalog = models::channel::catalog_models(&channel);
-        if catalog.has_wildcard {
+        if prepared.catalog.has_wildcard {
             has_wildcard = true;
         }
-        for model in catalog.models {
-            result.insert(model);
+        for model in &prepared.catalog.models {
+            result.insert(model.clone());
         }
     }
 
     if has_wildcard {
-        let since = models::now_ms() - 30 * 24 * 60 * 60 * 1000;
-        for model in models::usage_log::recent_models(&state.db, since, 200).await? {
+        for model in state.cache.recent_models(&state.db).await? {
             if !model.is_empty() && model != "*" {
                 result.insert(model);
             }

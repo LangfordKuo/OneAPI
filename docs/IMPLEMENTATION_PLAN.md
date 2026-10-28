@@ -1,7 +1,7 @@
 # OneAPI 实施计划
 
-- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度，v0.1.7 渠道按协议内分页并修复 Token 图表轴，v0.1.8 API Key 支持渠道/模型/Token 限额
-- 最后更新：2026-10-27
+- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度，v0.1.7 渠道按协议内分页并修复 Token 图表轴，v0.1.8 API Key 支持渠道/模型/Token 限额，v0.1.9 完成审查优化批次 1–5
+- 最后更新：2026-10-28
 - 关联文档：`docs/PROGRESS.md`
 - 适用仓库：`/root/OneAPI`
 
@@ -248,6 +248,9 @@ GET /healthz  /readyz
 - 2026-10-28：版本升至 `0.1.6`，发布 shadcn/ui 前端重写、网站域名设置与 1 秒实时速度。
 - 2026-10-28：渠道按协议内分页，每协议独立 Base URL/Key/模型等并支持转换到原生协议；Token 图表 Y 轴改用万/亿紧凑格式。版本升至 `0.1.7`。
 - 2026-10-28：API Key 新增可选限制：允许的渠道、允许的模型与累计 Token 上限；限制在网关选路/鉴权与用量写入时生效，达到上限自动停用。版本升至 `0.1.8`。
+- 2026-10-28：全仓审查后的安全与稳定性修复：流式或上游未返回 usage 的请求按本地估算计入 Token 配额；`x-request-id` 增加长度/字符校验，`request_details` 改为按 API Key 隔离并新增 `created_at` 索引（迁移 `0007_request_details_key.sql`）；渠道 HTTP Client 缓存不再随失败状态无限增长；上游响应体限制 64MB 且错误信息截断后落库；保留期清理改为分批事务；客户端 IP 请求头留空时默认对回环/内网对端使用 `X-Forwarded-For`，显式配置后直接信任（适配 CDN 公网回源）；渠道协议配置在运行时缓存中预解析，SSE 解析改为线性并限制单帧大小，请求体按需克隆；Responses 存储被跳过时返回 `store:false`；优雅退出时 flush 用量写队列。
+- 2026-10-28：按 `docs/OPTIMIZATION_PLAN.md` 完成批次 1–5：登录/改密限速、设置事务化、CSRF 转发头取值与短 Key 掩码；上游重定向限制、故障转移总预算、协议化 JSON 解析错误与 `include_usage` 兼容重试；日志分页上限与可选总数、站点/模型缓存、可配置连接池与 `/readyz` 队列指标；加权选路、实时指标分片与 SSE 字节级解析；前端 SSE 冲刷/增量换行、Playground 流取消、Key 限额整数校验与全局安全响应头。
+- 2026-10-28：版本升至 `0.1.9`，发布上述审查优化批次 1–5。
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。

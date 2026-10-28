@@ -7,6 +7,19 @@ use crate::{
 
 const DAY_MS: i64 = 86_400_000;
 const CLEANUP_INTERVAL_SECONDS: u64 = 6 * 60 * 60;
+/// Cap each delete transaction so the SQLite write lock is released regularly.
+/// A single unbounded DELETE can block gateway usage writes past the 5 second
+/// busy timeout on large tables.
+const DELETE_BATCH: i64 = 5_000;
+
+const DELETE_SESSIONS: &str = "DELETE FROM sessions WHERE rowid IN
+    (SELECT rowid FROM sessions WHERE expires_at < ? LIMIT ?)";
+const DELETE_USAGE_LOGS: &str = "DELETE FROM usage_logs WHERE rowid IN
+    (SELECT rowid FROM usage_logs WHERE created_at < ? LIMIT ?)";
+const DELETE_REQUEST_DETAILS: &str = "DELETE FROM request_details WHERE rowid IN
+    (SELECT rowid FROM request_details WHERE created_at < ? LIMIT ?)";
+const DELETE_RESPONSES: &str = "DELETE FROM responses WHERE rowid IN
+    (SELECT rowid FROM responses WHERE created_at < ? LIMIT ?)";
 
 #[derive(Debug, Default)]
 pub struct CleanupStats {
@@ -34,39 +47,47 @@ pub async fn cleanup_once(state: &AppState) -> anyhow::Result<CleanupStats> {
     let usage_cutoff = (usage_days > 0).then(|| now - usage_days.saturating_mul(DAY_MS));
     let response_cutoff = (response_days > 0).then(|| now - response_days.saturating_mul(DAY_MS));
 
-    let mut stats = CleanupStats::default();
-    let mut tx = state.db.begin().await?;
-
-    stats.sessions = sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
-        .bind(now)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+    let mut stats = CleanupStats {
+        sessions: delete_before(&state.db, DELETE_SESSIONS, now).await?,
+        ..CleanupStats::default()
+    };
 
     if let Some(cutoff) = usage_cutoff {
-        stats.usage_logs = sqlx::query("DELETE FROM usage_logs WHERE created_at < ?")
-            .bind(cutoff)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-        stats.request_details = sqlx::query("DELETE FROM request_details WHERE created_at < ?")
-            .bind(cutoff)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+        stats.usage_logs = delete_before(&state.db, DELETE_USAGE_LOGS, cutoff).await?;
+        stats.request_details = delete_before(&state.db, DELETE_REQUEST_DETAILS, cutoff).await?;
     }
 
     if let Some(cutoff) = response_cutoff {
-        stats.responses = sqlx::query("DELETE FROM responses WHERE created_at < ?")
+        stats.responses = delete_before(&state.db, DELETE_RESPONSES, cutoff).await?;
+    }
+
+    Ok(stats)
+}
+
+/// Delete expired rows in bounded batches, committing after each batch. Each
+/// batch is its own transaction so the write lock is never held for the whole
+/// table sweep.
+async fn delete_before(
+    pool: &sqlx::SqlitePool,
+    sql: &'static str,
+    cutoff: i64,
+) -> anyhow::Result<u64> {
+    let mut deleted = 0u64;
+    loop {
+        let mut tx = pool.begin().await?;
+        let rows = sqlx::query(sql)
             .bind(cutoff)
+            .bind(DELETE_BATCH)
             .execute(&mut *tx)
             .await?
             .rows_affected();
+        tx.commit().await?;
+
+        deleted = deleted.saturating_add(rows);
+        if rows < DELETE_BATCH as u64 {
+            return Ok(deleted);
+        }
     }
-
-    tx.commit().await?;
-
-    Ok(stats)
 }
 
 /// Run cleanup immediately and then every six hours. A retention value of `0`
@@ -116,6 +137,7 @@ mod tests {
             log_level: "error".to_string(),
             cookie_secure: false,
             trust_proxy: false,
+            database_pool_size: 5,
         };
         let db = db::connect(&config).await.expect("database");
         let crypto =
