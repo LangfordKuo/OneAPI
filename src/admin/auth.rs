@@ -110,11 +110,14 @@ impl FromRequestParts<AppState> for ClientAddr {
         // in for a CDN/proxy). An empty setting defaults to X-Forwarded-For
         // only for loopback/private peers, so a direct public client cannot
         // spoof it.
-        let configured = models::setting::get(&state.db, client_ip::SETTING_KEY)
+        let configured = state
+            .cache
+            .client_ip_header(&state.db)
             .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+            .unwrap_or_else(|error| {
+                tracing::warn!(error = %error, "failed to load client_ip_header setting");
+                String::new()
+            });
 
         Ok(Self(client_ip::resolve_client_ip(
             &parts.headers,

@@ -19,20 +19,16 @@ pub struct Config {
 }
 
 impl Config {
+    /// Read configuration from the process environment and `.env` files.
+    /// Callers must have run [`load_env_before_startup`] first; this function
+    /// never mutates the environment itself.
     pub fn from_env(data_dir: Option<PathBuf>) -> Result<Self> {
-        // A .env next to the binary/working directory overrides defaults.
-        load_env_file(Path::new(".env"));
-
         let data_dir = data_dir
             .or_else(|| env::var_os("ONEAPI_DATA_DIR").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("./data"));
 
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("failed to create data directory {}", data_dir.display()))?;
-
-        // The setup wizard writes .env into the data directory so the config
-        // travels with the SQLite database and master.key.
-        load_env_file(&data_dir.join(".env"));
 
         let addr: SocketAddr = env::var("ONEAPI_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
@@ -72,6 +68,28 @@ impl Config {
     pub fn data_dir_display(&self) -> String {
         self.data_dir.to_string_lossy().into_owned()
     }
+}
+
+/// Load the dotenv files and resolve the data directory before the async
+/// runtime starts.
+///
+/// `env::set_var` mutates process-global state and is not thread-safe, so all
+/// environment writes must happen while the process is still single-threaded.
+/// The setup wizard writes `.env` into the data directory; loading it here
+/// keeps the config travel with the SQLite database and master.key.
+pub fn load_env_before_startup(data_dir: Option<PathBuf>) -> Result<PathBuf> {
+    // A .env next to the binary/working directory overrides defaults.
+    load_env_file(Path::new(".env"));
+
+    let data_dir = data_dir
+        .or_else(|| env::var_os("ONEAPI_DATA_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("./data"));
+
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("failed to create data directory {}", data_dir.display()))?;
+    load_env_file(&data_dir.join(".env"));
+
+    Ok(data_dir)
 }
 
 /// Minimal dotenv loader. Processes only `KEY=value` lines, ignores comments,
@@ -138,5 +156,20 @@ mod tests {
 
         std::env::remove_var(key);
         std::env::remove_var("ONEAPI_TEST_DOTENV_OTHER");
+    }
+
+    #[test]
+    fn startup_env_loader_reads_the_data_dir_env() {
+        let key = "ONEAPI_TEST_DATA_DIR_ENV_VALUE";
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join(".env"), format!("{key}=from-data\n")).expect("write env");
+        std::env::remove_var(key);
+
+        let resolved =
+            load_env_before_startup(Some(dir.path().to_path_buf())).expect("load env files");
+        assert_eq!(resolved, dir.path());
+        assert_eq!(std::env::var(key).expect("value"), "from-data");
+
+        std::env::remove_var(key);
     }
 }

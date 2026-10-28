@@ -127,15 +127,20 @@ async fn count_tokens(
         .into_iter()
         .find(|candidate| candidate.upstream_kind == "anthropic")
         {
-            let defaults = models::setting::GatewayDefaults::load(&state.db).await?;
+            let defaults = state.cache.defaults(&state.db).await?;
             let mut request_body = body.clone();
             if let Some(object) = request_body.as_object_mut() {
                 object.insert("model".into(), json!(candidate.upstream_model));
                 object.remove("stream");
             }
 
+            // Reuse the per-channel client so connection pools and TLS
+            // sessions survive across count_tokens calls.
             let client =
-                match upstream::build_client(&candidate.channel, defaults.nonstream_timeout_ms) {
+                match state
+                    .clients
+                    .get(candidate.channel(), defaults.nonstream_timeout_ms, false)
+                {
                     Ok(client) => client,
                     Err(error) => {
                         return Ok(error::client_error(
@@ -148,11 +153,11 @@ async fn count_tokens(
                 };
             let url = format!(
                 "{}/messages/count_tokens",
-                candidate.upstream_config.base_url.trim_end_matches('/')
+                candidate.upstream_config().base_url.trim_end_matches('/')
             );
             let request = match upstream::apply_auth(
                 client.post(url).json(&request_body),
-                &candidate.upstream_config,
+                candidate.upstream_config(),
                 &state.crypto,
                 "anthropic",
                 &headers,
@@ -171,9 +176,15 @@ async fn count_tokens(
             match request.send().await {
                 Ok(response) => {
                     let status = response.status();
-                    let text = response.text().await.unwrap_or_default();
-                    return Ok((status, [(header::CONTENT_TYPE, "application/json")], text)
-                        .into_response());
+                    // Bound the buffered body the same way as every other
+                    // upstream read; a misbehaving upstream must not pin memory.
+                    let bytes = upstream::read_body_limited_bytes(response)
+                        .await
+                        .unwrap_or_default();
+                    return Ok(
+                        (status, [(header::CONTENT_TYPE, "application/json")], bytes)
+                            .into_response(),
+                    );
                 }
                 Err(error) => {
                     return Ok(error::client_error(
@@ -291,10 +302,14 @@ async fn available_models(
     let channels = state.cache.channels(&state.db).await?;
     let mut result = BTreeSet::new();
     let mut has_wildcard = false;
+    // Parse the allowlist once instead of once per channel.
+    let allowed_channels = key.channel_ids();
+    let channel_allowed =
+        |channel_id: i64| allowed_channels.is_empty() || allowed_channels.contains(&channel_id);
 
     for prepared in channels.iter() {
         let channel = &prepared.channel;
-        if channel.enabled == 0 || !key.allows_channel(channel.id) {
+        if channel.enabled == 0 || !channel_allowed(channel.id) {
             continue;
         }
         if prepared.catalog.has_wildcard {
@@ -1498,6 +1513,32 @@ mod tests {
         assert_eq!(
             second["output"][0]["content"][0]["text"],
             json!("second answer")
+        );
+        let second_id = second["id"].as_str().expect("second response id");
+
+        // Stored requests must be the client's own turn, not the expanded
+        // history: otherwise every row repeats the whole conversation.
+        let stored_first: String =
+            sqlx::query_scalar("SELECT request_json FROM responses WHERE id = ?")
+                .bind(&first_id)
+                .fetch_one(&state.db)
+                .await
+                .expect("first stored request");
+        let stored_first: Value = serde_json::from_str(&stored_first).expect("json");
+        assert_eq!(stored_first["input"], json!("hello"));
+        assert!(stored_first.get("previous_response_id").is_none());
+
+        let stored_second: String =
+            sqlx::query_scalar("SELECT request_json FROM responses WHERE id = ?")
+                .bind(second_id)
+                .fetch_one(&state.db)
+                .await
+                .expect("second stored request");
+        let stored_second: Value = serde_json::from_str(&stored_second).expect("json");
+        assert_eq!(stored_second["input"], json!("and again"));
+        assert_eq!(
+            stored_second["previous_response_id"],
+            json!(first_id.as_str())
         );
 
         let requests = server.received_requests().await.expect("requests");

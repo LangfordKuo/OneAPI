@@ -33,15 +33,30 @@ impl SseParser {
         let mut buffer = std::mem::take(&mut self.buffer);
         let mut frames = Vec::new();
         let mut start = 0usize;
-        while let Some(relative) = buffer[start..].iter().position(|byte| *byte == b'\n') {
+        while start < buffer.len() {
+            // LF, CRLF and bare CR all terminate a line. A CR in the last byte
+            // may be the first half of a CRLF split across chunks, so it stays
+            // in the buffer until the next push or `finish`.
+            let Some(relative) = buffer[start..]
+                .iter()
+                .position(|byte| *byte == b'\n' || *byte == b'\r')
+            else {
+                break;
+            };
             let position = start + relative;
-            let mut line_end = position;
-            if line_end > start && buffer[line_end - 1] == b'\r' {
-                line_end -= 1;
+            let line_end = position;
+            let mut next = position + 1;
+            if buffer[position] == b'\r' {
+                if next == buffer.len() {
+                    break;
+                }
+                if buffer[next] == b'\n' {
+                    next += 1;
+                }
             }
-            self.raw.extend_from_slice(&buffer[start..=position]);
+            self.raw.extend_from_slice(&buffer[start..next]);
             self.process_line(&buffer[start..line_end], &mut frames);
-            start = position + 1;
+            start = next;
         }
 
         // Compact once per chunk instead of draining the front for every line.
@@ -53,10 +68,12 @@ impl SseParser {
         frames
     }
 
-    /// Bytes of a partially received frame. Callers use this to bound the
-    /// memory an upstream can pin by never terminating a line.
+    /// Bytes of the frame that is still being received. This includes the
+    /// complete lines already parsed into `data`/`raw`, not just the current
+    /// partial line: an upstream can otherwise pin memory by sending an endless
+    /// run of `data:` lines without the terminating blank line.
     pub fn buffered_len(&self) -> usize {
-        self.buffer.len()
+        self.buffer.len() + self.raw.len()
     }
 
     /// Flush a final frame when an upstream closes without a trailing blank line.
@@ -163,5 +180,54 @@ mod tests {
         let frames = parser.finish();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, "[DONE]");
+    }
+
+    #[test]
+    fn parses_bare_cr_line_endings() {
+        let mut parser = SseParser::new();
+        // The final CR is held because it could still be the first half of a
+        // CRLF; the next write resolves it as the blank terminator.
+        assert!(parser
+            .push(b"event: content_block_delta\rdata: {\"type\":\"text_delta\"}\r\r")
+            .is_empty());
+        let frames = parser.push(b": keep-alive\r\n");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].event.as_deref(), Some("content_block_delta"));
+        assert_eq!(frames[0].data, "{\"type\":\"text_delta\"}");
+    }
+
+    #[test]
+    fn holds_a_cr_at_the_chunk_boundary_until_the_next_push() {
+        let mut parser = SseParser::new();
+        assert!(parser.push(b"data: hello\r").is_empty());
+        // The CR could have been the first half of CRLF; the line is only
+        // committed once the next byte arrives.
+        let frames = parser.push(b"\n\r\n");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, "hello");
+    }
+
+    #[test]
+    fn finish_terminates_a_trailing_bare_cr() {
+        let mut parser = SseParser::new();
+        assert!(parser.push(b"data: tail\r").is_empty());
+        let frames = parser.finish();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, "tail");
+    }
+
+    #[test]
+    fn buffered_len_counts_complete_lines_of_an_unfinished_frame() {
+        let mut parser = SseParser::new();
+        for _ in 0..1_000 {
+            assert!(parser.push(b"data: 0123456789\n").is_empty());
+        }
+        // The old implementation only reported the partial last line (0 here),
+        // which let a never-terminated frame grow without bound.
+        assert_eq!(parser.buffered_len(), b"data: 0123456789\n".len() * 1_000);
+
+        let frames = parser.push(b"\n");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(parser.buffered_len(), 0);
     }
 }

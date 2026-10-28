@@ -8,6 +8,9 @@ pub const MAX_STORED_BYTES: usize = 10 * 1024 * 1024;
 /// sent upstream, so it needs its own ceiling independent of per-response size.
 const MAX_EXPANDED_ITEMS: usize = 2_000;
 const MAX_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum number of prior turns walked for one request. Every link is an
+/// indexed lookup, so a pathological chain must not turn into unbounded work.
+const MAX_CHAIN_LINKS: usize = 256;
 
 pub enum ExpandError {
     Invalid(String),
@@ -18,6 +21,13 @@ pub fn new_response_id() -> String {
     format!("resp_{}", Uuid::new_v4().simple())
 }
 
+/// Rebuild the full conversation from the stored chain.
+///
+/// Each stored request holds only the client's own turn (plus the
+/// `previous_response_id` that preceded it). Walking the chain backwards keeps
+/// per-row storage O(1) instead of repeating the whole history on every turn.
+/// Rows written by older versions contain the already-expanded history and no
+/// `previous_response_id`, so they terminate the walk and still work.
 pub async fn expand_previous(
     state: &AppState,
     api_key_id: i64,
@@ -31,50 +41,66 @@ pub async fn expand_previous(
         return Ok(body);
     };
 
-    let stored = models::response::get(&state.db, &previous_id, api_key_id)
-        .await
-        .map_err(ExpandError::Database)?
-        .ok_or_else(|| {
-            ExpandError::Invalid(format!(
-                "previous_response_id `{previous_id}` was not found or was not stored"
-            ))
-        })?;
+    let mut chain: Vec<(Value, Value)> = Vec::new();
+    let mut cursor = previous_id;
+    let mut stored_bytes = 0usize;
+    loop {
+        if chain.len() >= MAX_CHAIN_LINKS {
+            return Err(ExpandError::Invalid(format!(
+                "previous_response_id chain exceeds {MAX_CHAIN_LINKS} turns"
+            )));
+        }
 
-    if stored.request_json.len() + stored.response_json.len() > MAX_EXPANDED_BYTES {
+        let stored = models::response::get(&state.db, &cursor, api_key_id)
+            .await
+            .map_err(ExpandError::Database)?
+            .ok_or_else(|| {
+                ExpandError::Invalid(format!(
+                    "previous_response_id `{cursor}` was not found or was not stored"
+                ))
+            })?;
+
+        stored_bytes = stored_bytes
+            .saturating_add(stored.request_json.len())
+            .saturating_add(stored.response_json.len());
+        if stored_bytes > MAX_EXPANDED_BYTES {
+            return Err(ExpandError::Invalid(
+                "stored conversation history exceeds the expanded size limit".to_string(),
+            ));
+        }
+
+        let request: Value = serde_json::from_str(&stored.request_json)
+            .map_err(|_| ExpandError::Invalid("stored previous request is invalid".to_string()))?;
+        let response: Value = serde_json::from_str(&stored.response_json)
+            .map_err(|_| ExpandError::Invalid("stored previous response is invalid".to_string()))?;
+        let parent = request
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        chain.push((request, response));
+        match parent {
+            Some(parent) => cursor = parent,
+            None => break,
+        }
+    }
+
+    let current_input = body.get("input").cloned();
+    let current_bytes = serde_json::to_string(&current_input)
+        .map(|value| value.len())
+        .unwrap_or(0);
+    if stored_bytes.saturating_add(current_bytes) > MAX_EXPANDED_BYTES {
         return Err(ExpandError::Invalid(
-            "stored conversation history exceeds the expanded size limit".to_string(),
+            "expanded conversation exceeds the size limit".to_string(),
         ));
     }
 
-    let previous_request: Value = serde_json::from_str(&stored.request_json)
-        .map_err(|_| ExpandError::Invalid("stored previous request is invalid".to_string()))?;
-    let previous_response: Value = serde_json::from_str(&stored.response_json)
-        .map_err(|_| ExpandError::Invalid("stored previous response is invalid".to_string()))?;
-
-    let mut input = normalize_input(previous_request.get("input"));
-    if let Some(output) = previous_response.get("output").and_then(Value::as_array) {
-        for item in output {
-            if item.get("type").and_then(Value::as_str) == Some("reasoning") {
-                continue;
-            }
-            input.push(item.clone());
-        }
-    }
-    input.extend(normalize_input(body.get("input")));
-
+    let input = build_expanded_input(&chain, current_input.as_ref());
     if input.len() > MAX_EXPANDED_ITEMS {
         return Err(ExpandError::Invalid(format!(
             "expanded conversation has {} items; the limit is {MAX_EXPANDED_ITEMS}",
             input.len()
         )));
-    }
-    let expanded_bytes = serde_json::to_string(&input)
-        .map(|value| value.len())
-        .unwrap_or(0);
-    if expanded_bytes > MAX_EXPANDED_BYTES {
-        return Err(ExpandError::Invalid(
-            "expanded conversation exceeds the size limit".to_string(),
-        ));
     }
 
     let object = body
@@ -84,6 +110,26 @@ pub async fn expand_previous(
     object.remove("previous_response_id");
 
     Ok(body)
+}
+
+/// Concatenate stored turns (newest first, as loaded) and the current input in
+/// chronological order, dropping reasoning items because they cannot be
+/// replayed without an upstream id.
+fn build_expanded_input(chain: &[(Value, Value)], current: Option<&Value>) -> Vec<Value> {
+    let mut input = Vec::new();
+    for (request, response) in chain.iter().rev() {
+        input.extend(normalize_input(request.get("input")));
+        if let Some(output) = response.get("output").and_then(Value::as_array) {
+            for item in output {
+                if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                    continue;
+                }
+                input.push(item.clone());
+            }
+        }
+    }
+    input.extend(normalize_input(current));
+    input
 }
 
 fn normalize_input(value: Option<&Value>) -> Vec<Value> {
@@ -160,4 +206,48 @@ pub async fn get(
 
 pub async fn delete(state: &AppState, api_key_id: i64, id: &str) -> sqlx::Result<bool> {
     models::response::delete(&state.db, id, api_key_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::build_expanded_input;
+
+    #[test]
+    fn rebuilds_history_in_chronological_order() {
+        // The chain is loaded newest-first; expansion must replay it oldest-first.
+        let turn1_request = json!({"input": "first"});
+        let turn1_response = json!({"output": [
+            {"type": "reasoning", "id": "rs_1"},
+            {"type": "message", "role": "assistant", "content": "one"},
+        ]});
+        let turn2_request =
+            json!({"input": [{"type": "message", "role": "user", "content": "second"}]});
+        let turn2_response =
+            json!({"output": [{"type": "message", "role": "assistant", "content": "two"}]});
+        let chain = vec![
+            (turn2_request, turn2_response),
+            (turn1_request, turn1_response),
+        ];
+
+        let input = build_expanded_input(&chain, Some(&json!("third")));
+
+        // turn1 input + turn1 output (reasoning dropped) + turn2 input +
+        // turn2 output + current input.
+        assert_eq!(input.len(), 5);
+        assert_eq!(input[0]["content"][0]["text"], "first");
+        assert_eq!(input[1]["content"], "one");
+        assert_eq!(input[2]["content"], "second");
+        assert_eq!(input[3]["content"], "two");
+        assert_eq!(input[4]["content"][0]["text"], "third");
+    }
+
+    #[test]
+    fn empty_chain_only_contains_the_current_input() {
+        let input = build_expanded_input(&[], Some(&json!("only")));
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["content"][0]["text"], "only");
+        assert!(build_expanded_input(&[], None).is_empty());
+    }
 }

@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use rand::Rng;
 
@@ -10,19 +13,32 @@ use crate::{
     protocol::Protocol,
 };
 
+/// A routable channel. It holds the shared prepared channel and an index into
+/// its protocol configs, so selecting a candidate does not clone the channel
+/// row or its parsed configuration.
 #[derive(Debug, Clone)]
 pub struct Candidate {
-    pub channel: Channel,
+    prepared: Arc<PreparedChannel>,
     pub upstream_model: String,
     pub upstream_kind: String,
-    pub upstream_config: ProtocolConfig,
+    config_index: usize,
+}
+
+impl Candidate {
+    pub fn channel(&self) -> &Channel {
+        &self.prepared.channel
+    }
+
+    pub fn upstream_config(&self) -> &ProtocolConfig {
+        self.prepared.config_at(self.config_index)
+    }
 }
 
 /// Pick candidate channels for one request. Only channels that match the
-/// requested model and the API key's channel allowlist are cloned; the cached
-/// channel list itself is shared.
+/// requested model and the API key's channel allowlist are considered; the
+/// cached channel list itself is shared.
 pub fn candidates(
-    channels: &[PreparedChannel],
+    channels: &[Arc<PreparedChannel>],
     health: &HashMap<i64, ChannelHealth>,
     model: &str,
     inbound: Protocol,
@@ -30,6 +46,8 @@ pub fn candidates(
 ) -> Vec<Candidate> {
     let now = now_ms();
     let inbound_kind = channel::kind_for_protocol(inbound.as_str());
+    let allowed_channels: Option<HashSet<i64>> =
+        (!allowed_channel_ids.is_empty()).then(|| allowed_channel_ids.iter().copied().collect());
     let mut grouped: HashMap<i64, Vec<(Candidate, i64)>> = HashMap::new();
 
     for prepared in channels {
@@ -37,7 +55,10 @@ pub fn candidates(
         if channel.enabled == 0 {
             continue;
         }
-        if !allowed_channel_ids.is_empty() && !allowed_channel_ids.contains(&channel.id) {
+        if allowed_channels
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&channel.id))
+        {
             continue;
         }
         // The in-process overlay is newer than the cached row after a failure.
@@ -52,11 +73,11 @@ pub fn candidates(
             continue;
         }
 
-        let Some(route) = prepared.resolve_route(inbound_kind) else {
+        let Some((upstream_kind, config_index)) = prepared.resolve_route_ref(inbound_kind) else {
             continue;
         };
-        if !route
-            .config
+        let config = prepared.config_at(config_index);
+        if !config
             .models
             .iter()
             .any(|item| item == "*" || item == model)
@@ -64,8 +85,7 @@ pub fn candidates(
             continue;
         }
 
-        let upstream_model = route
-            .config
+        let upstream_model = config
             .model_mapping
             .get(model)
             .cloned()
@@ -74,10 +94,10 @@ pub fn candidates(
         let weight = channel.weight.max(1);
         grouped.entry(channel.priority).or_default().push((
             Candidate {
-                channel: channel.clone(),
+                prepared: prepared.clone(),
                 upstream_model,
-                upstream_kind: route.upstream_kind,
-                upstream_config: route.config,
+                upstream_kind: upstream_kind.to_string(),
+                config_index,
             },
             weight,
         ));

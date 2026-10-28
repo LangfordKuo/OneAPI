@@ -28,11 +28,6 @@ impl ApiKey {
         serde_json::from_str(&self.allowed_models).unwrap_or_default()
     }
 
-    pub fn allows_channel(&self, channel_id: i64) -> bool {
-        let ids = self.channel_ids();
-        ids.is_empty() || ids.contains(&channel_id)
-    }
-
     pub fn allows_model(&self, model: &str) -> bool {
         let models = self.model_names();
         models.is_empty() || models.iter().any(|item| item == "*" || item == model)
