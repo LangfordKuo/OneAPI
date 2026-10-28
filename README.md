@@ -50,7 +50,7 @@ docker compose up -d --build
 从 [Releases](https://github.com/LangfordKuo/OneAPI/releases) 下载对应平台的压缩包并解压：
 
 ```bash
-tar xzf oneapi-v0.1.9-linux-amd64.tar.gz
+tar xzf oneapi-v0.1.10-linux-amd64.tar.gz
 ONEAPI_DATA_DIR=./data ./oneapi serve
 ```
 
@@ -84,6 +84,8 @@ ONEAPI_DATA_DIR=./data ./oneapi serve
 | `ONEAPI_LOG_LEVEL` | 日志级别 | `info` |
 | `ONEAPI_LOG_JSON` | 设为 `1` 输出 JSON 日志 | 关闭 |
 | `ONEAPI_DATABASE_URL` | 显式指定 SQLite URL | 数据目录内的 `oneapi.db` |
+| `ONEAPI_DB_POOL_SIZE` | SQLite 连接池上限（1–64） | `5` |
+| `ONEAPI_UPDATE_API_BASE` | 覆盖在线更新元数据地址，必须为 HTTPS | GitHub API |
 
 管理后台的「设置」页可以指定从哪个请求头读取真实客户端 IP，例如 Cloudflare 的 `CF-Connecting-IP`、反向代理的 `X-Forwarded-For` 或 `X-Real-IP`。该地址用于登录失败限速。留空时默认读取 `X-Forwarded-For`，但只对来自回环或内网地址（同机反代、Docker/Kubernetes 网络、Cloudflare Tunnel）的请求生效；显式填写任意请求头后视为管理员已确认可信，会直接采用，不再看对端地址——这适用于 CDN 从公网地址直接回源 `3000` 端口的部署。显式配置时请确保源站端口只接受 CDN/反向代理访问，否则直接访问的客户端可以伪造该头绕过登录限速。头缺失或值无法解析时仍回退 TCP 对端地址。
 
@@ -94,3 +96,5 @@ ONEAPI_DATA_DIR=./data ./oneapi serve
 ### 数据与升级
 
 数据目录中的 `oneapi.db`、`master.key` 和 `.env` 需要持久化。升级时保留同一数据目录，替换镜像或二进制后重启即可，数据库迁移会在启动时自动执行。
+
+在线更新默认信任「GitHub 账号 + HTTPS」：只从本仓库的 latest Release 下载资产，要求同源 `SHA256SUMS` 精确匹配，所有请求和重定向都必须是 HTTPS。`ONEAPI_UPDATE_API_BASE` 可覆盖 Release 元数据地址（必须为 HTTPS），这等于把更新信任完全委托给该端点；当前版本没有二进制签名校验，对供应链安全要求更高的部署应关闭自动更新、固定镜像摘要或自行校验发布产物。容器内默认拒绝自更新，仅测试时可设置 `ONEAPI_ALLOW_SELF_UPDATE=1`。

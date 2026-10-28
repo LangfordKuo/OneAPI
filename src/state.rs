@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
     time::{Duration, Instant},
@@ -15,7 +15,7 @@ use crate::{
     gateway::usage::UsageWriter,
     metrics::LiveMetrics,
     models::{
-        channel::{self, Channel, PreparedChannel},
+        channel::{self, Channel, ChannelHealth, PreparedChannel},
         now_ms,
         setting::GatewayDefaults,
     },
@@ -31,6 +31,10 @@ const CACHE_TTL: Duration = Duration::from_secs(30);
 #[derive(Debug, Default)]
 pub struct RuntimeCache {
     channels: RwLock<Option<(Instant, Arc<Vec<PreparedChannel>>)>>,
+    /// Routing overrides written by failure accounting. They are layered over
+    /// the cached channel rows so a single failure does not force a full
+    /// reload and re-parse of every channel.
+    health: RwLock<HashMap<i64, (Instant, ChannelHealth)>>,
     defaults: RwLock<Option<(Instant, GatewayDefaults)>>,
     site_domain: RwLock<Option<(Instant, String)>>,
     site_name: RwLock<Option<(Instant, String)>>,
@@ -49,11 +53,17 @@ impl RuntimeCache {
             }
         }
 
+        let reload_started = Instant::now();
         let channels = crate::models::channel::list(db).await?;
         let prepared: Arc<Vec<PreparedChannel>> =
             Arc::new(channels.into_iter().map(PreparedChannel::new).collect());
         if let Ok(mut guard) = self.channels.write() {
             *guard = Some((Instant::now(), prepared.clone()));
+        }
+        // Rows read above include every failure recorded before this reload
+        // started; overrides recorded later are newer than the snapshot.
+        if let Ok(mut health) = self.health.write() {
+            health.retain(|_, (recorded_at, _)| *recorded_at > reload_started);
         }
         Ok(prepared)
     }
@@ -81,6 +91,36 @@ impl RuntimeCache {
         if let Ok(mut guard) = self.channels.write() {
             *guard = None;
         }
+        // Admin edits make the database authoritative again.
+        if let Ok(mut health) = self.health.write() {
+            health.clear();
+        }
+    }
+
+    pub fn record_channel_failure(&self, channel_id: i64, health: ChannelHealth) {
+        if let Ok(mut guard) = self.health.write() {
+            guard.insert(channel_id, (Instant::now(), health));
+        }
+    }
+
+    pub fn record_channel_success(&self, channel_id: i64) {
+        if let Ok(mut guard) = self.health.write() {
+            guard.remove(&channel_id);
+        }
+    }
+
+    /// Snapshot for the routing hot path. Only failed channels have entries, so
+    /// this is small even with many configured channels.
+    pub fn channel_health(&self) -> HashMap<i64, ChannelHealth> {
+        self.health
+            .read()
+            .map(|guard| {
+                guard
+                    .iter()
+                    .map(|(id, (_, health))| (*id, *health))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn invalidate_defaults(&self) {
@@ -239,11 +279,14 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Persist a failed attempt and drop the cached channel list so the next
-    /// request observes the new cooldown immediately.
+    /// Persist a failed attempt and update only this channel's routing view.
+    /// Reloading the whole channel list on every failure turns an outage into
+    /// a database and parsing storm, so the health overlay is authoritative
+    /// until the row is reloaded or the channel succeeds again.
     pub async fn mark_channel_failure(&self, channel_id: i64, message: &str) {
         match channel::mark_failure(&self.db, channel_id, message, now_ms()).await {
-            Ok(()) => self.cache.invalidate_channels(),
+            Ok(Some(health)) => self.cache.record_channel_failure(channel_id, health),
+            Ok(None) => {}
             Err(error) => tracing::warn!(
                 channel_id,
                 error = %error,
@@ -253,10 +296,10 @@ impl AppState {
     }
 
     /// Clear failure state after a success. Healthy channels do not change a
-    /// row and therefore do not invalidate the cache.
+    /// row and therefore do not touch the overlay.
     pub async fn mark_channel_success(&self, channel_id: i64) {
         match channel::mark_success(&self.db, channel_id).await {
-            Ok(true) => self.cache.invalidate_channels(),
+            Ok(true) => self.cache.record_channel_success(channel_id),
             Ok(false) => {}
             Err(error) => tracing::warn!(
                 channel_id,

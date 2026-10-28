@@ -4,7 +4,7 @@ use rand::Rng;
 
 use crate::{
     models::{
-        channel::{self, Channel, PreparedChannel, ProtocolConfig},
+        channel::{self, Channel, ChannelHealth, PreparedChannel, ProtocolConfig},
         now_ms,
     },
     protocol::Protocol,
@@ -23,6 +23,7 @@ pub struct Candidate {
 /// channel list itself is shared.
 pub fn candidates(
     channels: &[PreparedChannel],
+    health: &HashMap<i64, ChannelHealth>,
     model: &str,
     inbound: Protocol,
     allowed_channel_ids: &[i64],
@@ -39,8 +40,12 @@ pub fn candidates(
         if !allowed_channel_ids.is_empty() && !allowed_channel_ids.contains(&channel.id) {
             continue;
         }
-        if channel
-            .disabled_until
+        // The in-process overlay is newer than the cached row after a failure.
+        let disabled_until = health
+            .get(&channel.id)
+            .map(|health| health.disabled_until)
+            .unwrap_or(channel.disabled_until);
+        if disabled_until
             .map(|disabled_until| disabled_until > now)
             .unwrap_or(false)
         {

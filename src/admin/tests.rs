@@ -1549,3 +1549,45 @@ async fn channel_weight_is_bounded() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn channel_failures_do_not_reload_the_channel_cache() {
+    let (_temp, state) = test_state().await;
+    let channel_id = seed_channel(&state, "http://127.0.0.1:9").await;
+
+    let before = state.cache.channels(&state.db).await.expect("channels");
+    state.mark_channel_failure(channel_id, "boom").await;
+    let after = state.cache.channels(&state.db).await.expect("channels");
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "a failure must not invalidate the prepared channel list"
+    );
+
+    // The first failure only records the error; the channel stays routable.
+    let health = state.cache.channel_health();
+    assert_eq!(health[&channel_id].consecutive_failures, 1);
+    let candidates = crate::gateway::select::candidates(
+        &after,
+        &health,
+        "gpt-test",
+        crate::protocol::Protocol::Chat,
+        &[],
+    );
+    assert_eq!(candidates.len(), 1);
+
+    // The second failure enters cooldown; the overlay hides it immediately.
+    state.mark_channel_failure(channel_id, "boom").await;
+    let health = state.cache.channel_health();
+    assert!(health[&channel_id].disabled_until.unwrap_or_default() > now_ms());
+    let candidates = crate::gateway::select::candidates(
+        &after,
+        &health,
+        "gpt-test",
+        crate::protocol::Protocol::Chat,
+        &[],
+    );
+    assert!(candidates.is_empty());
+
+    state.mark_channel_success(channel_id).await;
+    assert!(state.cache.channel_health().is_empty());
+}

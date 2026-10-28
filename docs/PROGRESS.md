@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-28
-- 当前阶段：v0.1.9 已发布（审查优化批次 1–5，`main`）
+- 当前阶段：v0.1.10 已发布（审查优化收尾，`main`）
 - 当前分支：`main`
-- 最近发布：`v0.1.9`
+- 最近发布：`v0.1.10`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -209,6 +209,15 @@
 - 设置页渠道表单改为多选协议，并显示当前可选的转换目标；自定义请求头与模型映射仍由整个渠道共享。
 - `count_tokens` 只在渠道原生支持 Anthropic 时转发，否则保持原有字符估算。
 - 验证：新增 4 个协议选择单元测试、2 个网关集成测试（原生匹配不转换、缺失协议走 fallback）与 1 个渠道 CRUD 测试；108 个测试通过。
+
+## v0.1.10 发布记录
+
+- 版本号从 `0.1.9` 升至 `0.1.10`，完成优化计划剩余项 P1-8、P2-6、P2-8、P3-8；P1-6（密钥派生 v2）按决定不处理。
+- P1-8：流式 Responses 的 `response.completed` 终帧延后到落库之后再发送；超过 10MB 或落库失败时终帧改写为 `store:false`，客户端看到的 `store` 与后续 GET 一致。新增 11MiB 流式响应的集成测试。
+- P2-6：渠道失败改为更新进程内健康覆盖层（`RuntimeCache.health`），不再每次失败都失效并重载全部渠道；冷却、半开探测与 30 秒 TTL 行为保持不变，新增 `Arc::ptr_eq` 回归测试。
+- P2-8：非流式响应改为字节级读取与解析；同协议直接透传上游字节，Responses 注入字段后只序列化一次，去掉 `String` 中间层和整棵 JSON clone。
+- P3-8：更新客户端强制 HTTPS 且最多 5 跳、拒绝降级；`ONEAPI_UPDATE_API_BASE` 必须为 HTTPS；写入前校验资产名不能逃逸 updates 目录；README 补充更新信任模型。
+- 验证：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（156 个测试）全部通过。
 
 ## v0.1.9 发布记录
 
