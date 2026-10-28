@@ -595,7 +595,18 @@ mod tests {
         assert_eq!(channel, Some(channel_id));
         assert_eq!(prompt, Some(10));
         assert_eq!(completion, Some(5));
-        assert!(state.live.snapshot().global_tok_s > 0.0);
+
+        // The rate reports the last completed one-second bucket, so give the
+        // current second a chance to roll over before checking it.
+        let mut rate = 0.0;
+        for _ in 0..30 {
+            rate = state.live.snapshot().global_tok_s;
+            if rate > 0.0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(rate > 0.0);
     }
 
     #[tokio::test]

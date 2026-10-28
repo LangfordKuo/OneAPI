@@ -1,27 +1,40 @@
-import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Loader2, Plus, Send, Trash2 } from 'lucide-react';
+import { useState } from 'react';
+import { api } from '@/api/client';
+import { readSse } from '@/api/sse';
+import type { ModelsOutput, ProtocolName } from '@/api/types';
+import { CodeBlock } from '@/components/common/code-block';
+import { EmptyState } from '@/components/common/empty-state';
+import { Field } from '@/components/common/field';
+import { PageHeader } from '@/components/common/page-header';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import {
-  Alert,
-  AutoComplete,
-  Button,
   Card,
-  Col,
-  Descriptions,
-  Empty,
-  Input,
-  InputNumber,
-  Row,
-  Segmented,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import {
   Select,
-  Space,
-  Switch,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
+import {
   Tabs,
-  Tag,
-  Typography,
-} from 'antd';
-import { api } from '../api/client';
-import { readSse } from '../api/sse';
-import type { ModelsOutput, ProtocolName } from '../api/types';
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from '@/components/ui/tabs';
+import { Textarea } from '@/components/ui/textarea';
+import { formatLatency } from '@/lib/format';
+import { cn } from '@/lib/utils';
 
 interface MessageDraft {
   id: number;
@@ -68,20 +81,34 @@ const EMPTY_RESULT: PlaygroundResult = {
   error: null,
 };
 
-const PROTOCOL_OPTIONS = [
+const PROTOCOL_OPTIONS: Array<{ label: string; value: ProtocolName }> = [
   { label: 'Chat', value: 'chat' },
   { label: 'Responses', value: 'responses' },
   { label: 'Anthropic', value: 'anthropic' },
 ];
 
-function mergeUsage(acc: PlaygroundResult, usage: Record<string, unknown> | null | undefined) {
+const ROLE_OPTIONS = [
+  { value: 'user', label: 'User' },
+  { value: 'assistant', label: 'Assistant' },
+];
+
+function mergeUsage(
+  acc: PlaygroundResult,
+  usage: Record<string, unknown> | null | undefined,
+) {
   if (!usage) {
     return;
   }
-  const input = (usage.input_tokens ?? usage.prompt_tokens) as number | undefined;
-  const output = (usage.output_tokens ?? usage.completion_tokens) as number | undefined;
+  const input = (usage.input_tokens ?? usage.prompt_tokens) as
+    | number
+    | undefined;
+  const output = (usage.output_tokens ?? usage.completion_tokens) as
+    | number
+    | undefined;
   const total = (usage.total_tokens ??
-    (input != null && output != null ? input + output : undefined)) as number | undefined;
+    (input != null && output != null
+      ? input + output
+      : undefined)) as number | undefined;
 
   if (input == null && output == null && total == null) {
     return;
@@ -128,7 +155,9 @@ function applyEvent(
   acc: PlaygroundResult,
 ) {
   if (protocol === 'chat') {
-    const choices = payload.choices as Array<Record<string, unknown>> | undefined;
+    const choices = payload.choices as
+      | Array<Record<string, unknown>>
+      | undefined;
     const choice = choices?.[0];
     const delta = choice?.delta as Record<string, unknown> | undefined;
     if (typeof delta?.content === 'string') {
@@ -156,7 +185,8 @@ function applyEvent(
     }
     const error = payload.error as Record<string, unknown> | undefined;
     if (error) {
-      acc.error = typeof error.message === 'string' ? error.message : '上游返回错误';
+      acc.error =
+        typeof error.message === 'string' ? error.message : '上游返回错误';
     }
     return;
   }
@@ -166,10 +196,13 @@ function applyEvent(
     if (type === 'message_start') {
       const message = payload.message as Record<string, unknown> | undefined;
       acc.model = typeof message?.model === 'string' ? message.model : acc.model;
-      acc.responseId = typeof message?.id === 'string' ? message.id : acc.responseId;
+      acc.responseId =
+        typeof message?.id === 'string' ? message.id : acc.responseId;
       mergeUsage(acc, message?.usage as Record<string, unknown> | undefined);
     } else if (type === 'content_block_start') {
-      const block = payload.content_block as Record<string, unknown> | undefined;
+      const block = payload.content_block as
+        | Record<string, unknown>
+        | undefined;
       const index = Number(payload.index ?? 0);
       if (block?.type === 'tool_use') {
         const tool = ensureTool(acc, `block-${index}`);
@@ -181,9 +214,15 @@ function applyEvent(
       const index = Number(payload.index ?? 0);
       if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
         acc.text += delta.text;
-      } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+      } else if (
+        delta?.type === 'thinking_delta' &&
+        typeof delta.thinking === 'string'
+      ) {
         acc.reasoning += delta.thinking;
-      } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+      } else if (
+        delta?.type === 'input_json_delta' &&
+        typeof delta.partial_json === 'string'
+      ) {
         ensureTool(acc, `block-${index}`).arguments += delta.partial_json;
       }
     } else if (type === 'message_delta') {
@@ -194,7 +233,8 @@ function applyEvent(
       mergeUsage(acc, payload.usage as Record<string, unknown> | undefined);
     } else if (type === 'error') {
       const error = payload.error as Record<string, unknown> | undefined;
-      acc.error = typeof error?.message === 'string' ? error.message : '上游返回错误';
+      acc.error =
+        typeof error?.message === 'string' ? error.message : '上游返回错误';
     }
     return;
   }
@@ -203,8 +243,12 @@ function applyEvent(
   if (type === 'response.created') {
     const response = payload.response as Record<string, unknown> | undefined;
     acc.model = typeof response?.model === 'string' ? response.model : acc.model;
-    acc.responseId = typeof response?.id === 'string' ? response.id : acc.responseId;
-  } else if (type === 'response.output_text.delta' && typeof payload.delta === 'string') {
+    acc.responseId =
+      typeof response?.id === 'string' ? response.id : acc.responseId;
+  } else if (
+    type === 'response.output_text.delta' &&
+    typeof payload.delta === 'string'
+  ) {
     acc.text += payload.delta;
   } else if (
     type === 'response.reasoning_summary_text.delta' &&
@@ -214,7 +258,10 @@ function applyEvent(
   } else if (type === 'response.output_item.added') {
     const item = payload.item as Record<string, unknown> | undefined;
     if (item?.type === 'function_call') {
-      const tool = ensureTool(acc, String(item.id ?? payload.output_index ?? ''));
+      const tool = ensureTool(
+        acc,
+        String(item.id ?? payload.output_index ?? ''),
+      );
       tool.id = typeof item.call_id === 'string' ? item.call_id : '';
       tool.name = typeof item.name === 'string' ? item.name : '';
     }
@@ -224,16 +271,22 @@ function applyEvent(
   ) {
     const key = String(payload.item_id ?? `item-${payload.output_index ?? 0}`);
     ensureTool(acc, key).arguments += payload.delta;
-  } else if (type === 'response.completed' || type === 'response.incomplete') {
+  } else if (
+    type === 'response.completed' ||
+    type === 'response.incomplete'
+  ) {
     const response = payload.response as Record<string, unknown> | undefined;
-    acc.stopReason = typeof response?.status === 'string' ? response.status : acc.stopReason;
+    acc.stopReason =
+      typeof response?.status === 'string' ? response.status : acc.stopReason;
     mergeUsage(acc, response?.usage as Record<string, unknown> | undefined);
   } else if (type === 'response.failed') {
     const response = payload.response as Record<string, unknown> | undefined;
     const error = response?.error as Record<string, unknown> | undefined;
-    acc.error = typeof error?.message === 'string' ? error.message : '上游返回错误';
+    acc.error =
+      typeof error?.message === 'string' ? error.message : '上游返回错误';
   } else if (type === 'error') {
-    acc.error = typeof payload.message === 'string' ? payload.message : '上游返回错误';
+    acc.error =
+      typeof payload.message === 'string' ? payload.message : '上游返回错误';
   }
 }
 
@@ -245,7 +298,9 @@ function applyComplete(
   if (protocol === 'chat') {
     acc.model = typeof payload.model === 'string' ? payload.model : null;
     acc.responseId = typeof payload.id === 'string' ? payload.id : null;
-    const choices = payload.choices as Array<Record<string, unknown>> | undefined;
+    const choices = payload.choices as
+      | Array<Record<string, unknown>>
+      | undefined;
     const choice = choices?.[0];
     const message = choice?.message as Record<string, unknown> | undefined;
     if (typeof message?.content === 'string') {
@@ -276,11 +331,16 @@ function applyComplete(
   if (protocol === 'anthropic') {
     acc.model = typeof payload.model === 'string' ? payload.model : null;
     acc.responseId = typeof payload.id === 'string' ? payload.id : null;
-    const content = payload.content as Array<Record<string, unknown>> | undefined;
+    const content = payload.content as
+      | Array<Record<string, unknown>>
+      | undefined;
     for (const block of content ?? []) {
       if (block.type === 'text' && typeof block.text === 'string') {
         acc.text += block.text;
-      } else if (block.type === 'thinking' && typeof block.thinking === 'string') {
+      } else if (
+        block.type === 'thinking' &&
+        typeof block.thinking === 'string'
+      ) {
         acc.reasoning += block.thinking;
       } else if (block.type === 'tool_use') {
         acc.tools.push({
@@ -300,17 +360,23 @@ function applyComplete(
 
   acc.model = typeof payload.model === 'string' ? payload.model : null;
   acc.responseId = typeof payload.id === 'string' ? payload.id : null;
-  const output = payload.output as Array<Record<string, unknown>> | undefined;
+  const output = payload.output as
+    | Array<Record<string, unknown>>
+    | undefined;
   for (const item of output ?? []) {
     if (item.type === 'message') {
-      const content = item.content as Array<Record<string, unknown>> | undefined;
+      const content = item.content as
+        | Array<Record<string, unknown>>
+        | undefined;
       for (const part of content ?? []) {
         if (part.type === 'output_text' && typeof part.text === 'string') {
           acc.text += part.text;
         }
       }
     } else if (item.type === 'reasoning') {
-      const summary = item.summary as Array<Record<string, unknown>> | undefined;
+      const summary = item.summary as
+        | Array<Record<string, unknown>>
+        | undefined;
       for (const part of summary ?? []) {
         if (typeof part.text === 'string') {
           acc.reasoning += part.text;
@@ -339,6 +405,17 @@ function prettyArguments(value: string): string {
   }
 }
 
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 space-y-0.5">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="truncate text-sm" title={value}>
+        {value}
+      </p>
+    </div>
+  );
+}
+
 export default function Playground() {
   const [protocol, setProtocol] = useState<ProtocolName>('chat');
   const [model, setModel] = useState<string>();
@@ -359,13 +436,15 @@ export default function Playground() {
   });
   const effectiveModel = model ?? modelsQuery.data?.models[0];
 
-  const updateMessage = (id: number, patch: Partial<MessageDraft>) => {
+  function updateMessage(id: number, patch: Partial<MessageDraft>) {
     setMessages((previous) =>
-      previous.map((message) => (message.id === id ? { ...message, ...patch } : message)),
+      previous.map((message) =>
+        message.id === id ? { ...message, ...patch } : message,
+      ),
     );
-  };
+  }
 
-  const buildRequest = (): Record<string, unknown> => {
+  function buildRequest(): Record<string, unknown> {
     const filled = messages
       .map((message) => ({ ...message, content: message.content.trim() }))
       .filter((message) => message.content.length > 0);
@@ -376,9 +455,17 @@ export default function Playground() {
         chatMessages.push({ role: 'system', content: system });
       }
       chatMessages.push(
-        ...filled.map((message) => ({ role: message.role, content: message.content })),
+        ...filled.map((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
       );
-      return { protocol: 'chat', model: effectiveModel, stream: streaming, messages: chatMessages };
+      return {
+        protocol: 'chat',
+        model: effectiveModel,
+        stream: streaming,
+        messages: chatMessages,
+      };
     }
 
     if (protocol === 'responses') {
@@ -392,7 +479,8 @@ export default function Playground() {
           role: message.role,
           content: [
             {
-              type: message.role === 'user' ? 'input_text' : 'output_text',
+              type:
+                message.role === 'user' ? 'input_text' : 'output_text',
               text: message.content,
             },
           ],
@@ -406,11 +494,14 @@ export default function Playground() {
       stream: streaming,
       max_tokens: maxTokens,
       system: system.trim() || undefined,
-      messages: filled.map((message) => ({ role: message.role, content: message.content })),
+      messages: filled.map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
     };
-  };
+  }
 
-  const run = async () => {
+  async function run() {
     if (!effectiveModel) {
       setResult({ ...EMPTY_RESULT, error: '请选择模型' });
       return;
@@ -437,7 +528,9 @@ export default function Playground() {
       if (!response.ok) {
         let message = `HTTP ${response.status}`;
         try {
-          const body = (await response.json()) as { error?: { message?: string } };
+          const body = (await response.json()) as {
+            error?: { message?: string };
+          };
           message = body.error?.message ?? message;
         } catch {
           // Keep the status text.
@@ -465,7 +558,10 @@ export default function Playground() {
             continue;
           }
           applyEvent(protocol, event.event, payload, acc);
-          if (!firstToken && (acc.text || acc.reasoning || acc.tools.length > 0)) {
+          if (
+            !firstToken &&
+            (acc.text || acc.reasoning || acc.tools.length > 0)
+          ) {
             firstToken = true;
             setFirstTokenMs(Math.round(performance.now() - started));
           }
@@ -483,202 +579,323 @@ export default function Playground() {
       setElapsedMs(Math.round(performance.now() - started));
       setRunning(false);
     }
-  };
+  }
 
   return (
-    <Row gutter={[16, 16]}>
-      <Col xs={24} xl={11}>
-        <Card title="请求配置" size="small">
-          <Space direction="vertical" style={{ width: '100%' }} size="middle">
-            <Segmented
-              block
-              value={protocol}
-              options={PROTOCOL_OPTIONS}
-              onChange={(value) => setProtocol(value as ProtocolName)}
-            />
-            <AutoComplete
-              placeholder="选择或输入模型"
-              value={effectiveModel}
-              options={(modelsQuery.data?.models ?? []).map((item) => ({
-                value: item,
-                label: item,
-              }))}
-              onChange={(value) => setModel(value)}
-              style={{ width: '100%' }}
-            />
-            <Space>
-              <Typography.Text>流式</Typography.Text>
-              <Switch checked={streaming} onChange={setStreaming} />
-              {protocol === 'anthropic' ? (
-                <>
-                  <Typography.Text>max_tokens</Typography.Text>
-                  <InputNumber
-                    min={1}
-                    max={200_000}
-                    value={maxTokens}
-                    onChange={(value) => setMaxTokens(Number(value ?? 4096))}
-                  />
-                </>
-              ) : null}
-            </Space>
-            <Input.TextArea
-              placeholder="System / instructions（可选）"
-              autoSize={{ minRows: 2, maxRows: 5 }}
-              value={system}
-              onChange={(event) => setSystem(event.target.value)}
-            />
-          </Space>
-        </Card>
+    <>
+      <PageHeader
+        title="Playground"
+        description="用同一份配置直接测试三种入站协议，查看协议转换与上游路由结果。"
+        actions={
+          <Badge variant="outline" className="font-normal text-muted-foreground">
+            请求会计入日志
+          </Badge>
+        }
+      />
 
-        <Card
-          title="消息"
-          size="small"
-          style={{ marginTop: 16 }}
-          extra={
-            <Button
-              size="small"
-              onClick={() =>
-                setMessages((previous) => [
-                  ...previous,
-                  { id: Date.now(), role: 'assistant', content: '' },
-                ])
-              }
-            >
-              添加消息
-            </Button>
-          }
-        >
-          <Space direction="vertical" style={{ width: '100%' }} size="middle">
-            {messages.map((message) => (
-              <Space.Compact key={message.id} style={{ width: '100%', alignItems: 'flex-start' }}>
-                <Select
-                  value={message.role}
-                  style={{ width: 110 }}
-                  options={[
-                    { value: 'user', label: 'User' },
-                    { value: 'assistant', label: 'Assistant' },
-                  ]}
-                  onChange={(value) => updateMessage(message.id, { role: value })}
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>请求配置</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1">
+                {PROTOCOL_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => setProtocol(option.value)}
+                    className={cn(
+                      'rounded-md px-2 py-1.5 text-sm font-medium transition-colors',
+                      protocol === option.value
+                        ? 'bg-background text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+
+              <Field label="模型" htmlFor="playground-model">
+                <Input
+                  id="playground-model"
+                  list="playground-models"
+                  value={effectiveModel ?? ''}
+                  onChange={(event) => setModel(event.target.value)}
+                  placeholder="选择或输入模型"
+                  className="font-mono"
                 />
-                <Input.TextArea
-                  autoSize={{ minRows: 2, maxRows: 8 }}
-                  value={message.content}
-                  onChange={(event) =>
-                    updateMessage(message.id, { content: event.target.value })
-                  }
+                <datalist id="playground-models">
+                  {(modelsQuery.data?.models ?? []).map((item) => (
+                    <option key={item} value={item} />
+                  ))}
+                </datalist>
+              </Field>
+
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <Switch
+                    checked={streaming}
+                    onCheckedChange={setStreaming}
+                    id="playground-stream"
+                  />
+                  <label
+                    htmlFor="playground-stream"
+                    className="text-sm font-medium"
+                  >
+                    流式
+                  </label>
+                </div>
+                {protocol === 'anthropic' ? (
+                  <div className="flex items-center gap-2">
+                    <label
+                      htmlFor="playground-maxtokens"
+                      className="text-sm font-medium"
+                    >
+                      max_tokens
+                    </label>
+                    <Input
+                      id="playground-maxtokens"
+                      type="number"
+                      min={1}
+                      max={200_000}
+                      value={maxTokens}
+                      onChange={(event) =>
+                        setMaxTokens(Number(event.target.value) || 4096)
+                      }
+                      className="w-28"
+                    />
+                  </div>
+                ) : null}
+              </div>
+
+              <Field
+                label="System / instructions（可选）"
+                htmlFor="playground-system"
+              >
+                <Textarea
+                  id="playground-system"
+                  value={system}
+                  onChange={(event) => setSystem(event.target.value)}
+                  placeholder="你是一个乐于助人的助手。"
+                  rows={3}
+                  className="max-h-40"
                 />
+              </Field>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>消息</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {messages.map((message) => (
+                <div
+                  key={message.id}
+                  className="flex flex-col gap-2 rounded-lg border p-2 sm:flex-row sm:items-start"
+                >
+                  <Select
+                    items={ROLE_OPTIONS}
+                    value={message.role}
+                    onValueChange={(value) =>
+                      updateMessage(message.id, {
+                        role: value as MessageDraft['role'],
+                      })
+                    }
+                  >
+                    <SelectTrigger size="sm" className="w-full sm:w-[118px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="user">User</SelectItem>
+                      <SelectItem value="assistant">Assistant</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Textarea
+                    value={message.content}
+                    onChange={(event) =>
+                      updateMessage(message.id, {
+                        content: event.target.value,
+                      })
+                    }
+                    placeholder="输入消息内容"
+                    rows={3}
+                    className="min-h-20 flex-1"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="text-destructive hover:text-destructive"
+                    disabled={messages.length <= 1}
+                    onClick={() =>
+                      setMessages((previous) =>
+                        previous.filter((item) => item.id !== message.id),
+                      )
+                    }
+                    title="删除消息"
+                  >
+                    <Trash2 />
+                  </Button>
+                </div>
+              ))}
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                 <Button
-                  danger
-                  disabled={messages.length <= 1}
+                  type="button"
+                  variant="outline"
+                  size="sm"
                   onClick={() =>
-                    setMessages((previous) =>
-                      previous.filter((item) => item.id !== message.id),
-                    )
+                    setMessages((previous) => [
+                      ...previous,
+                      {
+                        id: Date.now(),
+                        role: 'assistant',
+                        content: '',
+                      },
+                    ])
                   }
                 >
-                  删除
+                  <Plus />
+                  添加消息
                 </Button>
-              </Space.Compact>
-            ))}
-            <Button type="primary" block loading={running} onClick={() => void run()}>
-              发送
-            </Button>
-          </Space>
-        </Card>
-      </Col>
-
-      <Col xs={24} xl={13}>
-        <Card title="响应" size="small">
-          {result.error ? (
-            <Alert type="error" showIcon message="请求失败" description={result.error} />
-          ) : null}
-
-          <Descriptions column={2} size="small" style={{ marginTop: result.error ? 16 : 0 }}>
-            <Descriptions.Item label="渠道">{result.channel ?? '-'}</Descriptions.Item>
-            <Descriptions.Item label="上游模型">
-              {result.upstreamModel ?? '-'}
-            </Descriptions.Item>
-            <Descriptions.Item label="模型">{result.model ?? effectiveModel ?? '-'}</Descriptions.Item>
-            <Descriptions.Item label="结束原因">{result.stopReason ?? '-'}</Descriptions.Item>
-            <Descriptions.Item label="耗时">
-              {elapsedMs == null ? '-' : `${elapsedMs} ms`}
-            </Descriptions.Item>
-            <Descriptions.Item label="首 token">
-              {firstTokenMs == null ? '-' : `${firstTokenMs} ms`}
-            </Descriptions.Item>
-            {result.responseId ? (
-              <Descriptions.Item label="响应 ID" span={2}>
-                <Typography.Text copyable>{result.responseId}</Typography.Text>
-              </Descriptions.Item>
-            ) : null}
-          </Descriptions>
-
-          <Tabs
-            style={{ marginTop: 8 }}
-            items={[
-              {
-                key: 'text',
-                label: '文本',
-                children: result.text ? (
-                  <pre className="code-block">{result.text}</pre>
-                ) : (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无文本" />
-                ),
-              },
-              {
-                key: 'reasoning',
-                label: '推理',
-                children: result.reasoning ? (
-                  <pre className="code-block">{result.reasoning}</pre>
-                ) : (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无推理内容" />
-                ),
-              },
-              {
-                key: 'tools',
-                label: `工具调用 (${result.tools.length})`,
-                children:
-                  result.tools.length > 0 ? (
-                    <Space direction="vertical" style={{ width: '100%' }}>
-                      {result.tools.map((tool) => (
-                        <Card key={tool.key} size="small" type="inner">
-                          <Space>
-                            <Tag color="blue">{tool.name || 'function'}</Tag>
-                            <Typography.Text type="secondary">{tool.id || '-'}</Typography.Text>
-                          </Space>
-                          <pre className="code-block">
-                            {prettyArguments(tool.arguments) || '（无参数）'}
-                          </pre>
-                        </Card>
-                      ))}
-                    </Space>
+                <Button
+                  type="button"
+                  onClick={() => void run()}
+                  disabled={running}
+                >
+                  {running ? (
+                    <Loader2 className="animate-spin" />
                   ) : (
-                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有工具调用" />
-                  ),
-              },
-              {
-                key: 'usage',
-                label: '用量',
-                children: result.usage ? (
-                  <Descriptions column={1} size="small" bordered>
-                    <Descriptions.Item label="输入">
-                      {result.usage.input ?? '-'}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="输出">
-                      {result.usage.output ?? '-'}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="总计">
-                      {result.usage.total ?? '-'}
-                    </Descriptions.Item>
-                  </Descriptions>
+                    <Send />
+                  )}
+                  发送
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        <Card className="self-start">
+          <CardHeader>
+            <CardTitle>响应</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {result.error ? (
+              <Alert variant="destructive">
+                <AlertTitle>请求失败</AlertTitle>
+                <AlertDescription className="break-words">
+                  {result.error}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
+              <Stat label="渠道" value={result.channel ?? '-'} />
+              <Stat label="上游模型" value={result.upstreamModel ?? '-'} />
+              <Stat
+                label="模型"
+                value={result.model ?? effectiveModel ?? '-'}
+              />
+              <Stat label="结束原因" value={result.stopReason ?? '-'} />
+              <Stat
+                label="耗时"
+                value={elapsedMs == null ? '-' : formatLatency(elapsedMs)}
+              />
+              <Stat
+                label="首 token"
+                value={
+                  firstTokenMs == null ? '-' : formatLatency(firstTokenMs)
+                }
+              />
+              {result.responseId ? (
+                <div className="col-span-2 min-w-0 space-y-0.5 sm:col-span-3">
+                  <dt className="text-xs text-muted-foreground">响应 ID</dt>
+                  <dd className="truncate font-mono text-xs">
+                    {result.responseId}
+                  </dd>
+                </div>
+              ) : null}
+            </dl>
+
+            <Tabs defaultValue="text">
+              <TabsList className="w-full">
+                <TabsTrigger value="text">文本</TabsTrigger>
+                <TabsTrigger value="reasoning">推理</TabsTrigger>
+                <TabsTrigger value="tools">
+                  工具调用 ({result.tools.length})
+                </TabsTrigger>
+                <TabsTrigger value="usage">用量</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="text" className="pt-3">
+                {result.text ? (
+                  <CodeBlock>{result.text}</CodeBlock>
                 ) : (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无用量信息" />
-                ),
-              },
-            ]}
-          />
+                  <EmptyState title="暂无文本" />
+                )}
+              </TabsContent>
+
+              <TabsContent value="reasoning" className="pt-3">
+                {result.reasoning ? (
+                  <CodeBlock>{result.reasoning}</CodeBlock>
+                ) : (
+                  <EmptyState title="暂无推理内容" />
+                )}
+              </TabsContent>
+
+              <TabsContent value="tools" className="space-y-2 pt-3">
+                {result.tools.length > 0 ? (
+                  result.tools.map((tool) => (
+                    <div
+                      key={tool.key}
+                      className="space-y-2 rounded-lg border p-3"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">
+                          {tool.name || 'function'}
+                        </Badge>
+                        <span className="font-mono text-xs text-muted-foreground">
+                          {tool.id || '-'}
+                        </span>
+                      </div>
+                      <CodeBlock showCopy={false}>
+                        {prettyArguments(tool.arguments) || '（无参数）'}
+                      </CodeBlock>
+                    </div>
+                  ))
+                ) : (
+                  <EmptyState title="没有工具调用" />
+                )}
+              </TabsContent>
+
+              <TabsContent value="usage" className="pt-3">
+                {result.usage ? (
+                  <dl className="grid grid-cols-3 gap-3 rounded-lg border p-3">
+                    <Stat
+                      label="输入"
+                      value={String(result.usage.input ?? '-')}
+                    />
+                    <Stat
+                      label="输出"
+                      value={String(result.usage.output ?? '-')}
+                    />
+                    <Stat
+                      label="总计"
+                      value={String(result.usage.total ?? '-')}
+                    />
+                  </dl>
+                ) : (
+                  <EmptyState title="暂无用量信息" />
+                )}
+              </TabsContent>
+            </Tabs>
+          </CardContent>
         </Card>
-      </Col>
-    </Row>
+      </div>
+    </>
   );
 }

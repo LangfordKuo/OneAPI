@@ -25,7 +25,7 @@ use axum::{
 
 use crate::state::AppState;
 
-pub fn routes(trust_proxy: bool) -> Router<AppState> {
+pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
@@ -63,5 +63,5 @@ pub fn routes(trust_proxy: bool) -> Router<AppState> {
         .route("/api/metrics/stream", get(metrics::stream))
         .route("/api/update/check", get(update::check))
         .route("/api/update/apply", post(update::apply))
-        .layer(middleware::from_fn_with_state(trust_proxy, csrf::guard))
+        .layer(middleware::from_fn_with_state(state, csrf::guard))
 }

@@ -1,20 +1,20 @@
-import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  Alert,
-  Button,
-  ConfigProvider,
-  Layout,
-  Menu,
-  Space,
-  Spin,
-  Switch,
-  theme,
-  Typography,
-} from 'antd';
-import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { AlertCircle } from 'lucide-react';
+import { lazy, Suspense, type ReactNode } from 'react';
+import { Navigate, Route, Routes } from 'react-router-dom';
 import { api } from './api/client';
 import type { Admin, SetupStatus, SiteInfo } from './api/types';
+import { PageLoader } from './components/common/page-loader';
+import { AppShell } from './components/layout/app-shell';
+import { Alert, AlertDescription, AlertTitle } from './components/ui/alert';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from './components/ui/card';
+import { LiveMetricsProvider } from './hooks/useLiveMetrics';
 import Login from './pages/Login';
 import Setup from './pages/Setup';
 
@@ -25,33 +25,16 @@ const Logs = lazy(() => import('./pages/Logs'));
 const Playground = lazy(() => import('./pages/Playground'));
 const SettingsPage = lazy(() => import('./pages/Settings'));
 
-const { Content, Header, Sider } = Layout;
-
-const items = [
-  { key: '/', label: <Link to="/">仪表盘</Link> },
-  { key: '/channels', label: <Link to="/channels">渠道</Link> },
-  { key: '/keys', label: <Link to="/keys">API Keys</Link> },
-  { key: '/logs', label: <Link to="/logs">日志</Link> },
-  { key: '/playground', label: <Link to="/playground">Playground</Link> },
-  { key: '/settings', label: <Link to="/settings">设置</Link> },
-];
-
-function selectedKey(pathname: string) {
-  if (pathname === '/') {
-    return '/';
-  }
-
+function CenteredShell({ children }: { children: ReactNode }) {
   return (
-    items.find((item) => item.key !== '/' && pathname.startsWith(item.key))?.key ?? '/'
+    <div className="flex min-h-screen items-center justify-center p-6">
+      {children}
+    </div>
   );
 }
 
 export default function App() {
-  const location = useLocation();
   const queryClient = useQueryClient();
-  const [dark, setDark] = useState(
-    () => window.localStorage.getItem('oneapi-theme') === 'dark',
-  );
   const siteQuery = useQuery({
     queryKey: ['site'],
     queryFn: () => api.get<SiteInfo>('/api/site'),
@@ -70,15 +53,6 @@ export default function App() {
     enabled: setupQuery.data?.initialized === true,
   });
 
-  useEffect(() => {
-    window.localStorage.setItem('oneapi-theme', dark ? 'dark' : 'light');
-    document.body.style.background = dark ? '#000' : '';
-  }, [dark]);
-
-  useEffect(() => {
-    document.title = siteName;
-  }, [siteName]);
-
   const logout = useMutation({
     mutationFn: () => api.post('/api/auth/logout'),
     onSuccess: () => {
@@ -86,129 +60,83 @@ export default function App() {
     },
   });
 
-  const themed = (content: ReactNode) => (
-    <ConfigProvider
-      theme={{ algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm }}
-    >
-      {content}
-    </ConfigProvider>
-  );
-
   if (setupQuery.isLoading) {
-    return themed(
-      <div className="center-shell">
-        <Spin size="large" />
-      </div>,
-    );
+    return <PageLoader label="正在连接 OneAPI…" />;
   }
 
   if (setupQuery.isError) {
-    return themed(
-      <div className="center-shell">
-        <Alert
-          type="error"
-          showIcon
-          message="无法连接后端"
-          description={
-            setupQuery.error instanceof Error
-              ? setupQuery.error.message
-              : String(setupQuery.error)
-          }
-        />
-      </div>,
+    return (
+      <CenteredShell>
+        <Card className="w-full max-w-md">
+          <CardHeader>
+            <CardTitle>无法连接后端</CardTitle>
+            <CardDescription>请确认 OneAPI 服务正在运行。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Alert variant="destructive">
+              <AlertCircle />
+              <AlertTitle>连接失败</AlertTitle>
+              <AlertDescription>
+                {setupQuery.error instanceof Error
+                  ? setupQuery.error.message
+                  : String(setupQuery.error)}
+              </AlertDescription>
+            </Alert>
+          </CardContent>
+        </Card>
+      </CenteredShell>
     );
   }
 
   const setup = setupQuery.data;
   if (!setup) {
-    return themed(
-      <div className="center-shell">
-        <Spin size="large" />
-      </div>,
-    );
+    return <PageLoader label="正在读取初始化状态…" />;
   }
 
   if (!setup.initialized) {
-    return themed(
+    return (
       <Setup
         status={setup}
         siteName={siteName}
         onSuccess={() => window.location.assign('/')}
-      />,
+      />
     );
   }
 
   if (meQuery.isLoading) {
-    return themed(
-      <div className="center-shell">
-        <Spin size="large" />
-      </div>,
+    return <PageLoader label="正在验证会话…" />;
+  }
+
+  if (meQuery.isError || !meQuery.data) {
+    return (
+      <Login
+        siteName={siteName}
+        version={siteQuery.data?.version}
+        onSuccess={() => void meQuery.refetch()}
+      />
     );
   }
 
-  if (meQuery.isError) {
-    return themed(
-      <Login siteName={siteName} onSuccess={() => void meQuery.refetch()} />,
-    );
-  }
-
-  return themed(
-    <Layout style={{ minHeight: '100vh' }}>
-      <Sider theme={dark ? 'dark' : 'light'} width={220}>
-        <div style={{ padding: '20px 16px', fontSize: 18, fontWeight: 600 }}>
-          {siteName}
-        </div>
-        <Menu
-          mode="inline"
-          selectedKeys={[selectedKey(location.pathname)]}
-          items={items}
-          style={{ borderInlineEnd: 0 }}
-        />
-      </Sider>
-      <Layout>
-        <Header
-          style={{
-            alignItems: 'center',
-            background: dark ? '#141414' : '#fff',
-            display: 'flex',
-            justifyContent: 'space-between',
-            paddingInline: 24,
-          }}
-        >
-          <Typography.Text type="secondary">统一 AI API 网关</Typography.Text>
-          <Space>
-            <Switch
-              checked={dark}
-              checkedChildren="暗色"
-              unCheckedChildren="亮色"
-              onChange={setDark}
-            />
-            <Typography.Text>{meQuery.data?.username}</Typography.Text>
-            <Button size="small" onClick={() => logout.mutate()} loading={logout.isPending}>
-              退出
-            </Button>
-          </Space>
-        </Header>
-        <Content style={{ padding: 24 }}>
-          <Suspense
-            fallback={
-              <div className="center-shell">
-                <Spin size="large" />
-              </div>
-            }
-          >
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/channels" element={<Channels />} />
-              <Route path="/keys" element={<Keys />} />
-              <Route path="/logs" element={<Logs />} />
-              <Route path="/playground" element={<Playground />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </Suspense>
-        </Content>
-      </Layout>
-    </Layout>,
+  return (
+    <LiveMetricsProvider>
+      <AppShell
+        siteName={siteName}
+        version={siteQuery.data?.version}
+        username={meQuery.data.username}
+        onLogout={() => logout.mutate()}
+      >
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/channels" element={<Channels />} />
+            <Route path="/keys" element={<Keys />} />
+            <Route path="/logs" element={<Logs />} />
+            <Route path="/playground" element={<Playground />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
+      </AppShell>
+    </LiveMetricsProvider>
   );
 }

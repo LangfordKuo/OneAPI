@@ -1,5 +1,11 @@
-import { useEffect, useState } from 'react';
-import { readSse } from '../api/sse';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from 'react';
+import { readSse } from '@/api/sse';
 
 export interface LiveChannelRate {
   channel_id: number;
@@ -20,12 +26,14 @@ const EMPTY: LiveMetricsSnapshot = {
 
 const RECONNECT_DELAY_MS = 3000;
 
+const LiveMetricsContext = createContext<LiveMetricsSnapshot>(EMPTY);
+
 /**
- * Subscribes to /api/metrics/stream. Unlike EventSource this can observe the
- * HTTP status, so an expired session stops reconnecting instead of hammering
- * the endpoint forever.
+ * Subscribes once to /api/metrics/stream. Unlike EventSource this can observe
+ * the HTTP status, so an expired session stops reconnecting instead of
+ * hammering the endpoint forever.
  */
-export function useLiveMetrics(): LiveMetricsSnapshot {
+function useLiveMetricsStream(): LiveMetricsSnapshot {
   const [snapshot, setSnapshot] = useState<LiveMetricsSnapshot>(EMPTY);
 
   useEffect(() => {
@@ -78,4 +86,17 @@ export function useLiveMetrics(): LiveMetricsSnapshot {
   }, []);
 
   return snapshot;
+}
+
+export function LiveMetricsProvider({ children }: { children: ReactNode }) {
+  const snapshot = useLiveMetricsStream();
+  return (
+    <LiveMetricsContext.Provider value={snapshot}>
+      {children}
+    </LiveMetricsContext.Provider>
+  );
+}
+
+export function useLiveMetrics(): LiveMetricsSnapshot {
+  return useContext(LiveMetricsContext);
 }

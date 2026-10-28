@@ -211,6 +211,34 @@ async fn admin_put(
     )
 }
 
+async fn admin_put_with_origin(
+    router: axum::Router,
+    path: &str,
+    token: &str,
+    body: Value,
+    origin: &str,
+    host: &str,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("PUT")
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("cookie", format!("oneapi_session={token}"))
+        .header("origin", origin)
+        .header("host", host)
+        .body(Body::from(serde_json::to_vec(&body).expect("json")))
+        .expect("request");
+    let response = router.oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 async fn admin_post_with_client_ip(
     router: axum::Router,
     path: &str,
@@ -628,6 +656,57 @@ async fn client_ip_header_setting_is_validated_and_saved() {
 
     let (_, body) = admin_get(router, "/api/settings", &token).await;
     assert_eq!(body["client_ip_header"], json!("cf-connecting-ip"));
+}
+
+#[tokio::test]
+async fn site_domain_setting_is_normalized_and_relaxes_csrf_after_proxy() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let router = app::router(state.clone());
+
+    let (status, body) = admin_put(
+        router.clone(),
+        "/api/settings",
+        &token,
+        json!({"site_domain": "https://API.Example.com/dashboard"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["site_domain"], json!("api.example.com"));
+
+    let (status, _) = admin_put(
+        router.clone(),
+        "/api/settings",
+        &token,
+        json!({"site_domain": "not a domain"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The proxied Origin is accepted even though Host points at the backend.
+    let (status, body) = admin_put_with_origin(
+        router.clone(),
+        "/api/settings",
+        &token,
+        json!({}),
+        "https://api.example.com",
+        "127.0.0.1:3000",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["site_domain"], json!("api.example.com"));
+
+    // Any other Origin is still rejected.
+    let (status, _) = admin_put_with_origin(
+        router,
+        "/api/settings",
+        &token,
+        json!({}),
+        "https://evil.example.com",
+        "127.0.0.1:3000",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

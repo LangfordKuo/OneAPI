@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-28
-- 当前阶段：v0.1.5 已发布（日志 tok/s、渠道多协议与自动匹配，`main`）
+- 当前阶段：v0.1.6 已发布（shadcn/ui 前端重写、网站域名与 1 秒实时速度，`main`）
 - 当前分支：`main`
-- 最近发布：`v0.1.5`
+- 最近发布：`v0.1.6`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -19,9 +19,9 @@
 
 ## 当前状态
 
-- M0 已完成：Rust 后端、Vite + React + Ant Design 前端、SQLite 迁移、静态资源嵌入、健康检查、Makefile/Dockerfile 均已落地。
+- M0 已完成：Rust 后端、Vite + React + shadcn/ui 前端、SQLite 迁移、静态资源嵌入、健康检查、Makefile/Dockerfile 均已落地。
 - 环境：Rust 1.99.1；Node 24.22.1 / npm 11.19.1 位于 `/root/.local/share/vite-plus/bin`，Makefile 已自动把它加入 PATH。
-- 前端依赖：Vite 7.3.7、React 18.3.1、Ant Design 5.29.3、React Router 7.18.4、TanStack Query 5.105.0、@ant-design/plots 2.6.8。
+- 前端依赖：Vite 7.3.7、React 18.3.1、Tailwind CSS 4.3、shadcn/ui（base-nova / Base UI 1.9）、lucide-react、React Router 7.18.4、TanStack Query 5.105.0、Recharts 3.8、sonner、next-themes。
 - M1 已完成：管理员引导登录、HttpOnly Cookie 会话、上游 Key AES-256-GCM 加密、渠道 CRUD、API Key CRUD、设置接口，以及登录/渠道/Key/设置前端页面。
 - M2 已完成：统一 IR、三协议请求/响应编解码、同协议往返与跨协议转换。
 - M3 已完成：网关 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`；API Key 鉴权、渠道优先级/权重选择、失败重试与冷却、上游代理/自定义头/超时、用量日志、同协议透传与跨协议转换；后台渠道测试与模型拉取。
@@ -210,6 +210,14 @@
 - `count_tokens` 只在渠道原生支持 Anthropic 时转发，否则保持原有字符估算。
 - 验证：新增 4 个协议选择单元测试、2 个网关集成测试（原生匹配不转换、缺失协议走 fallback）与 1 个渠道 CRUD 测试；108 个测试通过。
 
+## v0.1.6 发布记录
+
+- 版本号从 `0.1.5` 升至 `0.1.6`，包含前端整体重写、网站域名设置与实时速度改造。
+- 前端移除 Ant Design 与 `@ant-design/plots`，改用 shadcn/ui（base-nova / Base UI）+ Tailwind CSS 4 + Recharts；安装、登录、仪表盘、渠道、Key、日志、Playground、设置全部重写，补齐移动端布局与暗色模式。
+- 设置页新增「网站域名」`site_domain`：反向代理未透传外部 Host 时，CSRF 校验额外接受该域名；Origin、Host 与配置值统一归一化为 `host[:port]`，忽略协议、路径与 80/443 默认端口。
+- 实时 tok/s 移除 10 秒滑动窗口，改为上一完整秒的 token 增量；流结束或空闲一秒后归零。
+- 验证：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test`（113 个测试）、`npm run typecheck`、`npm run lint`、`npm run build` 全部通过；Playwright 全流程与慢速流 SSE 实测通过。
+
 ## v0.1.5 发布记录
 
 - 版本号从 `0.1.4` 升至 `0.1.5`，包含日志每请求 tok/s 与渠道多协议。
@@ -269,6 +277,27 @@
 - 新增 `AppState::mark_channel_failure` / `mark_channel_success`：失败写入后立即失效渠道缓存，冷却不再受 30s 缓存 TTL 影响；健康渠道成功时不产生额外写放大。
 - 当所有候选渠道都处于探测占用状态时，网关返回 `503 channel_recovering`，避免把可恢复状态误报为 502。
 - 新增退避序列与探测闸门单测；验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（89 个测试）、`npm run lint`、`npm run build` 全部通过。
+
+## 前端重写（shadcn/ui，2026-10-28）
+
+- 移除 Ant Design 5、`@ant-design/icons` 与 `@ant-design/plots`，整套前端改用 shadcn/ui（base-nova，Base UI 原语）+ Tailwind CSS 4；主题变量集中在 `web/src/index.css`，暗色模式由 next-themes 的 class 策略驱动。
+- 重写应用外壳与全部页面：安装、登录、仪表盘、渠道、API Key、日志、Playground、设置；侧边栏移动端折叠为 Sheet，表格按断点隐藏次要列，图标按钮在窄屏省略文字。
+- 图表改用 Recharts（`DashboardCharts` 懒加载），构建分块调整为 react / query / charts。
+- 表单迁移为受控组件；渠道抽屉保留未保存配置的“测试连通性”和“拉取模型”；Base UI Select 统一通过 `items` 显示中文标签。
+- 修复迁移中暴露的交互问题：`Button` 改为 forwardRef 以配合 Base UI `render`；账户菜单 `MenuGroupLabel` 包进 `MenuGroup`；Sheet 宽度用 `data-[side=right]` 变体覆盖；CodeBlock 增加 `min-w-0` 避免长 Key 撑破对话框；toast 移至顶部居中避免遮挡抽屉关闭按钮；修改密码返回 401 时不再整页跳转并提示“当前密码不正确”。
+- 开发代理将 `Origin` 重写为后端地址，使 Vite 代理下的写请求通过 CSRF 同源校验。
+- 清理未使用的 calendar / popover / tooltip / separator 组件与 `react-day-picker`、`date-fns`、`clsx`、`tailwind-merge` 直接依赖（`cn` 已内置合并逻辑）。
+- 验证：`npm run typecheck`、`npm run lint`（0 error，4 个 react-refresh warning）、`npm run build` 通过；生产产物 `index` 258 kB（gzip 88 kB）、`charts` 381 kB（gzip 112 kB）、CSS 92 kB（gzip 15.5 kB）。
+- Playwright 全流程（本地后端 + mock 上游）：安装向导、登录、渠道创建/编辑/删除、Key 创建/启停、日志筛选与详情、Playground 流式回复、设置保存与密码错误提示、暗色模式、390px 移动端与导航抽屉均通过；控制台无运行时错误（仅登录前 `/api/auth/me` 的预期 401）。
+
+## 反向代理域名与实时速度（2026-10-28）
+
+- 新增设置项 `site_domain`（设置页「网站域名」）：后端把 Origin、Host 与配置值统一归一化为 `host[:port]`，忽略协议、路径和 80/443 默认端口；当 Origin 与请求 Host 不一致时，只要匹配配置域名即放行写请求。留空保持原有行为，仅校验 Host。
+- 域名保存时做校验与归一化，仅接受 ASCII 域名/IP（IPv6 用方括号）和合法端口；非法值返回 400。配置随 `RuntimeCache` 缓存 30 秒，设置更新后立即失效。
+- CSRF 中间件改为直接使用 `AppState`，以便读取数据库设置；`admin::routes` 接收 `AppState`。
+- 实时 tok/s 移除 10 秒滑动窗口：内存改为“当前秒 + 上一完整秒”两个计数桶，SSE 每次推送上一完整秒的 token 增量；流式结束或空闲一秒后归零。前端提示改为「最近 1 秒实测」。
+- 慢速流式实测（5 tok/s）：SSE 连续推送 `global_tok_s=5.0`、`channel 1 tok_s=5.0`，结束后 1 秒内回到 0；非流式请求的 token 会在完成后显示 1 秒。
+- 验证：`cargo fmt`、`cargo clippy --all-targets -D warnings`、`cargo test`（113 个测试）通过；设置页保存域名、代理 Origin 放行、恶意 Origin 拒绝均通过 curl/Playwright 实测；前端 `npm run typecheck`、`npm run lint`、`npm run build` 通过。
 
 ## AOCI 状态
 

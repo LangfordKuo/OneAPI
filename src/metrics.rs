@@ -1,16 +1,11 @@
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering},
-        Arc, Mutex, MutexGuard,
-    },
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use serde::Serialize;
 
 use crate::models::now_ms;
-
-const WINDOW_SECONDS: usize = 10;
 
 #[derive(Debug, Default)]
 pub struct LiveMetrics {
@@ -32,76 +27,82 @@ impl Default for Inner {
     }
 }
 
-/// Per-second buckets. Token increments are atomic so the hot path does not
-/// contend on the outer map lock; only bucket rollover takes a short lock.
-#[derive(Debug)]
+/// Instantaneous rate with one-second buckets. `rate(second)` reports the tokens
+/// counted in the most recently completed second (second - 1), without any
+/// sliding-window smoothing.
+#[derive(Debug, Default)]
 struct Window {
-    buckets: [AtomicU64; WINDOW_SECONDS],
-    index: AtomicUsize,
-    last_second: AtomicI64,
-    rollover: Mutex<()>,
+    bucket: Mutex<Bucket>,
 }
 
-impl Default for Window {
-    fn default() -> Self {
-        Self {
-            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
-            index: AtomicUsize::new(0),
-            last_second: AtomicI64::new(0),
-            rollover: Mutex::new(()),
+#[derive(Debug, Default)]
+struct Bucket {
+    current_second: i64,
+    current_tokens: u64,
+    previous_second: i64,
+    previous_tokens: u64,
+}
+
+impl Bucket {
+    /// Move the cursor to `second`, keeping the bucket that just completed.
+    /// Gaps reset the previous bucket because nothing was generated meanwhile.
+    fn advance(&mut self, second: i64) {
+        if second <= self.current_second {
+            return;
         }
+
+        if second == self.current_second + 1 && self.current_second != 0 {
+            self.previous_second = self.current_second;
+            self.previous_tokens = self.current_tokens;
+        } else {
+            self.previous_second = second - 1;
+            self.previous_tokens = 0;
+        }
+
+        self.current_second = second;
+        self.current_tokens = 0;
     }
 }
 
 impl Window {
-    fn rollover_lock(&self) -> MutexGuard<'_, ()> {
-        self.rollover
+    fn lock(&self) -> MutexGuard<'_, Bucket> {
+        self.bucket
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn refresh_locked(&self, second: i64) {
-        let last = self.last_second.load(Ordering::Relaxed);
-        if second < last {
-            for bucket in &self.buckets {
-                bucket.store(0, Ordering::Relaxed);
+    fn add(&self, second: i64, tokens: u64) {
+        let mut bucket = self.lock();
+        if second < bucket.current_second {
+            // A concurrent caller may still be in the second that just rolled
+            // over; keep those tokens attached to the completed bucket.
+            if second == bucket.previous_second {
+                bucket.previous_tokens = bucket.previous_tokens.saturating_add(tokens);
             }
-            self.index.store(0, Ordering::Relaxed);
-            self.last_second.store(second, Ordering::Relaxed);
             return;
         }
 
-        let steps = (second - last).min(WINDOW_SECONDS as i64) as usize;
-        let mut index = self.index.load(Ordering::Relaxed);
-        for _ in 0..steps {
-            index = (index + 1) % WINDOW_SECONDS;
-            self.buckets[index].store(0, Ordering::Relaxed);
-        }
-        self.index.store(index, Ordering::Relaxed);
-        self.last_second.store(second, Ordering::Relaxed);
-    }
-
-    fn add(&self, second: i64, tokens: u64) {
-        if self.last_second.load(Ordering::Relaxed) != second {
-            let _guard = self.rollover_lock();
-            if self.last_second.load(Ordering::Relaxed) != second {
-                self.refresh_locked(second);
-            }
-        }
-
-        let index = self.index.load(Ordering::Relaxed) % WINDOW_SECONDS;
-        self.buckets[index].fetch_add(tokens, Ordering::Relaxed);
+        bucket.advance(second);
+        bucket.current_tokens = bucket.current_tokens.saturating_add(tokens);
     }
 
     fn rate(&self, second: i64) -> f64 {
-        let _guard = self.rollover_lock();
-        self.refresh_locked(second);
-        let total: u64 = self
-            .buckets
-            .iter()
-            .map(|bucket| bucket.load(Ordering::Relaxed))
-            .sum();
-        total as f64 / WINDOW_SECONDS as f64
+        let mut bucket = self.lock();
+        bucket.advance(second);
+
+        if bucket.previous_second == second - 1 {
+            bucket.previous_tokens as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// A channel is idle only when neither the completed nor the active bucket
+    /// holds tokens. The active bucket matters because a stream that just
+    /// started has not completed its first second yet.
+    fn is_idle(&self) -> bool {
+        let bucket = self.lock();
+        bucket.previous_tokens == 0 && bucket.current_tokens == 0
     }
 }
 
@@ -147,7 +148,12 @@ impl LiveMetrics {
     }
 
     pub fn snapshot(&self) -> LiveSnapshot {
-        let second = now_ms() / 1000;
+        let mut snapshot = self.snapshot_at(now_ms() / 1000);
+        snapshot.timestamp = now_ms();
+        snapshot
+    }
+
+    fn snapshot_at(&self, second: i64) -> LiveSnapshot {
         let (global, channels) = {
             let inner = self.lock();
             let global = inner.global.clone();
@@ -168,7 +174,7 @@ impl LiveMetrics {
                     channel_id,
                     tok_s: round_one(rate),
                 });
-            } else {
+            } else if window.is_idle() {
                 stale.push(channel_id);
             }
         }
@@ -187,7 +193,7 @@ impl LiveMetrics {
         }
 
         LiveSnapshot {
-            timestamp: now_ms(),
+            timestamp: second * 1000,
             global_tok_s: round_one(global.rate(second)),
             channels: rates,
         }
@@ -203,26 +209,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reports_recent_channel_and_global_rates() {
+    fn reports_the_last_completed_second() {
         let metrics = LiveMetrics::default();
-        let now = now_ms() / 1000;
 
-        metrics.add_tokens_at(Some(7), 100, now);
-        let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.global_tok_s, 10.0);
+        metrics.add_tokens_at(Some(7), 100, 1_000);
+        // Tokens from the active second are not part of the rate yet.
+        assert_eq!(metrics.snapshot_at(1_000).global_tok_s, 0.0);
+
+        let snapshot = metrics.snapshot_at(1_001);
+        assert_eq!(snapshot.global_tok_s, 100.0);
         assert_eq!(snapshot.channels.len(), 1);
         assert_eq!(snapshot.channels[0].channel_id, 7);
-        assert_eq!(snapshot.channels[0].tok_s, 10.0);
+        assert_eq!(snapshot.channels[0].tok_s, 100.0);
+
+        metrics.add_tokens_at(Some(7), 40, 1_001);
+        assert_eq!(metrics.snapshot_at(1_001).global_tok_s, 100.0);
+        assert_eq!(metrics.snapshot_at(1_002).global_tok_s, 40.0);
     }
 
     #[test]
-    fn old_tokens_leave_the_window() {
+    fn drops_to_zero_after_an_idle_second() {
         let metrics = LiveMetrics::default();
-        let now = now_ms() / 1000;
 
-        metrics.add_tokens_at(Some(1), 100, now - (WINDOW_SECONDS as i64 + 5));
-        let snapshot = metrics.snapshot();
+        metrics.add_tokens_at(Some(1), 100, 1_000);
+        assert_eq!(metrics.snapshot_at(1_001).global_tok_s, 100.0);
+
+        let snapshot = metrics.snapshot_at(1_003);
         assert_eq!(snapshot.global_tok_s, 0.0);
         assert!(snapshot.channels.is_empty());
+    }
+
+    #[test]
+    fn late_tokens_stay_in_the_completed_second() {
+        let metrics = LiveMetrics::default();
+
+        metrics.add_tokens_at(Some(2), 30, 1_000);
+        metrics.add_tokens_at(Some(2), 70, 1_001);
+        // A caller that read the clock before rollover still lands in 1_000.
+        metrics.add_tokens_at(Some(2), 20, 1_000);
+
+        assert_eq!(metrics.snapshot_at(1_001).global_tok_s, 50.0);
     }
 }
