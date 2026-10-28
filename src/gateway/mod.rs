@@ -115,11 +115,17 @@ async fn count_tokens(
         }
 
         let channels = state.cache.channels(&state.db).await?;
+        let health = state.cache.channel_health();
         let allowed_channels = auth.key.channel_ids();
-        if let Some(candidate) =
-            select::candidates(&channels, model, Protocol::Anthropic, &allowed_channels)
-                .into_iter()
-                .find(|candidate| candidate.upstream_kind == "anthropic")
+        if let Some(candidate) = select::candidates(
+            &channels,
+            &health,
+            model,
+            Protocol::Anthropic,
+            &allowed_channels,
+        )
+        .into_iter()
+        .find(|candidate| candidate.upstream_kind == "anthropic")
         {
             let defaults = models::setting::GatewayDefaults::load(&state.db).await?;
             let mut request_body = body.clone();
@@ -1269,6 +1275,63 @@ mod tests {
             stored_body["output"][0]["content"][0]["text"],
             json!("streamed answer")
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_streamed_responses_report_store_false() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        // 11 MiB of text pushes the encoded final response past the 10 MiB
+        // persistence limit while keeping each upstream SSE frame small.
+        let chunk = "x".repeat(1024 * 1024);
+        let mut sse = String::with_capacity(12 * 1024 * 1024);
+        for _ in 0..11 {
+            sse.push_str(&format!(
+                "data: {{\"id\":\"chatcmpl-big\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-test\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{chunk}\"}},\"finish_reason\":null}}]}}\n\n"
+            ));
+        }
+        sse.push_str(
+            "data: {\"id\":\"chatcmpl-big\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":11,\"total_tokens\":12}}\n\n",
+        );
+        sse.push_str("data: [DONE]\n\n");
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+            .mount(&server)
+            .await;
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let router = app::router(state.clone());
+        let (status, body) = send_stream(
+            router,
+            "/v1/responses",
+            &key,
+            json!({"model": "gpt-test", "input": "hello", "stream": true}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("event: response.completed"));
+        assert!(
+            body.contains("\"store\":false"),
+            "an oversized response must not claim to be stored"
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM responses")
+            .fetch_one(&state.db)
+            .await
+            .expect("count");
+        assert_eq!(stored, 0);
     }
 
     #[tokio::test]

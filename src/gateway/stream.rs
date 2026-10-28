@@ -123,6 +123,8 @@ enum FrameOutcome {
     Ok,
     Disconnected,
     Failed(String, String),
+    /// Responses terminal frame(s) held back until persistence decides `store`.
+    Completed(Vec<Bytes>),
 }
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
@@ -276,6 +278,7 @@ async fn run(
     let mut client_disconnected = false;
     let mut stream_error: Option<(String, String)> = None;
     let mut synthesize_error = false;
+    let mut held_terminal: Option<Vec<Bytes>> = None;
 
     loop {
         let frame = if let Some(frame) = pending.pop_front() {
@@ -354,6 +357,10 @@ async fn run(
                 stream_error = Some(bounded_error(error_type, message));
                 break;
             }
+            FrameOutcome::Completed(held) => {
+                held_terminal = Some(held);
+                break;
+            }
         }
     }
 
@@ -364,10 +371,19 @@ async fn run(
                 let _ =
                     send_bytes(&tx, Bytes::from(frame.into_bytes()), &mut response_capture).await;
             }
-        } else if stream_error.is_none() {
+        } else if stream_error.is_none() && held_terminal.is_none() {
             let finish = decoder.finish();
             if let Some(encoder) = encoder.as_mut() {
                 for event in finish {
+                    if job.inbound == Protocol::Responses && matches!(&event, StreamEvent::Done) {
+                        let held: Vec<Bytes> = encoder
+                            .encode(&event)
+                            .into_iter()
+                            .map(|text| Bytes::from(text.into_bytes()))
+                            .collect();
+                        held_terminal = Some(held);
+                        continue;
+                    }
                     for text in encoder.encode(&event) {
                         if send_bytes(&tx, Bytes::from(text.into_bytes()), &mut response_capture)
                             .await
@@ -391,51 +407,26 @@ async fn run(
         }
     }
 
-    if job.inbound == Protocol::Responses
-        && job.store_response
-        && job.api_key_id.is_some()
-        && stream_error.is_none()
-    {
-        let final_response = if job.passthrough {
-            decoder.final_response()
-        } else {
-            encoder.as_ref().and_then(StreamEncoder::final_response)
-        };
-
-        if let Some(mut value) = final_response {
-            if let Some(object) = value.as_object_mut() {
-                object.insert(
-                    "id".into(),
-                    json!(job.response_id.clone().unwrap_or_default()),
-                );
-                object.insert("object".into(), json!("response"));
-                object.insert("store".into(), json!(true));
-                if !object.contains_key("created_at") {
-                    object.insert("created_at".into(), json!(chrono::Utc::now().timestamp()));
-                }
-            }
-
-            if let (Some(api_key_id), Some(request)) = (job.api_key_id, &job.stored_request) {
-                match responses_state::store(
-                    &job.state,
-                    api_key_id,
-                    &job.client_model,
-                    request,
-                    &value,
-                )
-                .await
-                {
-                    Ok(true) => {}
-                    Ok(false) => tracing::warn!(
-                        request_id = %job.request_id,
-                        "streamed response was too large to persist"
-                    ),
-                    Err(error) => tracing::warn!(
-                        error = %error,
-                        request_id = %job.request_id,
-                        "failed to persist Responses state"
-                    ),
-                }
+    if stream_error.is_none() {
+        if let Some(held) = held_terminal.take() {
+            if flush_responses_completion(
+                &job.state,
+                &job.request_id,
+                job.api_key_id,
+                &job.client_model,
+                job.response_id.as_deref(),
+                job.stored_request.as_ref(),
+                job.store_response,
+                job.passthrough,
+                &decoder,
+                encoder.as_ref(),
+                held,
+                &tx,
+                &mut response_capture,
+            )
+            .await
+            {
+                client_disconnected = true;
             }
         }
     }
@@ -528,6 +519,99 @@ async fn run(
     drop(tx);
 }
 
+/// Persist a held Responses terminal frame, then send it with a truthful
+/// `store` value. Returns whether the client disconnected while sending.
+#[allow(clippy::too_many_arguments)]
+async fn flush_responses_completion(
+    state: &AppState,
+    request_id: &str,
+    api_key_id: Option<i64>,
+    client_model: &str,
+    response_id: Option<&str>,
+    stored_request: Option<&Value>,
+    store_response: bool,
+    passthrough: bool,
+    decoder: &StreamDecoder,
+    encoder: Option<&StreamEncoder>,
+    held: Vec<Bytes>,
+    tx: &mpsc::Sender<Bytes>,
+    capture: &mut Vec<u8>,
+) -> bool {
+    let should_store = store_response && api_key_id.is_some();
+    let mut stored = false;
+
+    if should_store {
+        let final_response = if passthrough {
+            decoder.final_response()
+        } else {
+            encoder.and_then(StreamEncoder::final_response)
+        };
+
+        if let Some(mut value) = final_response {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("id".into(), json!(response_id.unwrap_or_default()));
+                object.insert("object".into(), json!("response"));
+                object.insert("store".into(), json!(true));
+                if !object.contains_key("created_at") {
+                    object.insert("created_at".into(), json!(chrono::Utc::now().timestamp()));
+                }
+            }
+
+            if let (Some(api_key_id), Some(request)) = (api_key_id, stored_request) {
+                stored =
+                    match responses_state::store(state, api_key_id, client_model, request, &value)
+                        .await
+                    {
+                        Ok(stored) => stored,
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                request_id = %request_id,
+                                "failed to persist Responses state"
+                            );
+                            false
+                        }
+                    };
+                if !stored {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        "streamed response was too large to persist"
+                    );
+                }
+            }
+        }
+    }
+
+    for bytes in held {
+        let bytes = if should_store && !stored {
+            rewrite_terminal_store(&bytes)
+        } else {
+            bytes
+        };
+        if send_bytes(tx, bytes, capture).await.is_err() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Re-emit a held Responses terminal frame with `store:false`. Only used when
+/// persistence was skipped, so the client is never told the object exists.
+fn rewrite_terminal_store(bytes: &Bytes) -> Bytes {
+    let mut parser = SseParser::new();
+    let mut frames = parser.push(bytes);
+    frames.extend(parser.finish());
+    if frames.is_empty() {
+        return bytes.clone();
+    }
+
+    let mut output = Vec::with_capacity(bytes.len());
+    for frame in &frames {
+        output.extend_from_slice(&rewrite_responses_frame(frame, None, Some(false)));
+    }
+    Bytes::from(output)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_frame(
     inbound: Protocol,
@@ -550,6 +634,7 @@ async fn process_frame(
 ) -> FrameOutcome {
     if passthrough {
         let mut observed_error = None;
+        let mut terminal = false;
         if let Ok(events) = decoder.decode(frame) {
             for event in events {
                 account_stream_tokens(live, channel_id, &event, pending_chars, estimated_tokens);
@@ -559,6 +644,7 @@ async fn process_frame(
                         error_type,
                         message,
                     } => observed_error = Some((error_type, message)),
+                    StreamEvent::Done => terminal = true,
                     _ => {}
                 }
             }
@@ -573,6 +659,12 @@ async fn process_frame(
         } else {
             Bytes::from(frame.raw.clone())
         };
+
+        // Defer the terminal Responses frame so `store` reflects whether the
+        // response was actually persisted.
+        if inbound == Protocol::Responses && terminal {
+            return FrameOutcome::Completed(vec![bytes]);
+        }
 
         if !bytes.is_empty() {
             if send_bytes(tx, bytes, capture).await.is_err() {
@@ -619,6 +711,17 @@ async fn process_frame(
             } => Some((error_type.clone(), message.clone())),
             _ => None,
         };
+
+        // Hold the terminal batch (block closes + `response.completed`) until
+        // the caller has attempted persistence.
+        if inbound == Protocol::Responses && matches!(&event, StreamEvent::Done) {
+            let held = encoder
+                .encode(&event)
+                .into_iter()
+                .map(|text| Bytes::from(text.into_bytes()))
+                .collect();
+            return FrameOutcome::Completed(held);
+        }
 
         for text in encoder.encode(&event) {
             if send_bytes(tx, Bytes::from(text.into_bytes()), capture)

@@ -103,6 +103,7 @@ async fn apply_inner(state: &AppState) -> Result<UpdateResult> {
         .asset_name
         .clone()
         .ok_or_else(|| anyhow!("this platform is not supported by the latest release"))?;
+    validate_asset_name(&asset_name)?;
     let asset_url = info
         .asset_url
         .clone()
@@ -179,12 +180,22 @@ fn client() -> Result<Client> {
     Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
         .user_agent(format!("OneAPI/{}", env!("CARGO_PKG_VERSION")))
+        // Release metadata and binaries are only trusted over TLS; `https_only`
+        // also rejects redirects that downgrade to plain HTTP.
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 || attempt.url().scheme() != "https" {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .context("failed to build update HTTP client")
 }
 
 async fn fetch_release(client: &Client, source: &str) -> Result<GithubRelease> {
-    let url = api_url(source);
+    let url = api_url(source)?;
     let response = client
         .get(&url)
         .header("Accept", "application/vnd.github+json")
@@ -207,19 +218,45 @@ async fn fetch_release(client: &Client, source: &str) -> Result<GithubRelease> {
         .context("failed to parse GitHub release metadata")
 }
 
-fn api_url(source: &str) -> String {
+fn api_url(source: &str) -> Result<String> {
     if let Ok(base) = std::env::var("ONEAPI_UPDATE_API_BASE") {
         if !base.trim().is_empty() {
-            return base;
+            return validate_api_base(&base);
         }
     }
 
     let github = format!("https://api.github.com/repos/{OWNER}/{REPO}/releases/latest");
-    if source == "ghproxy" {
+    Ok(if source == "ghproxy" {
         format!("{PROXY_PREFIX}{github}")
     } else {
         github
+    })
+}
+
+/// `ONEAPI_UPDATE_API_BASE` moves the entire update trust boundary to that
+/// endpoint, so it must not be plaintext.
+fn validate_api_base(base: &str) -> Result<String> {
+    let base = base.trim();
+    if !base.starts_with("https://") {
+        bail!("ONEAPI_UPDATE_API_BASE must start with https://");
     }
+    Ok(base.to_string())
+}
+
+/// Defense in depth: the asset name is generated from a semver tag and matched
+/// exactly against release metadata, but it is also used as a local file name.
+fn validate_asset_name(name: &str) -> Result<()> {
+    let invalid = name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.chars().any(char::is_control)
+        || Path::new(name).file_name().and_then(|part| part.to_str()) != Some(name);
+    if invalid {
+        bail!("refusing to use update asset name `{name}`");
+    }
+    Ok(())
 }
 
 fn maybe_proxy(source: &str, url: &str) -> String {
@@ -421,5 +458,24 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn update_api_base_requires_https() {
+        assert!(validate_api_base("https://mirror.example.com/api").is_ok());
+        assert!(validate_api_base("http://mirror.example.com/api").is_err());
+        assert!(validate_api_base("ftp://mirror.example.com/api").is_err());
+    }
+
+    #[test]
+    fn update_asset_names_cannot_escape_the_updates_directory() {
+        assert!(validate_asset_name("oneapi-v0.1.10-linux-amd64.tar.gz").is_ok());
+        assert!(validate_asset_name("../oneapi").is_err());
+        assert!(validate_asset_name("a/b").is_err());
+        assert!(validate_asset_name("a\\b").is_err());
+        assert!(validate_asset_name("").is_err());
+        assert!(validate_asset_name(".").is_err());
+        assert!(validate_asset_name("..").is_err());
+        assert!(validate_asset_name("bad\nname").is_err());
     }
 }

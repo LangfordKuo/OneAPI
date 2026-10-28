@@ -526,13 +526,26 @@ fn truncate_error(error: &str) -> String {
     truncated
 }
 
+/// Health fields a failed attempt changes, returned so the caller can update
+/// its in-process routing view without reloading every channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelHealth {
+    pub consecutive_failures: i64,
+    pub disabled_until: Option<i64>,
+}
+
 /// Record a failed attempt. Once a channel has failed twice in a row it enters
 /// cooldown; each further consecutive failure doubles the previous cooldown,
 /// capped at 30 minutes. A single failure only records the error so a transient
 /// upstream hiccup does not remove a channel from rotation.
-pub async fn mark_failure(pool: &SqlitePool, id: i64, error: &str, now: i64) -> sqlx::Result<()> {
+pub async fn mark_failure(
+    pool: &SqlitePool,
+    id: i64,
+    error: &str,
+    now: i64,
+) -> sqlx::Result<Option<ChannelHealth>> {
     let error = truncate_error(error);
-    sqlx::query(
+    let row = sqlx::query_as::<_, (i64, Option<i64>)>(
         "UPDATE channels SET
             consecutive_failures = consecutive_failures + 1,
             last_error = ?,
@@ -543,16 +556,22 @@ pub async fn mark_failure(pool: &SqlitePool, id: i64, error: &str, now: i64) -> 
                     ? + min(1800000, 60000 * (1 << min(consecutive_failures - 1, 5)))
                 ELSE disabled_until
             END
-         WHERE id = ?",
+         WHERE id = ?
+         RETURNING consecutive_failures, disabled_until",
     )
     .bind(&error)
     .bind(now)
     .bind(now)
     .bind(now)
     .bind(id)
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
-    Ok(())
+    Ok(
+        row.map(|(consecutive_failures, disabled_until)| ChannelHealth {
+            consecutive_failures,
+            disabled_until,
+        }),
+    )
 }
 
 /// Clear failure state after a successful attempt. Returns whether a row was

@@ -250,7 +250,14 @@ pub async fn proxy_with_identity(
     };
 
     let channels = state.cache.channels(&state.db).await?;
-    let candidates = select::candidates(&channels, &model, inbound, &identity.allowed_channel_ids);
+    let health = state.cache.channel_health();
+    let candidates = select::candidates(
+        &channels,
+        &health,
+        &model,
+        inbound,
+        &identity.allowed_channel_ids,
+    );
     if candidates.is_empty() {
         let message = "no channel available for this model";
         ctx.record(
@@ -444,8 +451,8 @@ pub async fn proxy_with_identity(
         };
 
         let status = response.status();
-        let text = match upstream::read_body_limited(response).await {
-            Ok(text) => text,
+        let body_bytes = match upstream::read_body_limited_bytes(response).await {
+            Ok(bytes) => bytes,
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_unreachable".to_string();
@@ -453,7 +460,7 @@ pub async fn proxy_with_identity(
                 continue;
             }
         };
-        let upstream_value = serde_json::from_str::<Value>(&text).ok();
+        let upstream_value = serde_json::from_slice::<Value>(&body_bytes).ok();
 
         if status.is_success() {
             state.mark_channel_success(channel.id).await;
@@ -467,7 +474,7 @@ pub async fn proxy_with_identity(
                     .unwrap_or_default();
 
                 if inbound == Protocol::Responses {
-                    client_json = upstream_value.clone();
+                    client_json = upstream_value;
                     if client_json.is_none() {
                         let message = "upstream returned a non-JSON response";
                         state.mark_channel_failure(channel.id, message).await;
@@ -566,7 +573,7 @@ pub async fn proxy_with_identity(
                 usage
             };
 
-            let (client_body, client_text) = if inbound == Protocol::Responses {
+            let (client_body, client_bytes) = if inbound == Protocol::Responses {
                 let mut value = client_json.unwrap_or(Value::Null);
                 if !value.is_object() {
                     let message = "failed to build a Responses response";
@@ -637,15 +644,18 @@ pub async fn proxy_with_identity(
                     }
                 }
 
-                let text = serde_json::to_string(&value)
-                    .map_err(|error| AppError::Internal(error.into()))?;
-                (Body::from(text.clone()), text)
+                let bytes = bytes::Bytes::from(
+                    serde_json::to_vec(&value).map_err(|error| AppError::Internal(error.into()))?,
+                );
+                (Body::from(bytes.clone()), bytes)
             } else if let Some(value) = client_json {
-                let text = serde_json::to_string(&value)
-                    .map_err(|error| AppError::Internal(error.into()))?;
-                (Body::from(text.clone()), text)
+                let bytes = bytes::Bytes::from(
+                    serde_json::to_vec(&value).map_err(|error| AppError::Internal(error.into()))?,
+                );
+                (Body::from(bytes.clone()), bytes)
             } else {
-                (Body::from(text.clone()), text)
+                // Same protocol: forward the upstream bytes unchanged.
+                (Body::from(body_bytes.clone()), body_bytes.clone())
             };
 
             // Some upstreams omit usage for converted or streaming-shaped
@@ -658,7 +668,7 @@ pub async fn proxy_with_identity(
             {
                 usage.fill_missing(
                     usage::estimate_request_tokens(&request_body),
-                    usage::estimate_text_tokens(&client_text),
+                    usage::estimate_bytes_tokens(&client_bytes),
                 );
             }
 
@@ -677,14 +687,17 @@ pub async fn proxy_with_identity(
             )
             .await;
 
-            store_request_detail(
-                state,
-                &request_id,
-                identity.api_key_id,
-                detail_request.as_deref(),
-                &client_text,
-            )
-            .await;
+            if detail_request.is_some() {
+                let response_text = String::from_utf8_lossy(&client_bytes);
+                store_request_detail(
+                    state,
+                    &request_id,
+                    identity.api_key_id,
+                    detail_request.as_deref(),
+                    &response_text,
+                )
+                .await;
+            }
 
             let response = Response::builder()
                 .status(status)
@@ -698,6 +711,7 @@ pub async fn proxy_with_identity(
             ));
         }
 
+        let text = String::from_utf8_lossy(&body_bytes);
         let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
         if is_retryable(status) {
             state.mark_channel_failure(channel.id, &message).await;

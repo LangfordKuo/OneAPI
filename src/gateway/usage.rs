@@ -319,6 +319,15 @@ pub fn estimate_text_tokens(text: &str) -> u64 {
     (text.chars().count() as u64).div_ceil(4)
 }
 
+/// Byte-oriented variant used on the response path: valid UTF-8 (all JSON
+/// responses) is counted without allocating an intermediate string.
+pub fn estimate_bytes_tokens(bytes: &[u8]) -> u64 {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => estimate_text_tokens(text),
+        Err(_) => estimate_text_tokens(&String::from_utf8_lossy(bytes)),
+    }
+}
+
 /// Approximate input token count for a request body. Only used when the
 /// upstream omits its usage block, so an unaccounted request can never be
 /// billed as zero tokens.
@@ -357,6 +366,8 @@ mod tests {
         assert_eq!(estimate_request_tokens(&body), 3);
         assert_eq!(estimate_text_tokens("12345678"), 2);
         assert_eq!(estimate_text_tokens(""), 0);
+        assert_eq!(estimate_bytes_tokens(b"12345678"), 2);
+        assert_eq!(estimate_bytes_tokens(&[0xff, 0xfe]), 1);
     }
 
     #[tokio::test]

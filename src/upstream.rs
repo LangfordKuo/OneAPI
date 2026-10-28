@@ -17,14 +17,17 @@ const CONNECT_TIMEOUT_SECS: u64 = 10;
 /// gateway ever parses the JSON.
 pub const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
-/// Read an upstream response body, refusing to buffer more than [`limit`]
-/// bytes. `Content-Length` is checked first and chunked responses are counted
-/// as they arrive.
-pub async fn read_body_limited(response: reqwest::Response) -> Result<String> {
-    read_body_limited_to(response, MAX_RESPONSE_BODY_BYTES).await
+/// Read an upstream response body as bytes, refusing to buffer more than
+/// [`limit`] bytes. `Content-Length` is checked first and chunked responses are
+/// counted as they arrive.
+pub async fn read_body_limited_bytes(response: reqwest::Response) -> Result<bytes::Bytes> {
+    read_body_limited_bytes_to(response, MAX_RESPONSE_BODY_BYTES).await
 }
 
-pub async fn read_body_limited_to(response: reqwest::Response, limit: usize) -> Result<String> {
+pub async fn read_body_limited_bytes_to(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<bytes::Bytes> {
     if let Some(length) = response.content_length() {
         if length > limit as u64 {
             return Err(anyhow!(
@@ -33,8 +36,12 @@ pub async fn read_body_limited_to(response: reqwest::Response, limit: usize) -> 
         }
     }
 
+    let capacity = response
+        .content_length()
+        .map(|length| length.min(limit as u64) as usize)
+        .unwrap_or(0);
     let mut stream = response.bytes_stream();
-    let mut buffer: Vec<u8> = Vec::new();
+    let mut buffer: Vec<u8> = Vec::with_capacity(capacity);
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("failed to read the upstream response body")?;
         if buffer.len().saturating_add(chunk.len()) > limit {
@@ -43,7 +50,19 @@ pub async fn read_body_limited_to(response: reqwest::Response, limit: usize) -> 
         buffer.extend_from_slice(&chunk);
     }
 
-    Ok(String::from_utf8_lossy(&buffer).into_owned())
+    Ok(bytes::Bytes::from(buffer))
+}
+
+/// Read an upstream response body, refusing to buffer more than [`limit`]
+/// bytes. `Content-Length` is checked first and chunked responses are counted
+/// as they arrive.
+pub async fn read_body_limited(response: reqwest::Response) -> Result<String> {
+    read_body_limited_to(response, MAX_RESPONSE_BODY_BYTES).await
+}
+
+pub async fn read_body_limited_to(response: reqwest::Response, limit: usize) -> Result<String> {
+    let bytes = read_body_limited_bytes_to(response, limit).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Client headers that are safe to forward to upstream providers. Authentication

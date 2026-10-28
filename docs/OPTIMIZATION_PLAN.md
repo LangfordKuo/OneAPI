@@ -1,6 +1,6 @@
 # OneAPI 优化计划（v0.1.8 审查后）
 
-- 状态：批次 1–5 已完成（2026-10-28）；P1-6、P1-8、P2-6、P2-8、P3-8 待单独评估
+- 状态：批次 1–5 与 P1-8、P2-6、P2-8、P3-8 已完成（v0.1.10）；P1-6 决定不处理
 - 审查基线：`v0.1.8` + 2026-10-28 已完成的审查修复
 - 关联文档：`docs/IMPLEMENTATION_PLAN.md`、`docs/PROGRESS.md`、`docs/REVIEW_PLAN.md`
 - 说明：`docs/REVIEW_PLAN.md` 是 v0.1.1 的历史计划（阶段 A–D 与 E3 已完成）。本文件只记录**当前仍未执行**的优化，完成后勾选并把结果回填 `docs/PROGRESS.md`。
@@ -105,6 +105,7 @@
 - 方案：派生改为 HKDF-SHA256（高熵 secret）或 Argon2id（低熵 secret），引入 `v2` 密文格式；解密时先按 `v2`，失败再按旧 SHA-256 兜底，启动后台/首次读取时逐步重加密。
 - 验收：旧数据目录仍可解密；新写入使用 `v2:`；错误 secret 仍解密失败；补单元测试。
 - 备注：涉及数据迁移与兼容，排期前先确认是否接受“旧格式长期双读”。
+- 状态：2026-10-28 决定不处理（用户确认保持现状；`ONEAPI_SECRET` 应使用高熵值）。
 
 ### [x] P1-7 短上游 Key 的掩码（S）
 
@@ -113,7 +114,7 @@
 - 方案：字符数 ≤4 时只返回 `••••`；更长时保留末 4 位。
 - 验收：`"abc"` → `••••`；`"sk-123456"` → `••••3456`。
 
-### [ ] P1-8 流式 Responses 的 `store` 一致性（M，需设计）
+### [x] P1-8 流式 Responses 的 `store` 一致性（M，需设计）
 
 - 现状：非流式已在落库被跳过时返回 `store:false`；流式在最终帧发出后才落库，超过 10MB 时客户端已看到 `store:true`，后续 GET 为 404。
 - 证据：`src/gateway/stream.rs::run` 的 Responses 落库块、`src/protocol/stream.rs::StreamEncoder::final_response`。
@@ -161,7 +162,7 @@
 - 方案：按 30 秒缓存该聚合结果，或复用 `RuntimeCache`。
 - 验收：模型列表请求的数据库读次数下降；新增/变更模型在 TTL 内可见。
 
-### [ ] P2-6 渠道失败时的缓存抖动（M）
+### [x] P2-6 渠道失败时的缓存抖动（M）
 
 - 现状：每次失败都 `invalidate_channels()`，下一请求重新 `SELECT` 并预解析全部渠道；故障期间是额外开销。
 - 证据：`src/state.rs::mark_channel_failure`、`src/state.rs::RuntimeCache`。
@@ -175,7 +176,7 @@
 - 方案：复用行缓冲或直接按字节处理 `event`/`data` 前缀，只有需要 `data` 时才构造 String。
 - 验收：基准测试吞吐提升；所有解析测试通过。
 
-### [ ] P2-8 大响应体的多次缓冲（S/M）
+### [x] P2-8 大响应体的多次缓冲（S/M）
 
 - 现状：非流式响应经历 `bytes` → `String` → `serde_json::Value`，64MB 上限下峰值约 2–3 倍。
 - 证据：`src/upstream.rs::read_body_limited`、`src/gateway/execute.rs` 的成功路径。
@@ -242,7 +243,7 @@
 - 方案：创建后查询 admin 或让 `create` 返回 id。
 - 验收：安装流程测试通过；无行为变化。
 
-### [ ] P3-8 在线更新的路径与信任边界（S/M）
+### [x] P3-8 在线更新的路径与信任边界（S/M）
 
 - 现状：用远端 `asset_name` 拼路径；`ONEAPI_UPDATE_API_BASE` 可覆盖元数据地址；只校验同源 SHA256SUMS，无签名。
 - 证据：`src/update.rs::apply_inner`、`src/update.rs::api_url`、`src/update.rs::select_assets`。
