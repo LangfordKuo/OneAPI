@@ -15,6 +15,7 @@ pub struct Config {
     pub log_level: String,
     pub cookie_secure: bool,
     pub trust_proxy: bool,
+    pub database_pool_size: u32,
 }
 
 impl Config {
@@ -50,6 +51,11 @@ impl Config {
         let trust_proxy = env::var("ONEAPI_TRUST_PROXY")
             .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
+        let database_pool_size = env::var("ONEAPI_DB_POOL_SIZE")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(5)
+            .clamp(1, 64);
 
         Ok(Self {
             addr,
@@ -59,6 +65,7 @@ impl Config {
             log_level,
             cookie_secure,
             trust_proxy,
+            database_pool_size,
         })
     }
 

@@ -39,6 +39,10 @@ pub struct LogQuery {
     pub limit: Option<i64>,
     #[serde(default)]
     pub offset: Option<i64>,
+    /// Deep pages skip the `COUNT(*)` scan; the UI keeps the total it already
+    /// loaded from the first page.
+    #[serde(default)]
+    pub include_total: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,7 +134,7 @@ fn tokens_per_second(
 #[derive(Debug, Serialize)]
 pub struct LogListOutput {
     pub items: Vec<LogEntry>,
-    pub total: i64,
+    pub total: Option<i64>,
     pub limit: i64,
     pub offset: i64,
 }
@@ -188,9 +192,11 @@ pub async fn list(
         request_id: query.request_id,
     };
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
-    let offset = query.offset.unwrap_or(0).max(0);
+    let offset = resolve_offset(query.offset)?;
+    let include_total = query.include_total.unwrap_or(true);
 
-    let (rows, total) = models::usage_log::list(&state.db, &filters, limit, offset).await?;
+    let (rows, total) =
+        models::usage_log::list(&state.db, &filters, limit, offset, include_total).await?;
 
     Ok(Json(LogListOutput {
         items: rows.into_iter().map(LogEntry::from).collect(),
@@ -198,6 +204,21 @@ pub async fn list(
         limit,
         offset,
     }))
+}
+
+/// Offset-based paging degrades linearly with the offset because SQLite still
+/// walks the skipped rows. Refuse absurd depths instead of spending the whole
+/// request budget on one page.
+const MAX_LOG_OFFSET: i64 = 100_000;
+
+fn resolve_offset(offset: Option<i64>) -> Result<i64, AppError> {
+    let offset = offset.unwrap_or(0).max(0);
+    if offset > MAX_LOG_OFFSET {
+        return Err(AppError::BadRequest(format!(
+            "offset must not exceed {MAX_LOG_OFFSET}"
+        )));
+    }
+    Ok(offset)
 }
 
 pub async fn detail(
@@ -208,9 +229,11 @@ pub async fn detail(
     let row = models::usage_log::find_by_request_id(&state.db, &request_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("log `{request_id}` not found")))?;
-    let (request_body, response_body) = models::usage_log::detail_bodies(&state.db, &request_id)
-        .await?
-        .unwrap_or((None, None));
+    let detail_key = row.api_key_id.unwrap_or(0);
+    let (request_body, response_body) =
+        models::usage_log::detail_bodies(&state.db, &request_id, detail_key)
+            .await?
+            .unwrap_or((None, None));
 
     Ok(Json(LogDetailOutput {
         entry: LogEntry::from(row),
@@ -221,7 +244,15 @@ pub async fn detail(
 
 #[cfg(test)]
 mod tests {
-    use super::tokens_per_second;
+    use super::{resolve_offset, tokens_per_second};
+
+    #[test]
+    fn offset_is_clamped_and_capped() {
+        assert_eq!(resolve_offset(None).expect("default"), 0);
+        assert_eq!(resolve_offset(Some(-10)).expect("negative"), 0);
+        assert_eq!(resolve_offset(Some(100_000)).expect("cap"), 100_000);
+        assert!(resolve_offset(Some(100_001)).is_err());
+    }
 
     #[test]
     fn non_streaming_speed_uses_total_latency() {

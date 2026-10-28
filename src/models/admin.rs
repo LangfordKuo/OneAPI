@@ -34,14 +34,16 @@ pub async fn create(
     username: &str,
     password_hash: &str,
     created_at: i64,
-) -> sqlx::Result<()> {
-    sqlx::query("INSERT INTO admin (id, username, password_hash, created_at) VALUES (1, ?, ?, ?)")
-        .bind(username)
-        .bind(password_hash)
-        .bind(created_at)
-        .execute(pool)
-        .await?;
-    Ok(())
+) -> sqlx::Result<i64> {
+    let result = sqlx::query(
+        "INSERT INTO admin (id, username, password_hash, created_at) VALUES (1, ?, ?, ?)",
+    )
+    .bind(username)
+    .bind(password_hash)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+    Ok(result.last_insert_rowid())
 }
 
 pub async fn update_password(

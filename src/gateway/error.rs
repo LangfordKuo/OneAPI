@@ -61,3 +61,15 @@ pub fn protocol_for_path(path: &str) -> Protocol {
         Protocol::Chat
     }
 }
+
+/// Clamp an upstream-provided string before storing it in the database or
+/// echoing it back. Upstream error messages are unbounded and can otherwise
+/// inflate `usage_logs` and the channel failure state.
+pub fn truncate_message(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut truncated: String = value.chars().take(max_chars).collect();
+    truncated.push('…');
+    truncated
+}

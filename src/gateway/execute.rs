@@ -1,5 +1,12 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crate::{
+    error::AppError,
+    models::{self, api_key::ApiKey, channel::Channel, now_ms},
+    protocol::{Protocol, UnifiedRequest, Usage},
+    state::{AppState, ProbeAttempt},
+    upstream,
+};
 use axum::{
     body::Body,
     http::{header, HeaderMap, StatusCode},
@@ -9,14 +16,6 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{
-    error::AppError,
-    models::{self, api_key::ApiKey, channel::Channel, now_ms},
-    protocol::{Protocol, UnifiedRequest, Usage},
-    state::{AppState, ProbeAttempt},
-    upstream,
-};
-
 use super::{
     auth::ApiKeyAuth,
     error,
@@ -25,6 +24,11 @@ use super::{
     stream::{self, ByteStream, StreamJob},
     usage::{self, UsageRecord},
 };
+
+/// Overall wall-clock budget for one client request, including failover.
+const REQUEST_TOTAL_BUDGET: Duration = Duration::from_secs(600);
+/// Time allowed to receive the first upstream SSE frame before committing.
+const STREAM_COMMIT_BUDGET: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct ProxyIdentity {
@@ -60,10 +64,6 @@ impl ProxyIdentity {
                 .iter()
                 .any(|item| item == "*" || item == model)
     }
-
-    fn allows_channel(&self, channel_id: i64) -> bool {
-        self.allowed_channel_ids.is_empty() || self.allowed_channel_ids.contains(&channel_id)
-    }
 }
 
 pub async fn proxy(
@@ -90,11 +90,7 @@ pub async fn proxy_with_identity(
     headers: &HeaderMap,
     mut body: Value,
 ) -> Result<Response, AppError> {
-    let request_id = headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let request_id = resolve_request_id(headers);
     let defaults = state.cache.defaults(&state.db).await?;
     let store_request_bodies = defaults.store_request_bodies;
     let detail_request =
@@ -110,6 +106,7 @@ pub async fn proxy_with_identity(
         store_request_detail(
             state,
             &request_id,
+            identity.api_key_id,
             detail_request.as_deref(),
             &error::client_error_value(inbound, message, "invalid_request_error").to_string(),
         )
@@ -123,6 +120,7 @@ pub async fn proxy_with_identity(
     };
 
     let started = Instant::now();
+    let deadline = started + REQUEST_TOTAL_BUDGET;
     let mut ctx = RequestContext {
         request_id: &request_id,
         api_key_id: identity.api_key_id,
@@ -159,6 +157,13 @@ pub async fn proxy_with_identity(
         .and_then(|value| value.get("include_usage"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // Local fallback used when a stream is interrupted before the final usage
+    // frame arrives or the upstream never reports usage at all.
+    let input_token_estimate = if streaming {
+        usage::estimate_request_tokens(&body)
+    } else {
+        0
+    };
 
     let mut client_request: Option<Value> = None;
     let mut response_id: Option<String> = None;
@@ -183,6 +188,7 @@ pub async fn proxy_with_identity(
                     store_request_detail(
                         state,
                         &request_id,
+                        identity.api_key_id,
                         detail_request.as_deref(),
                         &error::client_error_value(
                             inbound,
@@ -220,6 +226,7 @@ pub async fn proxy_with_identity(
             store_request_detail(
                 state,
                 &request_id,
+                identity.api_key_id,
                 detail_request.as_deref(),
                 &error::client_error_value(inbound, message, "invalid_request_error").to_string(),
             )
@@ -243,11 +250,7 @@ pub async fn proxy_with_identity(
     };
 
     let channels = state.cache.channels(&state.db).await?;
-    let channels = channels
-        .into_iter()
-        .filter(|channel| identity.allows_channel(channel.id))
-        .collect();
-    let candidates = select::candidates(channels, &model, inbound);
+    let candidates = select::candidates(&channels, &model, inbound, &identity.allowed_channel_ids);
     if candidates.is_empty() {
         let message = "no channel available for this model";
         ctx.record(
@@ -263,6 +266,7 @@ pub async fn proxy_with_identity(
         store_request_detail(
             state,
             &request_id,
+            identity.api_key_id,
             detail_request.as_deref(),
             &error::client_error_value(inbound, message, "invalid_request_error").to_string(),
         )
@@ -288,7 +292,9 @@ pub async fn proxy_with_identity(
             response_id,
             client_request,
             started,
+            deadline,
             client_wants_usage,
+            input_token_estimate,
             store_request_bodies,
             detail_request.clone(),
             headers,
@@ -305,7 +311,13 @@ pub async fn proxy_with_identity(
     let mut unified_request: Option<UnifiedRequest> = None;
     let mut probe_deferred = false;
 
-    for candidate in candidates {
+    let last_candidate = candidates.len().saturating_sub(1);
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        if Instant::now() >= deadline {
+            last_error_type = "upstream_timeout".to_string();
+            last_message = "request deadline exceeded".to_string();
+            break;
+        }
         let _probe = match state.probes.acquire(&candidate.channel, now_ms()) {
             ProbeAttempt::NotNeeded => None,
             ProbeAttempt::Acquired(lease) => Some(lease),
@@ -322,7 +334,13 @@ pub async fn proxy_with_identity(
         last_upstream = upstream;
 
         let request_body = if upstream == inbound {
-            let mut value = body.clone();
+            // The last attempt can consume the request body; earlier attempts
+            // need a copy only because a later candidate may run.
+            let mut value = if index == last_candidate {
+                std::mem::take(&mut body)
+            } else {
+                body.clone()
+            };
             if let Some(object) = value.as_object_mut() {
                 object.insert("model".into(), json!(candidate.upstream_model));
             }
@@ -352,7 +370,11 @@ pub async fn proxy_with_identity(
                     }
                 });
             }
-            let mut ir = unified_request.clone().expect("parsed above");
+            let mut ir = if index == last_candidate {
+                unified_request.take().expect("parsed above")
+            } else {
+                unified_request.clone().expect("parsed above")
+            };
             if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
                 ir.max_tokens = Some(defaults.default_max_tokens);
             }
@@ -422,7 +444,7 @@ pub async fn proxy_with_identity(
         };
 
         let status = response.status();
-        let text = match response.text().await {
+        let text = match upstream::read_body_limited(response).await {
             Ok(text) => text,
             Err(error) => {
                 last_message = error.to_string();
@@ -561,6 +583,7 @@ pub async fn proxy_with_identity(
                     store_request_detail(
                         state,
                         &request_id,
+                        identity.api_key_id,
                         detail_request.as_deref(),
                         &error::client_error_value(inbound, message, "upstream_error").to_string(),
                     )
@@ -587,19 +610,30 @@ pub async fn proxy_with_identity(
                     }
                 }
 
+                let mut stored = false;
                 if should_store {
                     if let (Some(api_key_id), Some(request)) =
                         (identity.api_key_id, &client_request)
                     {
-                        if let Err(error) =
-                            responses_state::store(state, api_key_id, &model, request, &value).await
+                        match responses_state::store(state, api_key_id, &model, request, &value)
+                            .await
                         {
-                            tracing::warn!(
-                                error = %error,
-                                request_id = %request_id,
-                                "failed to persist Responses state"
-                            );
+                            Ok(persisted) => stored = persisted,
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    request_id = %request_id,
+                                    "failed to persist Responses state"
+                                );
+                            }
                         }
+                    }
+                }
+                // Never tell the client a response is retrievable when it was
+                // skipped (for example because it exceeded the storage limit).
+                if !stored {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("store".into(), json!(false));
                     }
                 }
 
@@ -613,6 +647,20 @@ pub async fn proxy_with_identity(
             } else {
                 (Body::from(text.clone()), text)
             };
+
+            // Some upstreams omit usage for converted or streaming-shaped
+            // responses. Fall back to local estimates so the request is still
+            // counted against the API key quota.
+            let mut usage = usage;
+            if usage.total_tokens.is_none()
+                || usage.input_tokens.is_none()
+                || usage.output_tokens.is_none()
+            {
+                usage.fill_missing(
+                    usage::estimate_request_tokens(&request_body),
+                    usage::estimate_text_tokens(&client_text),
+                );
+            }
 
             if let Some(output_tokens) = usage.output_tokens {
                 state.live.add_tokens(Some(channel.id), output_tokens);
@@ -629,7 +677,14 @@ pub async fn proxy_with_identity(
             )
             .await;
 
-            store_request_detail(state, &request_id, detail_request.as_deref(), &client_text).await;
+            store_request_detail(
+                state,
+                &request_id,
+                identity.api_key_id,
+                detail_request.as_deref(),
+                &client_text,
+            )
+            .await;
 
             let response = Response::builder()
                 .status(status)
@@ -662,7 +717,14 @@ pub async fn proxy_with_identity(
         )
         .await;
 
-        store_request_detail(state, &request_id, detail_request.as_deref(), &text).await;
+        store_request_detail(
+            state,
+            &request_id,
+            identity.api_key_id,
+            detail_request.as_deref(),
+            &text,
+        )
+        .await;
 
         return Ok(match upstream_value {
             Some(value) => error::upstream_error(inbound, status, &value),
@@ -685,6 +747,7 @@ pub async fn proxy_with_identity(
         store_request_detail(
             state,
             &request_id,
+            identity.api_key_id,
             detail_request.as_deref(),
             &error::client_error_value(inbound, message, "channel_recovering").to_string(),
         )
@@ -712,6 +775,7 @@ pub async fn proxy_with_identity(
     store_request_detail(
         state,
         &request_id,
+        identity.api_key_id,
         detail_request.as_deref(),
         &error::client_error_value(inbound, &message, &last_error_type).to_string(),
     )
@@ -732,13 +796,15 @@ async fn proxy_stream(
     inbound: Protocol,
     request_id: &str,
     model: &str,
-    body: Value,
+    mut body: Value,
     candidates: Vec<select::Candidate>,
     should_store: bool,
     response_id: Option<String>,
     client_request: Option<Value>,
     started: Instant,
+    deadline: Instant,
     client_wants_usage: bool,
+    input_token_estimate: u64,
     store_request_bodies: bool,
     detail_request: Option<String>,
     headers: &HeaderMap,
@@ -753,7 +819,14 @@ async fn proxy_stream(
     let mut unified_request: Option<UnifiedRequest> = None;
     let mut probe_deferred = false;
 
-    for candidate in candidates {
+    let last_candidate = candidates.len().saturating_sub(1);
+    let commit_deadline = (Instant::now() + STREAM_COMMIT_BUDGET).min(deadline);
+    'candidates: for (index, candidate) in candidates.into_iter().enumerate() {
+        if Instant::now() >= deadline {
+            last_error_type = "upstream_timeout".to_string();
+            last_message = "request deadline exceeded".to_string();
+            break;
+        }
         let probe = match state.probes.acquire(&candidate.channel, now_ms()) {
             ProbeAttempt::NotNeeded => None,
             ProbeAttempt::Acquired(lease) => Some(lease),
@@ -770,7 +843,11 @@ async fn proxy_stream(
         last_upstream = upstream;
 
         let mut request_body = if upstream == inbound {
-            let mut value = body.clone();
+            let mut value = if index == last_candidate {
+                std::mem::take(&mut body)
+            } else {
+                body.clone()
+            };
             if let Some(object) = value.as_object_mut() {
                 object.insert("model".into(), json!(candidate.upstream_model));
             }
@@ -784,7 +861,7 @@ async fn proxy_stream(
                         record_stream_attempt(
                             state,
                             request_id,
-                            identity,
+                            &identity,
                             model,
                             Some(channel),
                             Some(&candidate.upstream_model),
@@ -806,7 +883,11 @@ async fn proxy_stream(
                     }
                 });
             }
-            let mut ir = unified_request.clone().expect("parsed above");
+            let mut ir = if index == last_candidate {
+                unified_request.take().expect("parsed above")
+            } else {
+                unified_request.clone().expect("parsed above")
+            };
             if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
                 ir.max_tokens = Some(defaults.default_max_tokens);
             }
@@ -818,7 +899,7 @@ async fn proxy_stream(
                     record_stream_attempt(
                         state,
                         request_id,
-                        identity,
+                        &identity,
                         model,
                         Some(channel),
                         Some(&candidate.upstream_model),
@@ -841,6 +922,7 @@ async fn proxy_stream(
             }
         };
 
+        let mut include_usage_injected = false;
         if let Some(object) = request_body.as_object_mut() {
             object.insert("stream".into(), json!(true));
             if upstream == Protocol::Chat {
@@ -849,6 +931,8 @@ async fn proxy_stream(
                     .and_then(Value::as_object)
                     .cloned()
                     .unwrap_or_default();
+                include_usage_injected =
+                    options.get("include_usage").and_then(Value::as_bool) != Some(true);
                 options.insert("include_usage".into(), json!(true));
                 object.insert("stream_options".into(), Value::Object(options));
             }
@@ -870,36 +954,58 @@ async fn proxy_stream(
             }
         };
 
-        let request = match upstream::build_request(
-            &client,
-            &candidate.upstream_config,
-            &state.crypto,
-            &candidate.upstream_kind,
-            &request_body,
-            headers,
-        ) {
-            Ok(request) => request.header(header::ACCEPT, "text/event-stream"),
-            Err(error) => {
-                last_message = error.to_string();
-                last_error_type = "upstream_configuration_error".to_string();
-                state.mark_channel_failure(channel.id, &last_message).await;
+        let mut usage_retry_done = false;
+        let response = loop {
+            let request = match upstream::build_request(
+                &client,
+                &candidate.upstream_config,
+                &state.crypto,
+                &candidate.upstream_kind,
+                &request_body,
+                headers,
+            ) {
+                Ok(request) => request.header(header::ACCEPT, "text/event-stream"),
+                Err(error) => {
+                    last_message = error.to_string();
+                    last_error_type = "upstream_configuration_error".to_string();
+                    state.mark_channel_failure(channel.id, &last_message).await;
+                    continue 'candidates;
+                }
+            };
+
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    last_message = error.to_string();
+                    last_error_type = "upstream_unreachable".to_string();
+                    state.mark_channel_failure(channel.id, &last_message).await;
+                    continue 'candidates;
+                }
+            };
+
+            let status = response.status();
+            if status.is_success() {
+                break response;
+            }
+
+            let text = upstream::read_body_limited(response)
+                .await
+                .unwrap_or_default();
+
+            // Some OpenAI-compatible upstreams reject `stream_options` outright.
+            // Retry once without the forced field so streaming still works; the
+            // gateway then falls back to token estimation for usage accounting.
+            if status == StatusCode::BAD_REQUEST
+                && include_usage_injected
+                && !usage_retry_done
+                && rejects_stream_options(&text)
+            {
+                usage_retry_done = true;
+                include_usage_injected = false;
+                strip_include_usage(&mut request_body);
                 continue;
             }
-        };
 
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(error) => {
-                last_message = error.to_string();
-                last_error_type = "upstream_unreachable".to_string();
-                state.mark_channel_failure(channel.id, &last_message).await;
-                continue;
-            }
-        };
-
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
             let upstream_value = serde_json::from_str::<Value>(&text).ok();
             let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
 
@@ -907,13 +1013,13 @@ async fn proxy_stream(
                 state.mark_channel_failure(channel.id, &message).await;
                 last_error_type = error_type;
                 last_message = message;
-                continue;
+                continue 'candidates;
             }
 
             record_stream_attempt(
                 state,
                 request_id,
-                identity,
+                &identity,
                 model,
                 Some(channel),
                 Some(&candidate.upstream_model),
@@ -931,7 +1037,7 @@ async fn proxy_stream(
                 Some(value) => error::upstream_error(inbound, status, &value),
                 None => error::client_error(inbound, status, message, error_type.as_str()),
             });
-        }
+        };
 
         let byte_stream: ByteStream = Box::pin(
             response
@@ -952,8 +1058,10 @@ async fn proxy_stream(
             started,
             attempts,
             idle_timeout: upstream::stream_idle_timeout(channel, defaults.stream_idle_timeout_ms),
+            commit_deadline,
             passthrough: upstream == inbound,
             client_wants_usage,
+            input_token_estimate,
             store_request_detail: store_request_bodies,
             detail_request: detail_request.clone(),
             response_id: response_id.clone(),
@@ -983,7 +1091,7 @@ async fn proxy_stream(
                 record_stream_attempt(
                     state,
                     request_id,
-                    identity,
+                    &identity,
                     model,
                     Some(channel),
                     Some(&candidate.upstream_model),
@@ -1012,7 +1120,7 @@ async fn proxy_stream(
         record_stream_attempt(
             state,
             request_id,
-            identity,
+            &identity,
             model,
             None,
             None,
@@ -1028,6 +1136,7 @@ async fn proxy_stream(
         store_request_detail(
             state,
             request_id,
+            identity.api_key_id,
             detail_request.as_deref(),
             &error::client_error_value(inbound, message, "channel_recovering").to_string(),
         )
@@ -1043,7 +1152,7 @@ async fn proxy_stream(
     record_stream_attempt(
         state,
         request_id,
-        identity,
+        &identity,
         model,
         last_channel.as_ref(),
         last_upstream_model.as_deref(),
@@ -1061,6 +1170,7 @@ async fn proxy_stream(
     store_request_detail(
         state,
         request_id,
+        identity.api_key_id,
         detail_request.as_deref(),
         &error::client_error_value(inbound, &message, &last_error_type).to_string(),
     )
@@ -1078,7 +1188,7 @@ async fn proxy_stream(
 async fn record_stream_attempt(
     state: &AppState,
     request_id: &str,
-    identity: ProxyIdentity,
+    identity: &ProxyIdentity,
     model: &str,
     channel: Option<&Channel>,
     upstream_model: Option<&str>,
@@ -1159,6 +1269,28 @@ impl RequestContext<'_> {
     }
 }
 
+const MAX_REQUEST_ID_LEN: usize = 128;
+
+/// Accept a client-supplied request id only when it is short and uses a
+/// conservative alphabet; otherwise generate one. The id is used as a log key
+/// and as the storage key for request details, so it must not be attacker
+/// controlled without bounds.
+fn resolve_request_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_REQUEST_ID_LEN
+                && value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+                })
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
+}
+
 fn add_route_headers(response: &mut Response, channel: &Channel, upstream_model: &str) {
     use axum::http::HeaderValue;
 
@@ -1180,14 +1312,22 @@ fn with_route_headers(mut response: Response, channel: &Channel, upstream_model:
 async fn store_request_detail(
     state: &AppState,
     request_id: &str,
+    api_key_id: Option<i64>,
     request: Option<&str>,
     response: &str,
 ) {
     let Some(request) = request else {
         return;
     };
-    if let Err(error) =
-        models::request_detail::insert(&state.db, request_id, request, response, now_ms()).await
+    if let Err(error) = models::request_detail::insert(
+        &state.db,
+        request_id,
+        api_key_id.unwrap_or(0),
+        request,
+        response,
+        now_ms(),
+    )
+    .await
     {
         tracing::warn!(
             error = %error,
@@ -1221,11 +1361,89 @@ fn upstream_error_info(value: Option<&Value>, body: &str) -> (String, String) {
             .and_then(|error| error.get("type"))
             .and_then(Value::as_str)
             .unwrap_or("upstream_error");
-        return (error_type.to_string(), message.to_string());
+        return (
+            error::truncate_message(error_type, 128),
+            error::truncate_message(message, 1024),
+        );
     }
 
     (
         "upstream_error".to_string(),
         body.chars().take(300).collect(),
     )
+}
+
+/// Detect upstream errors caused by the `stream_options`/`include_usage` fields
+/// so streaming can be retried without them.
+fn rejects_stream_options(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("stream_options") || lower.contains("include_usage")
+}
+
+fn strip_include_usage(body: &mut Value) {
+    if let Some(object) = body.as_object_mut() {
+        if let Some(options) = object
+            .get_mut("stream_options")
+            .and_then(Value::as_object_mut)
+        {
+            options.remove("include_usage");
+            if options.is_empty() {
+                object.remove("stream_options");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue};
+
+    use super::{rejects_stream_options, resolve_request_id, strip_include_usage};
+
+    #[test]
+    fn detects_include_usage_rejections() {
+        assert!(rejects_stream_options(
+            r#"{"error":{"message":"Unrecognized request argument supplied: stream_options"}}"#
+        ));
+        assert!(rejects_stream_options("include_usage is not supported"));
+        assert!(!rejects_stream_options("invalid api key"));
+    }
+
+    #[test]
+    fn strips_only_the_forced_include_usage_field() {
+        let mut body = serde_json::json!({
+            "stream": true,
+            "stream_options": {"include_usage": true, "other": 1}
+        });
+        strip_include_usage(&mut body);
+        assert_eq!(body["stream_options"], serde_json::json!({"other": 1}));
+
+        let mut body = serde_json::json!({"stream_options": {"include_usage": true}});
+        strip_include_usage(&mut body);
+        assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn accepts_safe_client_request_ids() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", HeaderValue::from_static("req-abc_1.2:3"));
+        assert_eq!(resolve_request_id(&headers), "req-abc_1.2:3");
+    }
+
+    #[test]
+    fn replaces_unsafe_or_oversized_request_ids() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", HeaderValue::from_static("contains a space"));
+        assert_ne!(resolve_request_id(&headers), "contains a space");
+
+        let oversized = "a".repeat(129);
+        headers.insert(
+            "x-request-id",
+            HeaderValue::from_str(&oversized).expect("header"),
+        );
+        assert_ne!(resolve_request_id(&headers), oversized);
+
+        headers.insert("x-request-id", HeaderValue::from_static(""));
+        assert!(!resolve_request_id(&headers).is_empty());
+    }
 }

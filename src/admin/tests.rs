@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
+    extract::ConnectInfo,
     http::{Request, StatusCode},
 };
 use serde_json::{json, Value};
@@ -22,6 +23,10 @@ use crate::{
 };
 
 async fn test_state() -> (TempDir, AppState) {
+    test_state_with_proxy(false).await
+}
+
+async fn test_state_with_proxy(trust_proxy: bool) -> (TempDir, AppState) {
     let temp = TempDir::new().expect("temp dir");
     let data_dir = temp.path().to_path_buf();
     let config = Config {
@@ -31,7 +36,8 @@ async fn test_state() -> (TempDir, AppState) {
         database_path: data_dir.join("test.db"),
         log_level: "error".to_string(),
         cookie_secure: false,
-        trust_proxy: false,
+        trust_proxy,
+        database_pool_size: 5,
     };
     let db = db::connect(&config).await.expect("database");
     let crypto = Arc::new(security::Crypto::load_or_create(&config.data_dir).expect("master key"));
@@ -272,6 +278,29 @@ async fn admin_post_with_client_ip(
         .header(header, ip)
         .body(Body::from(serde_json::to_vec(&body).expect("json")))
         .expect("request");
+    send_request(router, request).await
+}
+
+async fn admin_post_with_client_ip_and_peer(
+    router: axum::Router,
+    path: &str,
+    body: Value,
+    header: &str,
+    ip: &str,
+    peer: std::net::SocketAddr,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .header(header, ip)
+        .body(Body::from(serde_json::to_vec(&body).expect("json")))
+        .expect("request");
+    request.extensions_mut().insert(ConnectInfo(peer));
+    send_request(router, request).await
+}
+
+async fn send_request(router: axum::Router, request: Request<Body>) -> (StatusCode, Value) {
     let response = router.oneshot(request).await.expect("response");
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -730,7 +759,7 @@ async fn site_domain_setting_is_normalized_and_relaxes_csrf_after_proxy() {
 
 #[tokio::test]
 async fn login_limiter_uses_configured_client_ip_header() {
-    let (_temp, state) = test_state().await;
+    let (_temp, state) = test_state_with_proxy(true).await;
     admin_token(&state).await;
     models::setting::upsert(&state.db, client_ip::SETTING_KEY, "cf-connecting-ip")
         .await
@@ -777,6 +806,174 @@ async fn login_limiter_uses_configured_client_ip_header() {
         json!({"username": "admin", "password": "password123"}),
         "cf-connecting-ip",
         "198.51.100.7",
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn default_forwarded_for_is_ignored_without_a_trusted_peer() {
+    let (_temp, state) = test_state().await;
+    admin_token(&state).await;
+    let router = app::router(state);
+
+    // The default header is not trusted without a loopback/private peer.
+    for index in 0..5 {
+        let (status, _) = admin_post_with_client_ip(
+            router.clone(),
+            "/api/auth/login",
+            json!({"username": "admin", "password": "wrong-password"}),
+            "x-forwarded-for",
+            &format!("203.0.113.{index}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    let (status, _) = admin_post_with_client_ip(
+        router,
+        "/api/auth/login",
+        json!({"username": "admin", "password": "password123"}),
+        "x-forwarded-for",
+        "198.51.100.7",
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn client_ip_header_is_trusted_from_a_private_proxy_peer() {
+    let (_temp, state) = test_state().await;
+    admin_token(&state).await;
+    models::setting::upsert(&state.db, client_ip::SETTING_KEY, "cf-connecting-ip")
+        .await
+        .expect("setting");
+    let router = app::router(state);
+    let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 50_000));
+
+    // An explicitly configured header is trusted, so each value gets its own
+    // bucket; no lockout after five different values.
+    for index in 0..5 {
+        let (status, _) = admin_post_with_client_ip_and_peer(
+            router.clone(),
+            "/api/auth/login",
+            json!({"username": "admin", "password": "wrong-password"}),
+            "cf-connecting-ip",
+            &format!("203.0.113.{index}"),
+            peer,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    let (status, _) = admin_post_with_client_ip_and_peer(
+        router,
+        "/api/auth/login",
+        json!({"username": "admin", "password": "password123"}),
+        "cf-connecting-ip",
+        "203.0.113.99",
+        peer,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn configured_client_ip_header_is_trusted_from_a_public_peer() {
+    let (_temp, state) = test_state().await;
+    admin_token(&state).await;
+    models::setting::upsert(&state.db, client_ip::SETTING_KEY, "cf-connecting-ip")
+        .await
+        .expect("setting");
+    let router = app::router(state);
+    // A CDN reaching the origin from a public address is the intended setup.
+    let peer = std::net::SocketAddr::from(([203, 0, 113, 50], 50_000));
+
+    for index in 0..5 {
+        let (status, _) = admin_post_with_client_ip_and_peer(
+            router.clone(),
+            "/api/auth/login",
+            json!({"username": "admin", "password": "wrong-password"}),
+            "cf-connecting-ip",
+            &format!("198.51.100.{index}"),
+            peer,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    let (status, _) = admin_post_with_client_ip_and_peer(
+        router,
+        "/api/auth/login",
+        json!({"username": "admin", "password": "password123"}),
+        "cf-connecting-ip",
+        "198.51.100.99",
+        peer,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn default_forwarded_for_is_used_from_a_private_peer() {
+    let (_temp, state) = test_state().await;
+    admin_token(&state).await;
+    let router = app::router(state);
+    let peer = std::net::SocketAddr::from(([172, 17, 0, 2], 50_000));
+
+    for index in 0..5 {
+        let (status, _) = admin_post_with_client_ip_and_peer(
+            router.clone(),
+            "/api/auth/login",
+            json!({"username": "admin", "password": "wrong-password"}),
+            "x-forwarded-for",
+            &format!("198.51.100.{index}"),
+            peer,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    let (status, _) = admin_post_with_client_ip_and_peer(
+        router,
+        "/api/auth/login",
+        json!({"username": "admin", "password": "password123"}),
+        "x-forwarded-for",
+        "198.51.100.99",
+        peer,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn default_forwarded_for_is_ignored_from_a_public_peer() {
+    let (_temp, state) = test_state().await;
+    admin_token(&state).await;
+    let router = app::router(state);
+    let peer = std::net::SocketAddr::from(([203, 0, 113, 50], 50_000));
+
+    for index in 0..5 {
+        let (status, _) = admin_post_with_client_ip_and_peer(
+            router.clone(),
+            "/api/auth/login",
+            json!({"username": "admin", "password": "wrong-password"}),
+            "x-forwarded-for",
+            &format!("198.51.100.{index}"),
+            peer,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // A fresh claimed IP must not escape the bucket keyed by the public peer.
+    let (status, _) = admin_post_with_client_ip_and_peer(
+        router,
+        "/api/auth/login",
+        json!({"username": "admin", "password": "password123"}),
+        "x-forwarded-for",
+        "198.51.100.99",
+        peer,
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);

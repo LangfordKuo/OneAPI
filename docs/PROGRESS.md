@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-28
-- 当前阶段：v0.1.8 已发布（API Key 渠道/模型/Token 限额，`main`）
+- 当前阶段：v0.1.9 已发布（审查优化批次 1–5，`main`）
 - 当前分支：`main`
-- 最近发布：`v0.1.8`
+- 最近发布：`v0.1.9`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -210,6 +210,14 @@
 - `count_tokens` 只在渠道原生支持 Anthropic 时转发，否则保持原有字符估算。
 - 验证：新增 4 个协议选择单元测试、2 个网关集成测试（原生匹配不转换、缺失协议走 fallback）与 1 个渠道 CRUD 测试；108 个测试通过。
 
+## v0.1.9 发布记录
+
+- 版本号从 `0.1.8` 升至 `0.1.9`，完成 `docs/OPTIMIZATION_PLAN.md` 批次 1–5（含 P3-7）。
+- 安全：登录/改密限速、设置事务化、CSRF 转发头取值、短 Key 掩码；上游重定向限制与故障转移总预算；协议化 JSON 解析错误与 `include_usage` 兼容重试。
+- 性能：日志分页上限与可选总数、运行时缓存补齐、可配置连接池与 `/readyz` 队列指标、加权选路 O(n log n)、实时指标分片、SSE 字节级解析。
+- 前端与响应头：SSE 读取器与增量换行、Playground 流取消、Key 限额整数校验、全局 `nosniff`/`X-Frame-Options`/`Referrer-Policy`/CSP。
+- 验证：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test --locked`（152 个测试）、`npm run build`、`npm run lint`（0 error）全部通过；`/readyz` 与静态资源响应头实测通过。
+
 ## v0.1.8 发布记录
 
 - 版本号从 `0.1.7` 升至 `0.1.8`，API Key 新增三类可选限制，留空即不限制。
@@ -326,6 +334,36 @@
 - 后端 API 兼容旧的扁平字段（`kinds`/`fallback_kind`/`base_url` 等），新客户端改传 `protocols` 数组；探测接口新增 `probe_protocol`，用当前 Tab 的路由测试/拉取模型。
 - 验证：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test`（117 个测试）通过；用旧 v0.1.6 数据目录启动验证 backfill；三个原生协议分别命中不同 Base URL 与不同 Key，Chat/Response 转换到 Chat 的路由与日志均正确；Playwright 验证内分页、转换隐藏配置、最后一个原生协议无法再转换、探活使用当前页配置。
 
+## 代码审查修复（2026-10-28）
+
+基于 v0.1.8 全仓审查，按优先级完成以下修复（未修改已发布迁移，新增 `0007_request_details_key.sql`）：
+
+- **Token 计费兜底**：流式请求在客户端提前断开、上游不返回 usage 或 usage 只到中途时，使用本地估算（输入按请求正文、输出按增量字符数/4）补齐 `usage_logs` 与 API Key 的 `token_usage`，避免额度被绕过；非流式响应缺 usage 时同样估算。
+- **请求 ID 与请求详情隔离**：`x-request-id` 仅接受不超过 128 字符、只含 `[A-Za-z0-9._:-]` 的值，否则生成 UUID；`request_details` 改为 `(request_id, api_key_id)` 主键（`api_key_id=0` 表示 Playground 与历史行），不同 Key 复用同一请求 ID 不再互相覆盖；新增 `created_at` 索引。
+- **渠道 Client 缓存**：缓存键移除易变的 `updated_at`，渠道失败计数更新不再每次都创建新 `reqwest::Client` 并永久保留旧连接池。
+- **上游响应上限**：非流式与流式错误响应体最多读取 64MB（`Content-Length` 与分块累计双重校验）；上游错误消息/类型截断后写入日志与渠道 `last_error`。
+- **保留期清理**：`usage_logs`、`request_details`、`responses`、`sessions` 改为每批 5000 行、独立事务删除，避免长时间持有 SQLite 写锁导致 `busy_timeout` 丢日志。
+- **客户端 IP 请求头**：留空时默认读取 `X-Forwarded-For`，但只对回环/内网对端生效；显式填写后视为管理员已确认可信并直接采用，适配 CDN 从公网地址回源。显式配置时需确保源站端口只接受 CDN/反向代理访问，否则可被伪造绕过登录限速；README、`.env.example` 与设置页提示同步更新。
+- **性能**：运行时缓存保存预解析的 `PreparedChannel`（`Arc<Vec<_>>` 共享，不再每请求克隆全量渠道/重复解析 `protocol_configs`）；SSE 解析器改为按偏移扫描、每 chunk 只压缩一次，并限制单帧缓冲 8MB；Chat 帧的 usage/首内容判断改为先做廉价子串检查，Anthropic/Responses 不再为判断首内容二次解析 JSON；请求体只在仍有后续候选时克隆。
+- **一致性**：Responses 超过 10MB 未落库时返回 `store:false`；优雅退出时关闭并等待用量写队列排空。
+
+验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked` 通过。
+
+本轮未执行的安全/性能/兼容性事项已整理到 `docs/OPTIMIZATION_PLAN.md`，按 P1–P3 分级并给出建议批次。
+
+## 优化计划批次 1–5（2026-10-28）
+
+按 `docs/OPTIMIZATION_PLAN.md` 的顺序完成批次 1–5（含 P3-7），未修改已发布迁移。
+
+- **批次 1（安全）**：登录对不存在的用户执行一次 dummy Argon2 校验以抹平时序差；改密复用登录限速（key 为 `password|{ip}|{admin_id}`）；设置更新改为先校验、再单事务写入；CSRF 的 `X-Forwarded-Host` 取最后一个非空值；长度 ≤4 的短 Key 掩码只返回 `••••`。
+- **批次 2（可用性与协议）**：上游 Client 的 3xx 只跟随同 host、最多 3 次；请求入口引入总预算（非流式 600s、流式提交前 60s），候选循环与首帧等待共用绝对 deadline；`/v1/*` 改用 `ApiJson`，解析失败返回各协议 JSON 错误；Chat 流式注入 `include_usage` 被上游 400 拒绝时去掉字段重试一次。
+- **批次 3（数据库）**：日志 `offset` 上限 100000；`include_total=false` 时跳过 `COUNT(*)`，前端只在第一页请求总数并缓存；`/api/site` 与通配渠道最近模型并入 30s `RuntimeCache`；新增 `ONEAPI_DB_POOL_SIZE`（1–64，默认 5）；`/readyz` 返回连接池大小/空闲连接与用量队列深度、同步回退、失败计数。
+- **批次 4（性能）**：同优先级渠道改为 Efraimidis–Spirakis 单次加权排列（O(n log n)，替代逐轮求和 + `Vec::remove`）；`LiveMetrics` 按 16 分片拆分全局与渠道窗口，降低每 chunk 的锁竞争并保持“上一完整秒”语义；SSE 解析器按字节处理行，只有 `event`/`data` 才构造 String。
+- **批次 5（前端与响应头）**：`readSse` 增量处理 LF/CRLF/裸 CR，结束时冲刷最后一帧；Playground 使用 `AbortController` 在重发与卸载时取消流并忽略中止错误；Keys 的 Token 上限改为 `Number.isSafeInteger`；所有响应增加 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 与 CSP；安装向导使用 `admin::create` 返回的 id。
+- 验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（152 个测试）与 `web/` `npm run build` 均通过；`npm run lint` 为 0 error（仅 4 条既有 fast-refresh warning）。
+- 响应头与前端加载实测：以 `127.0.0.1:3110` 启动 debug 二进制，`/` 返回 4 个安全响应头；`index.html` 只引用 `/assets/*` 外部模块与样式（无内联脚本），5 个资源均返回 200；`/readyz` 返回 `database_pool_size=7` 与队列指标。当前环境没有 Playwright/浏览器驱动，控制台级 CSP 验证未执行。
+- 未纳入本轮：P1-6（密钥派生 v2）、P1-8（流式 Responses `store`）、P2-6（失败缓存抖动）、P2-8（大响应多次缓冲）、P3-8（更新信任边界），按计划需先出方案再排期。
+
 ## AOCI 状态
 
 - 版本：`0.1.0-rc22`，二进制 `/usr/local/bin/aoci`。
@@ -339,6 +377,7 @@
 1. 审查计划阶段 A–D 与 E3 已合并回 `main` 并发布 `v0.1.2`；`v0.1.3` 为日志筛选修复补丁。
 2. 阶段 E 剩余项（速率限制与额度、Prometheus `/metrics`、日志导出/重放、备份恢复、Playground 增强、多管理员/RBAC 与 PostgreSQL）仍是路线图。
 3. 后续版本按 `Cargo.toml` 版本打标签，保留数据目录升级。
+4. **优化清单 `docs/OPTIMIZATION_PLAN.md` 的批次 1–5 已完成**；剩余 P1-6、P1-8、P2-6、P2-8、P3-8 需先出方案，P4 为后续路线图。
 
 ## 交接约定
 

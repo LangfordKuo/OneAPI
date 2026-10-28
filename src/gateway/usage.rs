@@ -1,5 +1,12 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+};
 
+use serde_json::Value;
 use sqlx::{Executor, Sqlite, SqlitePool};
 use tokio::sync::mpsc;
 
@@ -75,7 +82,25 @@ impl From<&UsageRecord<'_>> for OwnedUsageRecord {
 /// record is silently dropped.
 #[derive(Debug)]
 pub struct UsageWriter {
-    tx: mpsc::Sender<OwnedUsageRecord>,
+    tx: Mutex<Option<mpsc::Sender<OwnedUsageRecord>>>,
+    handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    stats: Arc<UsageWriterStats>,
+}
+
+/// Counters surfaced by `readyz` so operators can see backpressure and loss
+/// without grepping logs.
+#[derive(Debug, Default)]
+pub struct UsageWriterStats {
+    sync_fallbacks: AtomicU64,
+    failed_writes: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct UsageWriterSnapshot {
+    pub queue_depth: usize,
+    pub queue_capacity: usize,
+    pub sync_fallbacks: u64,
+    pub failed_writes: u64,
 }
 
 impl UsageWriter {
@@ -84,12 +109,74 @@ impl UsageWriter {
 
     pub fn start(pool: SqlitePool) -> Self {
         let (tx, rx) = mpsc::channel(Self::QUEUE_CAPACITY);
-        tokio::spawn(write_loop(pool, rx));
-        Self { tx }
+        let stats = Arc::new(UsageWriterStats::default());
+        let handle = tokio::spawn(write_loop(pool, rx, Arc::clone(&stats)));
+        Self {
+            tx: Mutex::new(Some(tx)),
+            handle: Mutex::new(Some(handle)),
+            stats,
+        }
+    }
+
+    pub fn snapshot(&self) -> UsageWriterSnapshot {
+        let slot = self
+            .tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (queue_depth, queue_capacity) = match slot.as_ref() {
+            Some(tx) => (
+                tx.max_capacity().saturating_sub(tx.capacity()),
+                tx.max_capacity(),
+            ),
+            None => (0, Self::QUEUE_CAPACITY),
+        };
+        UsageWriterSnapshot {
+            queue_depth,
+            queue_capacity,
+            sync_fallbacks: self.stats.sync_fallbacks.load(Ordering::Relaxed),
+            failed_writes: self.stats.failed_writes.load(Ordering::Relaxed),
+        }
+    }
+
+    fn note_sync_fallback(&self) {
+        self.stats.sync_fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn note_failed_writes(&self, count: u64) {
+        self.stats.failed_writes.fetch_add(count, Ordering::Relaxed);
     }
 
     fn try_enqueue(&self, record: OwnedUsageRecord) -> bool {
-        self.tx.try_send(record).is_ok()
+        let slot = self
+            .tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match slot.as_ref() {
+            Some(tx) => tx.try_send(record).is_ok(),
+            // Shutdown has taken the sender; the caller writes synchronously.
+            None => false,
+        }
+    }
+
+    /// Close the queue and wait until every queued record is persisted. Taking
+    /// the sender first guarantees no record can be enqueued after the drain
+    /// starts; later callers fall back to synchronous writes.
+    pub async fn shutdown(&self) {
+        let sender = self
+            .tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        drop(sender);
+
+        let handle = self
+            .handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
     }
 }
 
@@ -99,6 +186,7 @@ pub async fn record(state: &AppState, record: &UsageRecord<'_>) {
         if writer.try_enqueue(OwnedUsageRecord::from(record)) {
             return;
         }
+        writer.note_sync_fallback();
         tracing::warn!(
             request_id = record.request_id,
             "usage write queue is full; writing synchronously"
@@ -106,6 +194,9 @@ pub async fn record(state: &AppState, record: &UsageRecord<'_>) {
     }
 
     if let Err(error) = insert(&state.db, record).await {
+        if let Some(writer) = &state.usage_writer {
+            writer.note_failed_writes(1);
+        }
         tracing::error!(
             error = %error,
             request_id = record.request_id,
@@ -165,7 +256,11 @@ where
     Ok(())
 }
 
-async fn write_loop(pool: SqlitePool, mut rx: mpsc::Receiver<OwnedUsageRecord>) {
+async fn write_loop(
+    pool: SqlitePool,
+    mut rx: mpsc::Receiver<OwnedUsageRecord>,
+    stats: Arc<UsageWriterStats>,
+) {
     while let Some(first) = rx.recv().await {
         let mut batch = vec![first];
         while batch.len() < UsageWriter::BATCH_SIZE {
@@ -176,6 +271,9 @@ async fn write_loop(pool: SqlitePool, mut rx: mpsc::Receiver<OwnedUsageRecord>) 
         }
 
         if let Err(error) = write_batch(&pool, &batch).await {
+            stats
+                .failed_writes
+                .fetch_add(batch.len() as u64, Ordering::Relaxed);
             tracing::error!(
                 error = %error,
                 count = batch.len(),
@@ -216,13 +314,50 @@ fn token(value: Option<u64>) -> Option<i64> {
     value.and_then(|value| i64::try_from(value).ok())
 }
 
+/// Approximate token count for free text (roughly four characters per token).
+pub fn estimate_text_tokens(text: &str) -> u64 {
+    (text.chars().count() as u64).div_ceil(4)
+}
+
+/// Approximate input token count for a request body. Only used when the
+/// upstream omits its usage block, so an unaccounted request can never be
+/// billed as zero tokens.
+pub fn estimate_request_tokens(value: &Value) -> u64 {
+    fn chars(value: &Value) -> u64 {
+        match value {
+            Value::String(text) => text.chars().count() as u64,
+            Value::Array(items) => items.iter().map(chars).sum(),
+            Value::Object(object) => object
+                .iter()
+                .filter(|(key, _)| key.as_str() != "model" && key.as_str() != "stream")
+                .map(|(_, value)| chars(value))
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    chars(value).div_ceil(4).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
+    use serde_json::json;
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn estimates_missing_usage_from_text() {
+        let body = json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "12345678"}],
+        });
+        assert_eq!(estimate_request_tokens(&body), 3);
+        assert_eq!(estimate_text_tokens("12345678"), 2);
+        assert_eq!(estimate_text_tokens(""), 0);
+    }
 
     #[tokio::test]
     async fn queued_records_are_persisted() {
@@ -235,6 +370,7 @@ mod tests {
             log_level: "error".to_string(),
             cookie_secure: false,
             trust_proxy: false,
+            database_pool_size: 5,
         };
         let pool = crate::db::connect(&config).await.expect("database");
         let writer = UsageWriter::start(pool.clone());
@@ -274,6 +410,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_flushes_queued_records() {
+        let temp = TempDir::new().expect("temp dir");
+        let config = crate::config::Config {
+            addr: "127.0.0.1:0".parse().expect("address"),
+            data_dir: temp.path().to_path_buf(),
+            database_url: None,
+            database_path: temp.path().join("test.db"),
+            log_level: "error".to_string(),
+            cookie_secure: false,
+            trust_proxy: false,
+            database_pool_size: 5,
+        };
+        let pool = crate::db::connect(&config).await.expect("database");
+        let writer = UsageWriter::start(pool.clone());
+
+        writer.try_enqueue(OwnedUsageRecord {
+            request_id: "req-shutdown".to_string(),
+            source: "gateway".to_string(),
+            api_key_id: None,
+            channel_id: None,
+            model: "gpt-test".to_string(),
+            upstream_model: None,
+            inbound_protocol: "chat".to_string(),
+            upstream_protocol: "chat".to_string(),
+            stream: false,
+            status_code: 200,
+            attempts: 1,
+            error_type: None,
+            error_message: None,
+            usage: Usage::default(),
+            latency_ms: 5,
+            first_token_ms: None,
+            created_at: crate::models::now_ms(),
+        });
+
+        writer.shutdown().await;
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM usage_logs WHERE request_id = 'req-shutdown'")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
     async fn queued_usage_updates_key_counter_and_disables_at_limit() {
         let temp = TempDir::new().expect("temp dir");
         let config = crate::config::Config {
@@ -284,6 +466,7 @@ mod tests {
             log_level: "error".to_string(),
             cookie_secure: false,
             trust_proxy: false,
+            database_pool_size: 5,
         };
         let pool = crate::db::connect(&config).await.expect("database");
         let key = crate::models::api_key::create_with_limits(

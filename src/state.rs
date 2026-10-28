@@ -15,7 +15,7 @@ use crate::{
     gateway::usage::UsageWriter,
     metrics::LiveMetrics,
     models::{
-        channel::{self, Channel},
+        channel::{self, Channel, PreparedChannel},
         now_ms,
         setting::GatewayDefaults,
     },
@@ -30,13 +30,17 @@ const CACHE_TTL: Duration = Duration::from_secs(30);
 /// database edits and multi-process deployments.
 #[derive(Debug, Default)]
 pub struct RuntimeCache {
-    channels: RwLock<Option<(Instant, Vec<Channel>)>>,
+    channels: RwLock<Option<(Instant, Arc<Vec<PreparedChannel>>)>>,
     defaults: RwLock<Option<(Instant, GatewayDefaults)>>,
     site_domain: RwLock<Option<(Instant, String)>>,
+    site_name: RwLock<Option<(Instant, String)>>,
+    recent_models: RwLock<Option<(Instant, Vec<String>)>>,
 }
 
 impl RuntimeCache {
-    pub async fn channels(&self, db: &SqlitePool) -> sqlx::Result<Vec<Channel>> {
+    /// Cached channels with their protocol configuration already parsed. The
+    /// returned `Arc` is shared, so a request never clones the whole list.
+    pub async fn channels(&self, db: &SqlitePool) -> sqlx::Result<Arc<Vec<PreparedChannel>>> {
         if let Some((loaded_at, channels)) =
             self.channels.read().ok().and_then(|guard| guard.clone())
         {
@@ -46,10 +50,12 @@ impl RuntimeCache {
         }
 
         let channels = crate::models::channel::list(db).await?;
+        let prepared: Arc<Vec<PreparedChannel>> =
+            Arc::new(channels.into_iter().map(PreparedChannel::new).collect());
         if let Ok(mut guard) = self.channels.write() {
-            *guard = Some((Instant::now(), channels.clone()));
+            *guard = Some((Instant::now(), prepared.clone()));
         }
-        Ok(channels)
+        Ok(prepared)
     }
 
     pub async fn defaults(&self, db: &SqlitePool) -> sqlx::Result<GatewayDefaults> {
@@ -108,6 +114,52 @@ impl RuntimeCache {
         if let Ok(mut guard) = self.site_domain.write() {
             *guard = None;
         }
+    }
+
+    /// Public branding name, read by `/api/site` before authentication.
+    pub async fn site_name(&self, db: &SqlitePool) -> sqlx::Result<String> {
+        if let Some((loaded_at, name)) = self.site_name.read().ok().and_then(|guard| guard.clone())
+        {
+            if loaded_at.elapsed() < CACHE_TTL {
+                return Ok(name);
+            }
+        }
+
+        let name = crate::models::setting::get(db, "site_name")
+            .await?
+            .unwrap_or_else(|| "OneAPI".to_string());
+        if let Ok(mut guard) = self.site_name.write() {
+            *guard = Some((Instant::now(), name.clone()));
+        }
+        Ok(name)
+    }
+
+    pub fn invalidate_site_name(&self) {
+        if let Ok(mut guard) = self.site_name.write() {
+            *guard = None;
+        }
+    }
+
+    /// Models observed in the last 30 days, used to fill the catalog for
+    /// wildcard channels. Aggregating on every model-list request is wasteful.
+    pub async fn recent_models(&self, db: &SqlitePool) -> sqlx::Result<Vec<String>> {
+        if let Some((loaded_at, models)) = self
+            .recent_models
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+        {
+            if loaded_at.elapsed() < CACHE_TTL {
+                return Ok(models);
+            }
+        }
+
+        let since = now_ms() - 30 * 24 * 60 * 60 * 1000;
+        let models = crate::models::usage_log::recent_models(db, since, 200).await?;
+        if let Ok(mut guard) = self.recent_models.write() {
+            *guard = Some((Instant::now(), models.clone()));
+        }
+        Ok(models)
     }
 }
 

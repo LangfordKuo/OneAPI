@@ -84,6 +84,7 @@ async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
 
     let updates = state.updates.clone();
     let shutdown_updates = updates.clone();
+    let usage_writer_shutdown = state.usage_writer.clone();
     let app = app::router(state);
     let listener = tokio::net::TcpListener::bind(config.addr)
         .await
@@ -108,6 +109,11 @@ async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     })
     .await
     .context("HTTP server failed")?;
+
+    // Flush queued usage rows before a restart replaces the process.
+    if let Some(writer) = usage_writer_shutdown {
+        writer.shutdown().await;
+    }
 
     if updates
         .restart_requested

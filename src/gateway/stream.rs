@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    responses_state,
+    error, responses_state,
     usage::{self, UsageRecord},
 };
 
@@ -59,8 +59,13 @@ pub struct StreamJob {
     pub started: Instant,
     pub attempts: u32,
     pub idle_timeout: Duration,
+    /// Absolute deadline for receiving the first frame; after this the request
+    /// is no longer committed to this channel.
+    pub commit_deadline: Instant,
     pub passthrough: bool,
     pub client_wants_usage: bool,
+    /// Approximate input token count, used when the upstream omits usage.
+    pub input_token_estimate: u64,
     pub response_id: Option<String>,
     pub store_response: bool,
     pub store_request_detail: bool,
@@ -69,6 +74,15 @@ pub struct StreamJob {
     pub stream: ByteStream,
     /// Half-open trial lease for a recovering channel; held until the stream ends.
     pub _probe: Option<ProbeLease>,
+}
+
+/// Clamp upstream error text before it reaches the client, the usage log, or
+/// the channel health columns.
+fn bounded_error(error_type: String, message: String) -> (String, String) {
+    (
+        error::truncate_message(&error_type, 128),
+        error::truncate_message(&message, 1024),
+    )
 }
 
 /// Commit the stream to the client only after the first upstream SSE frame has
@@ -113,6 +127,9 @@ enum FrameOutcome {
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_FRAME: &[u8] = b": keep-alive\n\n";
+/// Cap the bytes buffered for a single unterminated SSE frame. Without this an
+/// upstream can stream an endless line and pin memory in the parser.
+const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
 
 enum WaitOutcome {
     Next(Option<Result<Bytes, std::io::Error>>),
@@ -168,8 +185,29 @@ async fn run(
         if stream_done {
             break None;
         }
-        match timeout(job.idle_timeout, upstream.next()).await {
-            Ok(Some(Ok(chunk))) => pending.extend(parser.push(&chunk)),
+        let now = Instant::now();
+        if now >= job.commit_deadline {
+            let _ = ready.send(Err(StreamFailure::retryable(
+                "upstream_stream_timeout",
+                "upstream did not send the first event before the commit deadline",
+            )));
+            return;
+        }
+        // The idle timeout is per chunk, but committing to a channel must have
+        // an absolute deadline: a trickle of partial data must not hold the
+        // request open indefinitely.
+        let wait = job.idle_timeout.min(job.commit_deadline - now);
+        match timeout(wait, upstream.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                pending.extend(parser.push(&chunk));
+                if parser.buffered_len() > MAX_SSE_BUFFER {
+                    let _ = ready.send(Err(StreamFailure::retryable(
+                        "upstream_stream_too_large",
+                        "upstream stream frame exceeded the size limit",
+                    )));
+                    return;
+                }
+            }
             Ok(Some(Err(error))) => {
                 let _ = ready.send(Err(StreamFailure::retryable(
                     "upstream_unreachable",
@@ -182,9 +220,14 @@ async fn run(
                 stream_done = true;
             }
             Err(_) => {
+                let committed_late = Instant::now() >= job.commit_deadline;
                 let _ = ready.send(Err(StreamFailure::retryable(
                     "upstream_stream_timeout",
-                    "upstream did not send a stream event before the idle timeout",
+                    if committed_late {
+                        "upstream did not send the first event before the commit deadline"
+                    } else {
+                        "upstream did not send a stream event before the idle timeout"
+                    },
                 )));
                 return;
             }
@@ -200,6 +243,7 @@ async fn run(
     };
 
     if let Some((error_type, message)) = frame_error(job.upstream, &first) {
+        let (error_type, message) = bounded_error(error_type, message);
         let _ = ready.send(Err(StreamFailure::retryable(error_type, message)));
         return;
     }
@@ -245,7 +289,7 @@ async fn run(
                     break;
                 }
                 WaitOutcome::TimedOut => {
-                    stream_error = Some((
+                    stream_error = Some(bounded_error(
                         "upstream_stream_timeout".to_string(),
                         format!("upstream stream was idle for {:?}", job.idle_timeout),
                     ));
@@ -254,10 +298,21 @@ async fn run(
                 }
                 WaitOutcome::Next(Some(Ok(chunk))) => {
                     pending.extend(parser.push(&chunk));
+                    if parser.buffered_len() > MAX_SSE_BUFFER {
+                        stream_error = Some(bounded_error(
+                            "upstream_stream_too_large".to_string(),
+                            "upstream stream frame exceeded the size limit".to_string(),
+                        ));
+                        synthesize_error = true;
+                        break;
+                    }
                     continue;
                 }
                 WaitOutcome::Next(Some(Err(error))) => {
-                    stream_error = Some(("upstream_unreachable".to_string(), error.to_string()));
+                    stream_error = Some(bounded_error(
+                        "upstream_unreachable".to_string(),
+                        error.to_string(),
+                    ));
                     synthesize_error = true;
                     break;
                 }
@@ -296,7 +351,7 @@ async fn run(
                 break;
             }
             FrameOutcome::Failed(error_type, message) => {
-                stream_error = Some((error_type, message));
+                stream_error = Some(bounded_error(error_type, message));
                 break;
             }
         }
@@ -361,7 +416,7 @@ async fn run(
             }
 
             if let (Some(api_key_id), Some(request)) = (job.api_key_id, &job.stored_request) {
-                if let Err(error) = responses_state::store(
+                match responses_state::store(
                     &job.state,
                     api_key_id,
                     &job.client_model,
@@ -370,11 +425,16 @@ async fn run(
                 )
                 .await
                 {
-                    tracing::warn!(
+                    Ok(true) => {}
+                    Ok(false) => tracing::warn!(
+                        request_id = %job.request_id,
+                        "streamed response was too large to persist"
+                    ),
+                    Err(error) => tracing::warn!(
                         error = %error,
                         request_id = %job.request_id,
                         "failed to persist Responses state"
-                    );
+                    ),
                 }
             }
         }
@@ -386,6 +446,7 @@ async fn run(
             if let Err(error) = models::request_detail::insert(
                 &job.state.db,
                 &job.request_id,
+                job.api_key_id.unwrap_or(0),
                 request,
                 &response,
                 models::now_ms(),
@@ -407,6 +468,12 @@ async fn run(
             job.state.live.add_tokens(Some(job.channel_id), extra);
         }
     }
+
+    // A stream that is interrupted (or an upstream that never reports usage)
+    // must still count against the API key quota. Prefer reported values and
+    // fall back to the locally accumulated estimate.
+    let mut recorded_usage = tokens.clone();
+    recorded_usage.fill_partial_estimate(job.input_token_estimate, estimated_tokens);
 
     let status_code = if client_disconnected {
         499
@@ -448,7 +515,7 @@ async fn run(
         attempts: job.attempts,
         error_type,
         error_message,
-        usage: &tokens,
+        usage: &recorded_usage,
         latency_ms: job.started.elapsed().as_millis() as i64,
         first_token_ms: first_token_at.map(|at| at.duration_since(job.started).as_millis() as i64),
         created_at: models::now_ms(),
@@ -696,43 +763,52 @@ fn frame_error(protocol: Protocol, frame: &SseFrame) -> Option<(String, String)>
 }
 
 fn frame_has_content(protocol: Protocol, frame: &SseFrame) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(&frame.data) else {
-        return false;
-    };
-
     match protocol {
-        Protocol::Chat => value
-            .get("choices")
-            .and_then(Value::as_array)
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice.get("delta"))
-            .is_some_and(|delta| {
-                delta
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| !text.is_empty())
-                    || delta
-                        .get("reasoning_content")
-                        .and_then(Value::as_str)
-                        .is_some_and(|text| !text.is_empty())
-                    || delta
-                        .get("reasoning")
-                        .and_then(Value::as_str)
-                        .is_some_and(|text| !text.is_empty())
-                    || delta
-                        .get("tool_calls")
-                        .and_then(Value::as_array)
-                        .is_some_and(|calls| !calls.is_empty())
-            }),
         Protocol::Anthropic => frame.event.as_deref() == Some("content_block_delta"),
         Protocol::Responses => frame
             .event
             .as_deref()
             .is_some_and(|event| event.ends_with(".delta")),
+        Protocol::Chat => {
+            // Cheap pre-check so most frames are never parsed a second time.
+            if !frame.data.contains("\"delta\"") {
+                return false;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(&frame.data) else {
+                return false;
+            };
+            value
+                .get("choices")
+                .and_then(Value::as_array)
+                .and_then(|choices| choices.first())
+                .and_then(|choice| choice.get("delta"))
+                .is_some_and(|delta| {
+                    delta
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.is_empty())
+                        || delta
+                            .get("reasoning_content")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| !text.is_empty())
+                        || delta
+                            .get("reasoning")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| !text.is_empty())
+                        || delta
+                            .get("tool_calls")
+                            .and_then(Value::as_array)
+                            .is_some_and(|calls| !calls.is_empty())
+                })
+        }
     }
 }
 
 fn is_chat_usage_only(frame: &SseFrame) -> bool {
+    // Only the final usage chunk carries this field; skip parsing the rest.
+    if !frame.data.contains("\"usage\"") {
+        return false;
+    }
     let Ok(value) = serde_json::from_str::<Value>(&frame.data) else {
         return false;
     };
@@ -845,6 +921,7 @@ mod tests {
             log_level: "error".to_string(),
             cookie_secure: false,
             trust_proxy: false,
+            database_pool_size: 5,
         };
         let db = db::connect(&config).await.expect("database");
         let crypto = std::sync::Arc::new(
@@ -917,8 +994,10 @@ mod tests {
             started: Instant::now(),
             attempts: 1,
             idle_timeout: Duration::from_secs(1),
+            commit_deadline: Instant::now() + Duration::from_secs(5),
             passthrough: true,
             client_wants_usage: false,
+            input_token_estimate: 10,
             response_id: None,
             store_response: false,
             store_request_detail: false,
@@ -990,8 +1069,8 @@ mod tests {
 
         let logged = timeout(Duration::from_secs(3), async {
             loop {
-                let row: Option<(i64, Option<String>)> = sqlx::query_as(
-                    "SELECT status_code, error_type FROM usage_logs
+                let row: Option<(i64, Option<String>, Option<i64>)> = sqlx::query_as(
+                    "SELECT status_code, error_type, total_tokens FROM usage_logs
                      WHERE request_id = 'req-test' ORDER BY id DESC LIMIT 1",
                 )
                 .fetch_optional(&state.db)
@@ -1009,6 +1088,9 @@ mod tests {
 
         assert_eq!(logged.0, 499);
         assert_eq!(logged.1.as_deref(), Some("client_disconnected"));
+        // The client disconnected before any usage frame arrived, so the row
+        // must fall back to the accumulated estimate instead of zero tokens.
+        assert!(logged.2.unwrap_or(0) > 0);
     }
 
     #[tokio::test]

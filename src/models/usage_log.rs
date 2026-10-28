@@ -131,7 +131,8 @@ pub async fn list(
     filters: &LogFilters,
     limit: i64,
     offset: i64,
-) -> sqlx::Result<(Vec<UsageLogRow>, i64)> {
+    include_total: bool,
+) -> sqlx::Result<(Vec<UsageLogRow>, Option<i64>)> {
     // The WHERE keeps push_filters' " AND ..." clauses attached to the base
     // table; without it they bind to the last JOIN's ON clause and stop
     // filtering rows.
@@ -148,11 +149,15 @@ pub async fn list(
         .fetch_all(pool)
         .await?;
 
+    if !include_total {
+        return Ok((rows, None));
+    }
+
     let mut count = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM usage_logs l WHERE 1=1");
     push_filters(&mut count, filters);
     let total: i64 = count.build_query_scalar().fetch_one(pool).await?;
 
-    Ok((rows, total))
+    Ok((rows, Some(total)))
 }
 
 pub async fn find_by_request_id(
@@ -185,11 +190,29 @@ pub async fn recent_models(pool: &SqlitePool, since: i64, limit: i64) -> sqlx::R
 pub async fn detail_bodies(
     pool: &SqlitePool,
     request_id: &str,
+    api_key_id: i64,
 ) -> sqlx::Result<Option<(Option<String>, Option<String>)>> {
-    sqlx::query_as("SELECT request_body, response_body FROM request_details WHERE request_id = ?")
-        .bind(request_id)
-        .fetch_optional(pool)
-        .await
+    let keyed = sqlx::query_as(
+        "SELECT request_body, response_body FROM request_details
+         WHERE request_id = ? AND api_key_id = ?",
+    )
+    .bind(request_id)
+    .bind(api_key_id)
+    .fetch_optional(pool)
+    .await?;
+    if keyed.is_some() {
+        return Ok(keyed);
+    }
+
+    // The API key may have been deleted (usage_logs.api_key_id becomes NULL)
+    // or the row predates per-key scoping. Fall back to the newest detail.
+    sqlx::query_as(
+        "SELECT request_body, response_body FROM request_details
+         WHERE request_id = ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await
 }
 
 #[cfg(test)]

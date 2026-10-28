@@ -97,6 +97,10 @@ pub async fn update(
     _session: AdminSession,
     Json(input): Json<SettingsInput>,
 ) -> Result<Json<SettingsOutput>, AppError> {
+    // Validate and collect everything first so a later validation failure does
+    // not leave an earlier field persisted.
+    let mut updates: Vec<(&'static str, String)> = Vec::new();
+
     if let Some(site_name) = input.site_name {
         let site_name = site_name.trim();
         if site_name.is_empty() {
@@ -104,7 +108,7 @@ pub async fn update(
                 "site_name cannot be empty".to_string(),
             ));
         }
-        setting::upsert(&state.db, "site_name", site_name).await?;
+        updates.push(("site_name", site_name.to_string()));
     }
 
     if let Some(value) = input.site_domain {
@@ -118,7 +122,7 @@ pub async fn update(
                 )
             })?
         };
-        setting::upsert(&state.db, "site_domain", &normalized).await?;
+        updates.push(("site_domain", normalized));
     }
 
     if let Some(value) = input.default_max_tokens {
@@ -127,7 +131,7 @@ pub async fn update(
                 "default_max_tokens must be positive".to_string(),
             ));
         }
-        setting::upsert(&state.db, "default_max_tokens", &value.to_string()).await?;
+        updates.push(("default_max_tokens", value.to_string()));
     }
 
     if let Some(value) = input.nonstream_timeout_seconds {
@@ -136,7 +140,7 @@ pub async fn update(
                 "nonstream_timeout_seconds must be positive".to_string(),
             ));
         }
-        setting::upsert(&state.db, "nonstream_timeout_seconds", &value.to_string()).await?;
+        updates.push(("nonstream_timeout_seconds", value.to_string()));
     }
 
     if let Some(value) = input.stream_idle_timeout_seconds {
@@ -145,7 +149,7 @@ pub async fn update(
                 "stream_idle_timeout_seconds must be positive".to_string(),
             ));
         }
-        setting::upsert(&state.db, "stream_idle_timeout_seconds", &value.to_string()).await?;
+        updates.push(("stream_idle_timeout_seconds", value.to_string()));
     }
 
     if let Some(value) = input.usage_log_retention_days {
@@ -154,7 +158,7 @@ pub async fn update(
                 "usage_log_retention_days cannot be negative".to_string(),
             ));
         }
-        setting::upsert(&state.db, "usage_log_retention_days", &value.to_string()).await?;
+        updates.push(("usage_log_retention_days", value.to_string()));
     }
 
     if let Some(value) = input.response_retention_days {
@@ -163,16 +167,14 @@ pub async fn update(
                 "response_retention_days cannot be negative".to_string(),
             ));
         }
-        setting::upsert(&state.db, "response_retention_days", &value.to_string()).await?;
+        updates.push(("response_retention_days", value.to_string()));
     }
 
     if let Some(value) = input.store_request_bodies {
-        setting::upsert(
-            &state.db,
+        updates.push((
             "store_request_bodies",
-            if value { "true" } else { "false" },
-        )
-        .await?;
+            if value { "true" } else { "false" }.to_string(),
+        ));
     }
 
     if let Some(value) = input.update_source {
@@ -182,7 +184,7 @@ pub async fn update(
                 "update_source must be github or ghproxy".to_string(),
             ));
         }
-        setting::upsert(&state.db, "update_source", value).await?;
+        updates.push(("update_source", value.to_string()));
     }
 
     if let Some(value) = input.client_ip_header {
@@ -191,11 +193,18 @@ pub async fn update(
                 "client_ip_header is not a valid HTTP header name".to_string(),
             ));
         };
-        setting::upsert(&state.db, client_ip::SETTING_KEY, &header).await?;
+        updates.push((client_ip::SETTING_KEY, header));
     }
+
+    let mut tx = state.db.begin().await?;
+    for (key, value) in &updates {
+        setting::upsert(&mut *tx, key, value).await?;
+    }
+    tx.commit().await?;
 
     state.cache.invalidate_defaults();
     state.cache.invalidate_site_domain();
+    state.cache.invalidate_site_name();
     state.clients.clear();
 
     let rows = setting::all(&state.db).await?;

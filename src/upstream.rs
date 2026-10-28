@@ -1,7 +1,8 @@
 use std::{collections::HashMap, sync::RwLock, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use axum::http::HeaderMap;
+use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder};
 
 use crate::{
@@ -10,6 +11,40 @@ use crate::{
 };
 
 const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Upper bound for a non-streaming upstream response body. Without a limit a
+/// misbehaving or compromised upstream can exhaust process memory before the
+/// gateway ever parses the JSON.
+pub const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Read an upstream response body, refusing to buffer more than [`limit`]
+/// bytes. `Content-Length` is checked first and chunked responses are counted
+/// as they arrive.
+pub async fn read_body_limited(response: reqwest::Response) -> Result<String> {
+    read_body_limited_to(response, MAX_RESPONSE_BODY_BYTES).await
+}
+
+pub async fn read_body_limited_to(response: reqwest::Response, limit: usize) -> Result<String> {
+    if let Some(length) = response.content_length() {
+        if length > limit as u64 {
+            return Err(anyhow!(
+                "upstream response is too large ({length} bytes; limit {limit})"
+            ));
+        }
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("failed to read the upstream response body")?;
+        if buffer.len().saturating_add(chunk.len()) > limit {
+            return Err(anyhow!("upstream response exceeded the {limit} byte limit"));
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+
+    Ok(String::from_utf8_lossy(&buffer).into_owned())
+}
 
 /// Client headers that are safe to forward to upstream providers. Authentication
 /// and hop-by-hop headers are deliberately excluded.
@@ -24,14 +59,15 @@ const FORWARDED_HEADERS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ClientKey {
     channel_id: i64,
-    updated_at: i64,
     timeout_ms: u64,
     stream: bool,
 }
 
 /// Reuses reqwest clients per channel so connection pools and TLS sessions
-/// survive across requests. Keys include `updated_at`, so editing a channel
-/// naturally invalidates its client.
+/// survive across requests. The key deliberately excludes `updated_at`:
+/// failure accounting bumps that column on every failed attempt, and including
+/// it would allocate a new client (and connection pool) per failure without
+/// ever evicting the old ones. Configuration edits invalidate via `clear()`.
 #[derive(Debug, Default)]
 pub struct ClientCache {
     clients: RwLock<HashMap<ClientKey, Client>>,
@@ -45,7 +81,6 @@ impl ClientCache {
             .unwrap_or(default_timeout_ms);
         let key = ClientKey {
             channel_id: channel.id,
-            updated_at: channel.updated_at,
             timeout_ms,
             stream,
         };
@@ -72,6 +107,36 @@ impl ClientCache {
             clients.clear();
         }
     }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.clients
+            .read()
+            .map(|clients| clients.len())
+            .unwrap_or_default()
+    }
+}
+
+/// Follow at most three redirects, only within the original host, and never
+/// downgrade HTTPS to plain HTTP. This keeps a semi-trusted upstream from
+/// redirecting gateway traffic to an internal address.
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let Some(original) = attempt.previous().first() else {
+            return attempt.stop();
+        };
+        let next = attempt.url();
+        let same_host = original.host_str().is_some_and(|host| {
+            next.host_str()
+                .is_some_and(|next_host| host.eq_ignore_ascii_case(next_host))
+        });
+        let downgrade = original.scheme() == "https" && next.scheme() != "https";
+        if attempt.previous().len() < 3 && same_host && !downgrade {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
 }
 
 pub fn build_client(channel: &Channel, default_timeout_ms: u64) -> Result<Client> {
@@ -83,6 +148,7 @@ pub fn build_client(channel: &Channel, default_timeout_ms: u64) -> Result<Client
     let mut builder = Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .timeout(Duration::from_millis(timeout_ms))
+        .redirect(redirect_policy())
         .user_agent(format!("OneAPI/{}", env!("CARGO_PKG_VERSION")));
 
     if let Some(proxy) = &channel.proxy_url {
@@ -103,6 +169,7 @@ pub fn build_client(channel: &Channel, default_timeout_ms: u64) -> Result<Client
 pub fn build_stream_client(channel: &Channel) -> Result<Client> {
     let mut builder = Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .redirect(redirect_policy())
         .user_agent(format!("OneAPI/{}", env!("CARGO_PKG_VERSION")));
 
     if let Some(proxy) = &channel.proxy_url {
@@ -211,7 +278,56 @@ pub fn build_request(
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
 
-    use super::forwarded_headers;
+    use crate::models::channel::Channel;
+
+    use super::{forwarded_headers, ClientCache};
+
+    fn channel(updated_at: i64) -> Channel {
+        Channel {
+            id: 7,
+            name: "test".to_string(),
+            kind: "openai_chat".to_string(),
+            kinds: r#"["openai_chat"]"#.to_string(),
+            fallback_kind: Some("openai_chat".to_string()),
+            protocol_configs: "[]".to_string(),
+            base_url: "http://localhost".to_string(),
+            api_key_enc: String::new(),
+            auth_header: "bearer".to_string(),
+            models: "[]".to_string(),
+            model_mapping: "{}".to_string(),
+            extra_headers: "{}".to_string(),
+            proxy_url: None,
+            priority: 0,
+            weight: 1,
+            timeout_ms: None,
+            enabled: 1,
+            last_error: None,
+            last_error_at: None,
+            disabled_until: None,
+            consecutive_failures: 0,
+            created_at: 0,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn client_cache_reuses_entries_across_health_updates() {
+        let cache = ClientCache::default();
+        let _first = cache.get(&channel(1), 60_000, false).expect("first");
+        let _second = cache.get(&channel(2), 60_000, false).expect("second");
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn streaming_and_non_streaming_clients_are_cached_separately() {
+        let cache = ClientCache::default();
+        let _non_stream = cache.get(&channel(1), 60_000, false).expect("non-stream");
+        let _stream = cache.get(&channel(1), 60_000, true).expect("stream");
+        assert_eq!(cache.len(), 2);
+
+        cache.clear();
+        assert_eq!(cache.len(), 0);
+    }
 
     #[test]
     fn forwards_only_allowlisted_client_headers() {

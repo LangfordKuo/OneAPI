@@ -1,4 +1,4 @@
-use std::{fs, io::Write, path::Path};
+use std::{fs, io::Write, path::Path, sync::OnceLock};
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -123,7 +123,10 @@ impl Crypto {
         match self.decrypt(encoded) {
             Ok(plaintext) => {
                 let chars: Vec<char> = plaintext.chars().collect();
-                let suffix: String = chars[chars.len().saturating_sub(4)..].iter().collect();
+                if chars.len() <= 4 {
+                    return "••••".to_string();
+                }
+                let suffix: String = chars[chars.len() - 4..].iter().collect();
                 format!("••••{suffix}")
             }
             Err(_) => "••••".to_string(),
@@ -178,6 +181,19 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
             .is_ok(),
         Err(_) => false,
     }
+}
+
+/// A hash with default Argon2 parameters, generated once from random input.
+/// Verifying against it keeps the login path's cost constant when the username
+/// does not exist, so response timing does not reveal account existence.
+pub fn dummy_password_hash() -> &'static str {
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| {
+        let mut random = [0u8; 24];
+        rand::thread_rng().fill_bytes(&mut random);
+        let password = BASE64.encode(random);
+        hash_password(&password).expect("default Argon2 parameters are valid")
+    })
 }
 
 pub fn generate_api_key() -> String {
@@ -250,5 +266,22 @@ mod tests {
         assert!(encrypted.starts_with("v1:"));
         assert_eq!(key.decrypt(&encrypted).unwrap(), "sk-upstream-secret");
         assert!(key.mask(&encrypted).ends_with("cret"));
+    }
+
+    #[test]
+    fn short_secrets_are_fully_masked() {
+        let key = Crypto {
+            key: [7u8; MASTER_KEY_LEN],
+        };
+        for secret in ["a", "abc", "abcd"] {
+            let encrypted = key.encrypt(secret).unwrap();
+            assert_eq!(key.mask(&encrypted), "••••");
+        }
+    }
+
+    #[test]
+    fn dummy_hash_is_well_formed_and_rejects_passwords() {
+        assert!(PasswordHash::new(dummy_password_hash()).is_ok());
+        assert!(!verify_password(dummy_password_hash(), "anything"));
     }
 }

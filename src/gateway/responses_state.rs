@@ -98,13 +98,16 @@ fn normalize_input(value: Option<&Value>) -> Vec<Value> {
     }
 }
 
+/// Persist a Responses object. Returns `false` when the payload is too large or
+/// has no id; callers must then report `store: false` to the client instead of
+/// promising a retrievable response.
 pub async fn store(
     state: &AppState,
     api_key_id: i64,
     model: &str,
     request: &Value,
     response: &Value,
-) -> sqlx::Result<()> {
+) -> sqlx::Result<bool> {
     let request_json = serde_json::to_string(request).unwrap_or_default();
     let response_json = serde_json::to_string(response).unwrap_or_default();
 
@@ -114,7 +117,7 @@ pub async fn store(
             response_bytes = response_json.len(),
             "response exceeds the storage limit; skipping persistence"
         );
-        return Ok(());
+        return Ok(false);
     }
 
     let id = response
@@ -123,7 +126,7 @@ pub async fn store(
         .unwrap_or_default()
         .to_string();
     if id.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let status = response
@@ -142,7 +145,9 @@ pub async fn store(
         &status,
         models::now_ms(),
     )
-    .await
+    .await?;
+
+    Ok(true)
 }
 
 pub async fn get(

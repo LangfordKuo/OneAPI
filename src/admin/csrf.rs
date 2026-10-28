@@ -31,8 +31,14 @@ pub async fn guard(
                     .headers()
                     .get("x-forwarded-host")
                     .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.split(',').next())
-                    .map(str::trim)
+                    .and_then(|value| {
+                        // Proxies normally append; the last value is the one the
+                        // trusted proxy itself added.
+                        value
+                            .split(',')
+                            .map(str::trim)
+                            .rfind(|item| !item.is_empty())
+                    })
             });
             let host = forwarded_host
                 .flatten()

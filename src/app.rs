@@ -1,4 +1,11 @@
-use axum::{extract::State, http::HeaderName, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::{Request, State},
+    http::{header, HeaderName, HeaderValue},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::get,
+    Json, Router,
+};
 use serde::Serialize;
 use tower_http::{
     compression::{
@@ -29,7 +36,34 @@ pub fn router(state: AppState) -> Router {
                 .compress_when(DefaultPredicate::new().and(NotForContentType::SSE)),
         )
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(security_headers))
         .with_state(state)
+}
+
+/// Response headers applied to the admin UI, static assets and APIs. The CSP
+/// allows the bundled SPA (external modules, inline style attributes used by
+/// Radix) while blocking third-party scripts and framing.
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data:; font-src 'self' data:; connect-src 'self'; \
+             object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        ),
+    );
+    response
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -40,9 +74,41 @@ async fn healthz() -> impl IntoResponse {
     }))
 }
 
+#[derive(Serialize)]
+struct ReadyStatus {
+    status: &'static str,
+    database_pool_size: u32,
+    database_idle_connections: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_queue: Option<UsageQueueStatus>,
+}
+
+#[derive(Serialize)]
+struct UsageQueueStatus {
+    depth: usize,
+    capacity: usize,
+    sync_fallbacks: u64,
+    failed_writes: u64,
+}
+
 async fn readyz(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     let _: i64 = sqlx::query_scalar("SELECT 1").fetch_one(&state.db).await?;
-    Ok(Json(serde_json::json!({ "status": "ready" })))
+    let usage_queue = state.usage_writer.as_ref().map(|writer| {
+        let snapshot = writer.snapshot();
+        UsageQueueStatus {
+            depth: snapshot.queue_depth,
+            capacity: snapshot.queue_capacity,
+            sync_fallbacks: snapshot.sync_fallbacks,
+            failed_writes: snapshot.failed_writes,
+        }
+    });
+
+    Ok(Json(ReadyStatus {
+        status: "ready",
+        database_pool_size: state.config.database_pool_size,
+        database_idle_connections: state.db.num_idle(),
+        usage_queue,
+    }))
 }
 
 #[derive(Serialize)]
@@ -53,9 +119,7 @@ struct SiteInfo {
 
 /// Public branding endpoint used by the login/setup pages before a session exists.
 async fn site_info(State(state): State<AppState>) -> Result<Json<SiteInfo>, AppError> {
-    let site_name = crate::models::setting::get(&state.db, "site_name")
-        .await?
-        .unwrap_or_else(|| "OneAPI".to_string());
+    let site_name = state.cache.site_name(&state.db).await?;
 
     Ok(Json(SiteInfo {
         site_name,

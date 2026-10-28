@@ -1,12 +1,13 @@
 use std::collections::BTreeSet;
 
 use axum::{
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, FromRequest, Path, Request, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 
@@ -38,11 +39,36 @@ pub fn routes() -> Router<AppState> {
         .layer(CorsLayer::permissive())
 }
 
+/// JSON extractor that maps malformed bodies to the protocol-specific error
+/// shape instead of Axum's plain-text rejection.
+pub struct ApiJson<T>(pub T);
+
+impl<S, T> FromRequest<S> for ApiJson<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = Response;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let path = request.uri().path().to_string();
+        match Json::<T>::from_request(request, state).await {
+            Ok(Json(value)) => Ok(ApiJson(value)),
+            Err(rejection) => Err(error::client_error(
+                error::protocol_for_path(&path),
+                rejection.status(),
+                rejection.body_text(),
+                "invalid_request_error",
+            )),
+        }
+    }
+}
+
 async fn chat(
     State(state): State<AppState>,
     auth: ApiKeyAuth,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    ApiJson(body): ApiJson<Value>,
 ) -> Result<Response, AppError> {
     execute::proxy(&state, &auth, Protocol::Chat, &headers, body).await
 }
@@ -51,7 +77,7 @@ async fn responses(
     State(state): State<AppState>,
     auth: ApiKeyAuth,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    ApiJson(body): ApiJson<Value>,
 ) -> Result<Response, AppError> {
     execute::proxy(&state, &auth, Protocol::Responses, &headers, body).await
 }
@@ -60,7 +86,7 @@ async fn messages(
     State(state): State<AppState>,
     auth: ApiKeyAuth,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    ApiJson(body): ApiJson<Value>,
 ) -> Result<Response, AppError> {
     execute::proxy(&state, &auth, Protocol::Anthropic, &headers, body).await
 }
@@ -72,7 +98,7 @@ async fn count_tokens(
     State(state): State<AppState>,
     auth: ApiKeyAuth,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    ApiJson(body): ApiJson<Value>,
 ) -> Result<Response, AppError> {
     if let Some(model) = body
         .get("model")
@@ -89,13 +115,11 @@ async fn count_tokens(
         }
 
         let channels = state.cache.channels(&state.db).await?;
-        let channels: Vec<_> = channels
-            .into_iter()
-            .filter(|channel| auth.key.allows_channel(channel.id))
-            .collect();
-        if let Some(candidate) = select::candidates(channels, model, Protocol::Anthropic)
-            .into_iter()
-            .find(|candidate| candidate.upstream_kind == "anthropic")
+        let allowed_channels = auth.key.channel_ids();
+        if let Some(candidate) =
+            select::candidates(&channels, model, Protocol::Anthropic, &allowed_channels)
+                .into_iter()
+                .find(|candidate| candidate.upstream_kind == "anthropic")
         {
             let defaults = models::setting::GatewayDefaults::load(&state.db).await?;
             let mut request_body = body.clone();
@@ -157,24 +181,7 @@ async fn count_tokens(
         }
     }
 
-    Ok(Json(json!({ "input_tokens": estimate_input_tokens(&body) })).into_response())
-}
-
-fn estimate_input_tokens(body: &Value) -> u64 {
-    fn char_count(value: &Value) -> u64 {
-        match value {
-            Value::String(text) => text.chars().count() as u64,
-            Value::Array(items) => items.iter().map(char_count).sum(),
-            Value::Object(object) => object
-                .iter()
-                .filter(|(key, _)| key.as_str() != "model" && key.as_str() != "stream")
-                .map(|(_, value)| char_count(value))
-                .sum(),
-            _ => 0,
-        }
-    }
-
-    char_count(body).div_ceil(4).max(1)
+    Ok(Json(json!({ "input_tokens": usage::estimate_request_tokens(&body) })).into_response())
 }
 
 async fn get_response(
@@ -279,24 +286,23 @@ async fn available_models(
     let mut result = BTreeSet::new();
     let mut has_wildcard = false;
 
-    for channel in channels {
+    for prepared in channels.iter() {
+        let channel = &prepared.channel;
         if channel.enabled == 0 || !key.allows_channel(channel.id) {
             continue;
         }
-        let catalog = models::channel::catalog_models(&channel);
-        if catalog.has_wildcard {
+        if prepared.catalog.has_wildcard {
             has_wildcard = true;
         }
-        for model in catalog.models {
-            result.insert(model);
+        for model in &prepared.catalog.models {
+            result.insert(model.clone());
         }
     }
 
     // Wildcard channels accept any model, so surface models seen in recent
     // traffic to keep model pickers useful.
     if has_wildcard {
-        let since = models::now_ms() - 30 * 24 * 60 * 60 * 1000;
-        for model in models::usage_log::recent_models(&state.db, since, 200).await? {
+        for model in state.cache.recent_models(&state.db).await? {
             if !model.is_empty() && model != "*" {
                 result.insert(model);
             }
@@ -350,6 +356,7 @@ mod tests {
             log_level: "error".to_string(),
             cookie_secure: false,
             trust_proxy: false,
+            database_pool_size: 5,
         }
     }
 
@@ -627,6 +634,58 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         assert!(rate > 0.0);
+    }
+
+    #[tokio::test]
+    async fn missing_upstream_usage_falls_back_to_estimates() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        let mut response = chat_success_body("hello");
+        response
+            .as_object_mut()
+            .expect("response object")
+            .remove("usage");
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(&server)
+            .await;
+
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let router = app::router(state.clone());
+        let (status, _) = send(
+            router,
+            "/v1/chat/completions",
+            Some(&key),
+            json!({
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "hello there"}],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (prompt, completion, total): (Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT prompt_tokens, completion_tokens, total_tokens
+                 FROM usage_logs ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&state.db)
+        .await
+        .expect("usage row");
+        assert!(prompt.unwrap_or(0) > 0);
+        assert!(completion.unwrap_or(0) > 0);
+        assert!(total.unwrap_or(0) > 0);
     }
 
     #[tokio::test]

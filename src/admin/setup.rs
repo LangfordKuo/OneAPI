@@ -91,16 +91,18 @@ pub async fn setup(
     }
 
     let password_hash = security::hash_password(&input.password).map_err(AppError::Internal)?;
-    if let Err(error) =
-        models::admin::create(&state.db, username, &password_hash, models::now_ms()).await
-    {
-        if models::admin::count(&state.db).await.unwrap_or(0) > 0 {
-            return Err(AppError::BadRequest(
-                "OneAPI is already initialized".to_string(),
-            ));
-        }
-        return Err(AppError::Database(error));
-    }
+    let admin_id =
+        match models::admin::create(&state.db, username, &password_hash, models::now_ms()).await {
+            Ok(admin_id) => admin_id,
+            Err(error) => {
+                if models::admin::count(&state.db).await.unwrap_or(0) > 0 {
+                    return Err(AppError::BadRequest(
+                        "OneAPI is already initialized".to_string(),
+                    ));
+                }
+                return Err(AppError::Database(error));
+            }
+        };
 
     if let Some(site_name) = input
         .site_name
@@ -123,7 +125,7 @@ pub async fn setup(
         ),
     };
 
-    let jar = auth::issue_session(&state, jar, 1).await?;
+    let jar = auth::issue_session(&state, jar, admin_id).await?;
 
     Ok((
         jar,

@@ -402,7 +402,7 @@ export default function SettingsPage() {
                 <Field
                   label="客户端 IP 请求头"
                   htmlFor="settings-client-ip"
-                  hint="仅当所有流量都经过可信反向代理或 Cloudflare 时配置；留空则使用 TCP 对端地址。伪造该请求头可绕过登录限速。"
+                  hint="留空时默认读取 X-Forwarded-For（仅对回环/内网对端）；填写后视为可信并直接采用，适用于 CDN 从公网回源。请确保源站端口只接受 CDN/反向代理访问。"
                 >
                   <Input
                     id="settings-client-ip"

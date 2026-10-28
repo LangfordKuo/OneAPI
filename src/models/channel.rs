@@ -93,6 +93,32 @@ pub struct CatalogModels {
     pub has_wildcard: bool,
 }
 
+/// A channel with its per-protocol configuration already parsed. The runtime
+/// cache prepares these once per refresh so a gateway request does not
+/// re-parse the same JSON for every channel it considers.
+#[derive(Debug, Clone)]
+pub struct PreparedChannel {
+    pub channel: Channel,
+    configs: Vec<ProtocolConfig>,
+    pub catalog: CatalogModels,
+}
+
+impl PreparedChannel {
+    pub fn new(channel: Channel) -> Self {
+        let configs = parse_protocol_configs(&channel);
+        let catalog = catalog_models_from(&channel, &configs);
+        Self {
+            channel,
+            configs,
+            catalog,
+        }
+    }
+
+    pub fn resolve_route(&self, inbound_kind: &str) -> Option<ResolvedRoute> {
+        resolve_route_from(&self.configs, inbound_kind)
+    }
+}
+
 const SELECT_COLUMNS: &str =
     "id, name, kind, kinds, fallback_kind, protocol_configs, base_url, api_key_enc, auth_header, models,
     model_mapping, extra_headers, proxy_url, priority, weight, timeout_ms, enabled,
@@ -267,7 +293,10 @@ pub fn parse_protocol_configs(channel: &Channel) -> Vec<ProtocolConfig> {
 /// Resolve the upstream route for an inbound protocol. `None` means the channel
 /// cannot serve that protocol (unconfigured native route or invalid target).
 pub fn resolve_route(channel: &Channel, inbound_kind: &str) -> Option<ResolvedRoute> {
-    let configs = parse_protocol_configs(channel);
+    resolve_route_from(&parse_protocol_configs(channel), inbound_kind)
+}
+
+fn resolve_route_from(configs: &[ProtocolConfig], inbound_kind: &str) -> Option<ResolvedRoute> {
     let inbound = configs
         .iter()
         .find(|config| config.protocol == inbound_kind)?;
@@ -308,16 +337,25 @@ pub fn native_configs(channel: &Channel) -> Vec<ProtocolConfig> {
 
 /// Models advertised to clients: the union of models from the native routes.
 /// Conversion routes reuse their target's models, so they are already covered.
+#[cfg(test)]
 pub fn catalog_models(channel: &Channel) -> CatalogModels {
+    let configs = parse_protocol_configs(channel);
+    catalog_models_from(channel, &configs)
+}
+
+fn catalog_models_from(channel: &Channel, configs: &[ProtocolConfig]) -> CatalogModels {
     let mut models = BTreeSet::new();
     let mut has_wildcard = false;
 
-    for config in native_configs(channel) {
-        for model in config.models {
+    for config in configs
+        .iter()
+        .filter(|config| config.mode == ProtocolMode::Native)
+    {
+        for model in &config.models {
             if model == "*" {
                 has_wildcard = true;
             } else if !model.is_empty() {
-                models.insert(model);
+                models.insert(model.clone());
             }
         }
     }
@@ -477,11 +515,23 @@ pub async fn backfill_protocol_configs(pool: &SqlitePool) -> sqlx::Result<()> {
     Ok(())
 }
 
+const MAX_ERROR_CHARS: usize = 1024;
+
+fn truncate_error(error: &str) -> String {
+    if error.chars().count() <= MAX_ERROR_CHARS {
+        return error.to_string();
+    }
+    let mut truncated: String = error.chars().take(MAX_ERROR_CHARS).collect();
+    truncated.push('…');
+    truncated
+}
+
 /// Record a failed attempt. Once a channel has failed twice in a row it enters
 /// cooldown; each further consecutive failure doubles the previous cooldown,
 /// capped at 30 minutes. A single failure only records the error so a transient
 /// upstream hiccup does not remove a channel from rotation.
 pub async fn mark_failure(pool: &SqlitePool, id: i64, error: &str, now: i64) -> sqlx::Result<()> {
+    let error = truncate_error(error);
     sqlx::query(
         "UPDATE channels SET
             consecutive_failures = consecutive_failures + 1,
@@ -495,7 +545,7 @@ pub async fn mark_failure(pool: &SqlitePool, id: i64, error: &str, now: i64) -> 
             END
          WHERE id = ?",
     )
-    .bind(error)
+    .bind(&error)
     .bind(now)
     .bind(now)
     .bind(now)
