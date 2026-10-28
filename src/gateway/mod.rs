@@ -117,7 +117,7 @@ async fn count_tokens(
         let channels = state.cache.channels(&state.db).await?;
         let health = state.cache.channel_health();
         let allowed_channels = auth.key.channel_ids();
-        if let Some(candidate) = select::candidates(
+        let candidates: Vec<_> = select::candidates(
             &channels,
             &health,
             model,
@@ -125,76 +125,95 @@ async fn count_tokens(
             &allowed_channels,
         )
         .into_iter()
-        .find(|candidate| candidate.upstream_kind == "anthropic")
-        {
-            let defaults = state.cache.defaults(&state.db).await?;
-            let mut request_body = body.clone();
-            if let Some(object) = request_body.as_object_mut() {
-                object.insert("model".into(), json!(candidate.upstream_model));
-                object.remove("stream");
-            }
+        .filter(|candidate| candidate.upstream_kind == "anthropic")
+        .collect();
 
-            // Reuse the per-channel client so connection pools and TLS
-            // sessions survive across count_tokens calls.
-            let client =
-                match state
-                    .clients
-                    .get(candidate.channel(), defaults.nonstream_timeout_ms, false)
-                {
+        if !candidates.is_empty() {
+            let defaults = state.cache.defaults(&state.db).await?;
+            let mut client_error: Option<(StatusCode, String, String)> = None;
+            let mut last_message = "no upstream channel succeeded".to_string();
+
+            for candidate in candidates {
+                let mut request_body = body.clone();
+                if let Some(object) = request_body.as_object_mut() {
+                    object.insert("model".into(), json!(candidate.upstream_model));
+                    object.remove("stream");
+                }
+
+                // Reuse the per-channel client so connection pools and TLS
+                // sessions survive across count_tokens calls.
+                let client = match state.clients.get(
+                    candidate.channel(),
+                    defaults.nonstream_timeout_ms,
+                    false,
+                ) {
                     Ok(client) => client,
                     Err(error) => {
-                        return Ok(error::client_error(
-                            Protocol::Anthropic,
-                            StatusCode::BAD_GATEWAY,
-                            error.to_string(),
-                            "upstream_configuration_error",
-                        ))
+                        last_message = error.to_string();
+                        continue;
                     }
                 };
-            let url = format!(
-                "{}/messages/count_tokens",
-                candidate.upstream_config().base_url.trim_end_matches('/')
-            );
-            let request = match upstream::apply_auth(
-                client.post(url).json(&request_body),
-                candidate.upstream_config(),
-                &state.crypto,
-                "anthropic",
-                &headers,
-            ) {
-                Ok(request) => request,
-                Err(error) => {
-                    return Ok(error::client_error(
-                        Protocol::Anthropic,
-                        StatusCode::BAD_GATEWAY,
-                        error.to_string(),
-                        "upstream_configuration_error",
-                    ))
-                }
-            };
+                let url = format!(
+                    "{}/messages/count_tokens",
+                    candidate.upstream_config().base_url.trim_end_matches('/')
+                );
+                let request = match upstream::apply_auth(
+                    client.post(url).json(&request_body),
+                    candidate.upstream_config(),
+                    &state.crypto,
+                    "anthropic",
+                    &headers,
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        last_message = error.to_string();
+                        continue;
+                    }
+                };
 
-            match request.send().await {
-                Ok(response) => {
-                    let status = response.status();
-                    // Bound the buffered body the same way as every other
-                    // upstream read; a misbehaving upstream must not pin memory.
-                    let bytes = upstream::read_body_limited_bytes(response)
-                        .await
-                        .unwrap_or_default();
+                let response = match request.send().await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        last_message = error.to_string();
+                        continue;
+                    }
+                };
+                let status = response.status();
+                // Bound the buffered body the same way as every other
+                // upstream read; a misbehaving upstream must not pin memory.
+                let bytes = upstream::read_body_limited_bytes(response)
+                    .await
+                    .unwrap_or_default();
+                if status.is_success() {
                     return Ok(
                         (status, [(header::CONTENT_TYPE, "application/json")], bytes)
                             .into_response(),
                     );
                 }
-                Err(error) => {
-                    return Ok(error::client_error(
-                        Protocol::Anthropic,
-                        StatusCode::BAD_GATEWAY,
-                        error.to_string(),
-                        "upstream_unreachable",
-                    ))
+
+                let text = String::from_utf8_lossy(&bytes);
+                let value = serde_json::from_slice::<Value>(&bytes).ok();
+                let (error_type, message) = execute::upstream_error_info(value.as_ref(), &text);
+                // count_tokens is an auxiliary endpoint that not every
+                // compatible provider implements, so failures here do not feed
+                // channel health; they only drive failover and the final error.
+                if !execute::penalizes_channel(status) && client_error.is_none() {
+                    client_error = Some((status, error_type.clone(), message.clone()));
                 }
+                last_message = message;
             }
+
+            return Ok(match client_error {
+                Some((status, error_type, message)) => {
+                    error::client_error(Protocol::Anthropic, status, message, &error_type)
+                }
+                None => error::client_error(
+                    Protocol::Anthropic,
+                    StatusCode::BAD_GATEWAY,
+                    format!("all upstream channels failed: {last_message}"),
+                    "upstream_error",
+                ),
+            });
         }
     }
 
@@ -361,6 +380,7 @@ mod tests {
         config::Config,
         db,
         models::{self, channel::ChannelWrite, now_ms},
+        protocol::Protocol,
         security,
         state::AppState,
     };
@@ -940,7 +960,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_error_is_not_retried() {
+    async fn client_error_fails_over_to_the_next_channel() {
         let (_temp, state) = test_state().await;
         let key = seed_key(&state).await;
 
@@ -956,9 +976,7 @@ mod tests {
         let healthy = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(chat_success_body("should not happen")),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_success_body("recovered")))
             .mount(&healthy)
             .await;
 
@@ -971,7 +989,7 @@ mod tests {
             "bad-key",
         )
         .await;
-        seed_channel(
+        let good_id = seed_channel(
             &state,
             "openai_chat",
             &format!("{}/v1", healthy.uri()),
@@ -990,8 +1008,8 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"]["message"], json!("bad input"));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["choices"][0]["message"]["content"], json!("recovered"));
 
         let (attempts, channel_id): (i64, Option<i64>) =
             sqlx::query_as("SELECT attempts, channel_id FROM usage_logs ORDER BY id DESC LIMIT 1")
@@ -999,11 +1017,314 @@ mod tests {
                 .await
                 .expect("usage row");
 
-        assert_eq!(attempts, 1);
-        assert_eq!(channel_id, Some(first_id));
+        assert_eq!(attempts, 2);
+        assert_eq!(channel_id, Some(good_id));
         assert_eq!(
-            healthy.received_requests().await.unwrap_or_default().len(),
-            0
+            rejecting
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .len(),
+            1
+        );
+        // A request-shaped error must not cool the rejecting channel down.
+        let (failures, disabled_until): (i64, Option<i64>) = sqlx::query_as(
+            "SELECT consecutive_failures, disabled_until FROM channels WHERE id = ?",
+        )
+        .bind(first_id)
+        .fetch_one(&state.db)
+        .await
+        .expect("channel row");
+        assert_eq!(failures, 0);
+        assert!(disabled_until.is_none());
+    }
+
+    #[tokio::test]
+    async fn all_channels_failing_with_client_error_returns_client_error() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+
+        let mut servers = Vec::new();
+        for priority in [100, 10] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                    "error": {"message": "bad input", "type": "invalid_request_error"}
+                })))
+                .mount(&server)
+                .await;
+            seed_channel(
+                &state,
+                "openai_chat",
+                &format!("{}/v1", server.uri()),
+                &["gpt-test"],
+                priority,
+                "bad-key",
+            )
+            .await;
+            servers.push(server);
+        }
+
+        let router = app::router(state.clone());
+        let (status, body) = send(
+            router,
+            "/v1/chat/completions",
+            Some(&key),
+            json!({"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["message"], json!("bad input"));
+
+        let (attempts, status_code): (i64, i64) =
+            sqlx::query_as("SELECT attempts, status_code FROM usage_logs ORDER BY id DESC LIMIT 1")
+                .fetch_one(&state.db)
+                .await
+                .expect("usage row");
+        assert_eq!(attempts, 2);
+        assert_eq!(status_code, 400);
+        let mut received = 0;
+        for server in &servers {
+            received += server.received_requests().await.unwrap_or_default().len();
+        }
+        assert_eq!(received, 2);
+    }
+
+    #[tokio::test]
+    async fn cooled_down_channels_report_recovering_not_missing_model() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+
+        let failing = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "error": {"message": "boom", "type": "server_error"}
+            })))
+            .mount(&failing)
+            .await;
+
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", failing.uri()),
+            &["gpt-test"],
+            10,
+            "bad-key",
+        )
+        .await;
+
+        let body = json!({"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]});
+        for _ in 0..2 {
+            let (status, _) = send(
+                app::router(state.clone()),
+                "/v1/chat/completions",
+                Some(&key),
+                body.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+        }
+
+        let (status, body) = send(
+            app::router(state.clone()),
+            "/v1/chat/completions",
+            Some(&key),
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["type"], json!("channel_recovering"));
+    }
+
+    #[tokio::test]
+    async fn recovery_probe_brings_a_cooling_channel_back_online() {
+        let (_temp, state) = test_state().await;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_success_body("pong")))
+            .mount(&server)
+            .await;
+
+        let channel_id = seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+        let now = now_ms();
+        sqlx::query(
+            "UPDATE channels SET consecutive_failures = 2, disabled_until = ?, last_error = 'boom', last_error_at = ? WHERE id = ?",
+        )
+        .bind(now + 600_000)
+        .bind(now)
+        .bind(channel_id)
+        .execute(&state.db)
+        .await
+        .expect("cooldown");
+        state.cache.invalidate_channels();
+
+        let summary = crate::recovery::probe_unhealthy_channels(&state).await;
+        assert_eq!(summary.probed, 1);
+        assert_eq!(summary.recovered, 1);
+        assert_eq!(summary.still_down, 0);
+
+        let (failures, disabled_until): (i64, Option<i64>) = sqlx::query_as(
+            "SELECT consecutive_failures, disabled_until FROM channels WHERE id = ?",
+        )
+        .bind(channel_id)
+        .fetch_one(&state.db)
+        .await
+        .expect("channel row");
+        assert_eq!(failures, 0);
+        assert!(disabled_until.is_none());
+
+        let channels = state.cache.channels(&state.db).await.expect("channels");
+        let health = state.cache.channel_health();
+        assert_eq!(
+            super::select::candidates(&channels, &health, "gpt-test", Protocol::Chat, &[]).len(),
+            1
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_probe_keeps_failed_channels_cooling() {
+        let (_temp, state) = test_state().await;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "error": {"message": "boom", "type": "server_error"}
+            })))
+            .mount(&server)
+            .await;
+
+        let channel_id = seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+        let now = now_ms();
+        sqlx::query(
+            "UPDATE channels SET consecutive_failures = 2, disabled_until = ?, last_error = 'boom', last_error_at = ? WHERE id = ?",
+        )
+        .bind(now - 1)
+        .bind(now)
+        .bind(channel_id)
+        .execute(&state.db)
+        .await
+        .expect("cooldown");
+        state.cache.invalidate_channels();
+
+        let summary = crate::recovery::probe_unhealthy_channels(&state).await;
+        assert_eq!(summary.probed, 1);
+        assert_eq!(summary.recovered, 0);
+        assert_eq!(summary.still_down, 1);
+
+        let (failures, disabled_until, last_error): (i64, Option<i64>, Option<String>) =
+            sqlx::query_as(
+                "SELECT consecutive_failures, disabled_until, last_error FROM channels WHERE id = ?",
+            )
+            .bind(channel_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("channel row");
+        // A probe must not grow the traffic failure count, but it keeps the
+        // channel out of rotation until the next check.
+        assert_eq!(failures, 2);
+        assert!(disabled_until.unwrap_or(0) > now);
+        assert!(last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn malformed_success_body_fails_over_to_the_next_channel() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+
+        let malformed = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("not json", "application/json"))
+            .mount(&malformed)
+            .await;
+
+        let healthy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_mock",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [{"type": "text", "text": "recovered"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {"input_tokens": 20, "output_tokens": 8},
+            })))
+            .mount(&healthy)
+            .await;
+
+        seed_channel(
+            &state,
+            "anthropic",
+            &format!("{}/v1", malformed.uri()),
+            &["gpt-test"],
+            100,
+            "bad-key",
+        )
+        .await;
+        let good_id = seed_channel(
+            &state,
+            "anthropic",
+            &format!("{}/v1", healthy.uri()),
+            &["gpt-test"],
+            10,
+            "good-key",
+        )
+        .await;
+
+        let router = app::router(state.clone());
+        let (status, body) = send(
+            router,
+            "/v1/chat/completions",
+            Some(&key),
+            json!({"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["choices"][0]["message"]["content"], json!("recovered"));
+
+        let (attempts, channel_id): (i64, Option<i64>) =
+            sqlx::query_as("SELECT attempts, channel_id FROM usage_logs ORDER BY id DESC LIMIT 1")
+                .fetch_one(&state.db)
+                .await
+                .expect("usage row");
+        assert_eq!(attempts, 2);
+        assert_eq!(channel_id, Some(good_id));
+        assert_eq!(
+            malformed
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .len(),
+            1
         );
     }
 
@@ -1205,6 +1526,112 @@ mod tests {
         assert_eq!(attempts, 2);
         assert_eq!(channel, Some(healthy_id));
         assert_eq!(stream, 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_client_error_fails_over_and_reports_status_when_all_fail() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+
+        let rejecting = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": {"message": "bad input", "type": "invalid_request_error"}
+            })))
+            .mount(&rejecting)
+            .await;
+
+        let healthy = MockServer::start().await;
+        let sse = concat!(
+            "data: {\"id\":\"chatcmpl-4\",\"object\":\"chat.completion.chunk\",\"created\":1,",
+            "\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"recovered\"},",
+            "\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+            .mount(&healthy)
+            .await;
+
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", rejecting.uri()),
+            &["gpt-test"],
+            100,
+            "bad-key",
+        )
+        .await;
+        let healthy_id = seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", healthy.uri()),
+            &["gpt-test"],
+            10,
+            "good-key",
+        )
+        .await;
+
+        let router = app::router(state.clone());
+        let (status, body) = send_stream(
+            router,
+            "/v1/chat/completions",
+            &key,
+            json!({
+                "model": "gpt-test",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"content\":\"recovered\""));
+
+        let (attempts, channel): (i64, Option<i64>) =
+            sqlx::query_as("SELECT attempts, channel_id FROM usage_logs ORDER BY id DESC LIMIT 1")
+                .fetch_one(&state.db)
+                .await
+                .expect("usage row");
+        assert_eq!(attempts, 2);
+        assert_eq!(channel, Some(healthy_id));
+
+        // Now make the healthy channel reject the payload too: the client must
+        // see the upstream status, not a generic 502.
+        healthy.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": {"message": "bad input", "type": "invalid_request_error"}
+            })))
+            .mount(&healthy)
+            .await;
+
+        let router = app::router(state.clone());
+        let (status, body) = send_stream(
+            router,
+            "/v1/chat/completions",
+            &key,
+            json!({
+                "model": "gpt-test",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("bad input"));
+
+        let (attempts, status_code): (i64, i64) =
+            sqlx::query_as("SELECT attempts, status_code FROM usage_logs ORDER BY id DESC LIMIT 1")
+                .fetch_one(&state.db)
+                .await
+                .expect("usage row");
+        assert_eq!(attempts, 2);
+        assert_eq!(status_code, 400);
     }
 
     #[tokio::test]
@@ -1711,6 +2138,69 @@ mod tests {
             serde_json::from_slice(&requests[0].body).expect("upstream request json");
         assert_eq!(upstream["model"], json!("claude-test"));
         assert!(upstream.get("stream").is_none());
+    }
+
+    #[tokio::test]
+    async fn count_tokens_fails_over_to_the_next_anthropic_channel() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+
+        let failing = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/count_tokens"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "error": {"message": "boom", "type": "server_error"}
+            })))
+            .mount(&failing)
+            .await;
+
+        let healthy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/count_tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 42})))
+            .mount(&healthy)
+            .await;
+
+        seed_channel(
+            &state,
+            "anthropic",
+            &format!("{}/v1", failing.uri()),
+            &["claude-test"],
+            100,
+            "bad-key",
+        )
+        .await;
+        seed_channel(
+            &state,
+            "anthropic",
+            &format!("{}/v1", healthy.uri()),
+            &["claude-test"],
+            10,
+            "good-key",
+        )
+        .await;
+
+        let (status, body) = send(
+            app::router(state),
+            "/v1/messages/count_tokens",
+            Some(&key),
+            json!({
+                "model": "claude-test",
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["input_tokens"], json!(42));
+        assert_eq!(
+            failing.received_requests().await.unwrap_or_default().len(),
+            1
+        );
+        assert_eq!(
+            healthy.received_requests().await.unwrap_or_default().len(),
+            1
+        );
     }
 
     #[tokio::test]

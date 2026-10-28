@@ -30,6 +30,39 @@ const REQUEST_TOTAL_BUDGET: Duration = Duration::from_secs(600);
 /// Time allowed to receive the first upstream SSE frame before committing.
 const STREAM_COMMIT_BUDGET: Duration = Duration::from_secs(60);
 
+/// The first request-shaped failure seen while failing over. It is remembered
+/// so that when every channel fails the client receives the upstream status
+/// (for example 400) instead of a generic 502, together with the channel that
+/// produced it for the usage log.
+struct ClientFailure {
+    status: StatusCode,
+    error_type: String,
+    message: String,
+    channel_id: i64,
+    upstream_model: String,
+    upstream: Protocol,
+}
+
+impl ClientFailure {
+    fn new(
+        status: StatusCode,
+        error_type: String,
+        message: String,
+        channel_id: i64,
+        upstream_model: &str,
+        upstream: Protocol,
+    ) -> Self {
+        Self {
+            status,
+            error_type,
+            message,
+            channel_id,
+            upstream_model: upstream_model.to_string(),
+            upstream,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProxyIdentity {
     pub api_key_id: Option<i64>,
@@ -268,14 +301,30 @@ pub async fn proxy_with_identity(
         &identity.allowed_channel_ids,
     );
     if candidates.is_empty() {
-        let message = "no channel available for this model";
+        // A model whose channels are all in cooldown is not a missing model;
+        // tell the client to retry instead of making it think routing changed.
+        let cooling =
+            select::has_matching_channel(&channels, &model, inbound, &identity.allowed_channel_ids);
+        let (status, error_type, message) = if cooling {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "channel_recovering",
+                "all channels for this model are cooling down; retry shortly",
+            )
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "invalid_request_error",
+                "no channel available for this model",
+            )
+        };
         ctx.record(
             state,
             None,
             None,
             inbound,
-            StatusCode::NOT_FOUND,
-            Some(("model_not_found", message)),
+            status,
+            Some((error_type, message)),
             Usage::default(),
         )
         .await;
@@ -284,15 +333,10 @@ pub async fn proxy_with_identity(
             &request_id,
             identity.api_key_id,
             detail_request.as_deref(),
-            &error::client_error_value(inbound, message, "invalid_request_error").to_string(),
+            &error::client_error_value(inbound, message, error_type).to_string(),
         )
         .await;
-        return Ok(error::client_error(
-            inbound,
-            StatusCode::NOT_FOUND,
-            message,
-            "invalid_request_error",
-        ));
+        return Ok(error::client_error(inbound, status, message, error_type));
     }
 
     if streaming {
@@ -324,6 +368,10 @@ pub async fn proxy_with_identity(
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
+    // A request-shaped error (for example 400) is still worth retrying on
+    // another channel, but it must not cool the channel down. Remember the
+    // first one so the client gets a meaningful status if every channel fails.
+    let mut client_error: Option<ClientFailure> = None;
     let mut unified_request: Option<UnifiedRequest> = None;
     let mut probe_deferred = false;
 
@@ -398,23 +446,23 @@ pub async fn proxy_with_identity(
             match upstream.encode_request(&ir) {
                 Ok(value) => value,
                 Err(error) => {
+                    // The request is valid for the inbound protocol; it is
+                    // this target protocol that cannot represent it. Another
+                    // channel may use a different upstream protocol.
                     let message = error.to_string();
-                    ctx.record(
-                        state,
-                        Some(channel.id),
-                        Some(&candidate.upstream_model),
-                        upstream,
-                        StatusCode::BAD_REQUEST,
-                        Some(("invalid_request_error", message.as_str())),
-                        Usage::default(),
-                    )
-                    .await;
-                    return Ok(error::client_error(
-                        inbound,
-                        StatusCode::BAD_REQUEST,
-                        message,
-                        "invalid_request_error",
-                    ));
+                    if client_error.is_none() {
+                        client_error = Some(ClientFailure::new(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error".to_string(),
+                            message.clone(),
+                            channel.id,
+                            &candidate.upstream_model,
+                            upstream,
+                        ));
+                    }
+                    last_error_type = "invalid_request_error".to_string();
+                    last_message = message;
+                    continue;
                 }
             }
         };
@@ -472,12 +520,25 @@ pub async fn proxy_with_identity(
         let upstream_value = serde_json::from_slice::<Value>(&body_bytes).ok();
 
         if status.is_success() {
-            let may_have_failure = probe_lease.is_some()
-                || channel.has_failure_state()
-                || state.cache.channel_has_failure_override(channel.id);
-            state
-                .mark_channel_success_if_needed(channel.id, may_have_failure)
-                .await;
+            if body_bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+                let message = "upstream returned an empty response";
+                state.mark_channel_failure(channel.id, message).await;
+                last_error_type = "upstream_error".to_string();
+                last_message = message.to_string();
+                continue;
+            }
+            // Some compatible providers report failures inside a 200 body
+            // (Responses uses a top-level `error` field when status=failed).
+            // Treat it as a channel failure so another channel can answer.
+            if let Some(value) = upstream_value.as_ref() {
+                if value.get("error").is_some_and(|error| !error.is_null()) {
+                    let (error_type, message) = upstream_error_info(Some(value), "");
+                    state.mark_channel_failure(channel.id, &message).await;
+                    last_error_type = error_type;
+                    last_message = message;
+                    continue;
+                }
+            }
 
             let mut client_json: Option<Value> = None;
             let usage = if upstream == inbound {
@@ -493,22 +554,9 @@ pub async fn proxy_with_identity(
                     if client_json.is_none() {
                         let message = "upstream returned a non-JSON response";
                         state.mark_channel_failure(channel.id, message).await;
-                        ctx.record(
-                            state,
-                            Some(channel.id),
-                            Some(&candidate.upstream_model),
-                            upstream,
-                            StatusCode::BAD_GATEWAY,
-                            Some(("upstream_error", message)),
-                            Usage::default(),
-                        )
-                        .await;
-                        return Ok(error::client_error(
-                            inbound,
-                            StatusCode::BAD_GATEWAY,
-                            message,
-                            "upstream_error",
-                        ));
+                        last_error_type = "upstream_error".to_string();
+                        last_message = message.to_string();
+                        continue;
                     }
                 }
 
@@ -517,44 +565,19 @@ pub async fn proxy_with_identity(
                 let Some(value) = upstream_value.as_ref() else {
                     let message = "upstream returned a non-JSON response";
                     state.mark_channel_failure(channel.id, message).await;
-                    ctx.record(
-                        state,
-                        Some(channel.id),
-                        Some(&candidate.upstream_model),
-                        upstream,
-                        StatusCode::BAD_GATEWAY,
-                        Some(("upstream_error", message)),
-                        Usage::default(),
-                    )
-                    .await;
-                    return Ok(error::client_error(
-                        inbound,
-                        StatusCode::BAD_GATEWAY,
-                        message,
-                        "upstream_error",
-                    ));
+                    last_error_type = "upstream_error".to_string();
+                    last_message = message.to_string();
+                    continue;
                 };
 
                 let mut unified = match upstream.parse_response(value) {
                     Ok(response) => response,
                     Err(error) => {
                         let message = error.to_string();
-                        ctx.record(
-                            state,
-                            Some(channel.id),
-                            Some(&candidate.upstream_model),
-                            upstream,
-                            StatusCode::BAD_GATEWAY,
-                            Some(("upstream_error", message.as_str())),
-                            Usage::default(),
-                        )
-                        .await;
-                        return Ok(error::client_error(
-                            inbound,
-                            StatusCode::BAD_GATEWAY,
-                            message,
-                            "upstream_error",
-                        ));
+                        state.mark_channel_failure(channel.id, &message).await;
+                        last_error_type = "upstream_error".to_string();
+                        last_message = message;
+                        continue;
                     }
                 };
 
@@ -565,23 +588,12 @@ pub async fn proxy_with_identity(
                 let client_value = match inbound.encode_response(&unified) {
                     Ok(value) => value,
                     Err(error) => {
-                        let message = error.to_string();
-                        ctx.record(
-                            state,
-                            Some(channel.id),
-                            Some(&candidate.upstream_model),
-                            upstream,
-                            StatusCode::BAD_GATEWAY,
-                            Some(("conversion_error", message.as_str())),
-                            Usage::default(),
-                        )
-                        .await;
-                        return Ok(error::client_error(
-                            inbound,
-                            StatusCode::BAD_GATEWAY,
-                            message,
-                            "conversion_error",
-                        ));
+                        // A different channel may return a response this
+                        // payload can be converted from; do not penalize the
+                        // channel for a gateway-side conversion limit.
+                        last_error_type = "conversion_error".to_string();
+                        last_message = error.to_string();
+                        continue;
                     }
                 };
                 client_json = Some(client_value);
@@ -592,30 +604,10 @@ pub async fn proxy_with_identity(
                 let mut value = client_json.unwrap_or(Value::Null);
                 if !value.is_object() {
                     let message = "failed to build a Responses response";
-                    ctx.record(
-                        state,
-                        Some(channel.id),
-                        Some(&candidate.upstream_model),
-                        upstream,
-                        StatusCode::BAD_GATEWAY,
-                        Some(("upstream_error", message)),
-                        Usage::default(),
-                    )
-                    .await;
-                    store_request_detail(
-                        state,
-                        &request_id,
-                        identity.api_key_id,
-                        detail_request.as_deref(),
-                        &error::client_error_value(inbound, message, "upstream_error").to_string(),
-                    )
-                    .await;
-                    return Ok(error::client_error(
-                        inbound,
-                        StatusCode::BAD_GATEWAY,
-                        message,
-                        "upstream_error",
-                    ));
+                    state.mark_channel_failure(channel.id, message).await;
+                    last_error_type = "upstream_error".to_string();
+                    last_message = message.to_string();
+                    continue;
                 }
 
                 if let Some(object) = value.as_object_mut() {
@@ -691,6 +683,15 @@ pub async fn proxy_with_identity(
                 state.live.add_tokens(Some(channel.id), output_tokens);
             }
 
+            // Mark success only after the payload is proven usable; a 2xx with
+            // a malformed body above must not clear a channel's failure state.
+            let may_have_failure = probe_lease.is_some()
+                || channel.has_failure_state()
+                || state.cache.channel_has_failure_override(channel.id);
+            state
+                .mark_channel_success_if_needed(channel.id, may_have_failure)
+                .await;
+
             ctx.record(
                 state,
                 Some(channel.id),
@@ -728,37 +729,20 @@ pub async fn proxy_with_identity(
 
         let text = String::from_utf8_lossy(&body_bytes);
         let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
-        if is_retryable(status) {
+        if penalizes_channel(status) {
             state.mark_channel_failure(channel.id, &message).await;
-            last_error_type = error_type;
-            last_message = message;
-            continue;
+        } else if client_error.is_none() {
+            client_error = Some(ClientFailure::new(
+                status,
+                error_type.clone(),
+                message.clone(),
+                channel.id,
+                &candidate.upstream_model,
+                upstream,
+            ));
         }
-
-        ctx.record(
-            state,
-            Some(channel.id),
-            Some(&candidate.upstream_model),
-            upstream,
-            status,
-            Some((error_type.as_str(), message.as_str())),
-            Usage::default(),
-        )
-        .await;
-
-        store_request_detail(
-            state,
-            &request_id,
-            identity.api_key_id,
-            detail_request.as_deref(),
-            &text,
-        )
-        .await;
-
-        return Ok(match upstream_value {
-            Some(value) => error::upstream_error(inbound, status, &value),
-            None => error::client_error(inbound, status, message, error_type.as_str()),
-        });
+        last_error_type = error_type;
+        last_message = message;
     }
 
     if ctx.attempts == 0 && probe_deferred {
@@ -786,6 +770,35 @@ pub async fn proxy_with_identity(
             StatusCode::SERVICE_UNAVAILABLE,
             message,
             "channel_recovering",
+        ));
+    }
+
+    // Every channel was tried. If one of them rejected the payload itself,
+    // surface that status instead of hiding a client mistake behind a 502.
+    if let Some(failure) = client_error {
+        ctx.record(
+            state,
+            Some(failure.channel_id),
+            Some(&failure.upstream_model),
+            failure.upstream,
+            failure.status,
+            Some((failure.error_type.as_str(), failure.message.as_str())),
+            Usage::default(),
+        )
+        .await;
+        store_request_detail(
+            state,
+            &request_id,
+            identity.api_key_id,
+            detail_request.as_deref(),
+            &error::client_error_value(inbound, &failure.message, &failure.error_type).to_string(),
+        )
+        .await;
+        return Ok(error::client_error(
+            inbound,
+            failure.status,
+            failure.message,
+            &failure.error_type,
         ));
     }
 
@@ -845,6 +858,7 @@ async fn proxy_stream(
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
+    let mut client_error: Option<ClientFailure> = None;
     let mut unified_request: Option<UnifiedRequest> = None;
     let mut probe_deferred = false;
 
@@ -925,28 +939,19 @@ async fn proxy_stream(
                 Ok(value) => value,
                 Err(error) => {
                     let message = error.to_string();
-                    record_stream_attempt(
-                        state,
-                        request_id,
-                        &identity,
-                        model,
-                        Some(channel.id),
-                        Some(&candidate.upstream_model),
-                        inbound,
-                        upstream,
-                        StatusCode::BAD_REQUEST,
-                        attempts,
-                        started,
-                        Some(("invalid_request_error", message.as_str())),
-                        Usage::default(),
-                    )
-                    .await;
-                    return Ok(error::client_error(
-                        inbound,
-                        StatusCode::BAD_REQUEST,
-                        message,
-                        "invalid_request_error",
-                    ));
+                    if client_error.is_none() {
+                        client_error = Some(ClientFailure::new(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error".to_string(),
+                            message.clone(),
+                            channel.id,
+                            &candidate.upstream_model,
+                            upstream,
+                        ));
+                    }
+                    last_error_type = "invalid_request_error".to_string();
+                    last_message = message;
+                    continue 'candidates;
                 }
             }
         };
@@ -1038,34 +1043,21 @@ async fn proxy_stream(
             let upstream_value = serde_json::from_str::<Value>(&text).ok();
             let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
 
-            if is_retryable(status) {
+            if penalizes_channel(status) {
                 state.mark_channel_failure(channel.id, &message).await;
-                last_error_type = error_type;
-                last_message = message;
-                continue 'candidates;
+            } else if client_error.is_none() {
+                client_error = Some(ClientFailure::new(
+                    status,
+                    error_type.clone(),
+                    message.clone(),
+                    channel.id,
+                    &candidate.upstream_model,
+                    upstream,
+                ));
             }
-
-            record_stream_attempt(
-                state,
-                request_id,
-                &identity,
-                model,
-                Some(channel.id),
-                Some(&candidate.upstream_model),
-                inbound,
-                upstream,
-                status,
-                attempts,
-                started,
-                Some((error_type.as_str(), message.as_str())),
-                Usage::default(),
-            )
-            .await;
-
-            return Ok(match upstream_value {
-                Some(value) => error::upstream_error(inbound, status, &value),
-                None => error::client_error(inbound, status, message, error_type.as_str()),
-            });
+            last_error_type = error_type;
+            last_message = message;
+            continue 'candidates;
         };
 
         let byte_stream: ByteStream = Box::pin(
@@ -1180,6 +1172,39 @@ async fn proxy_stream(
             StatusCode::SERVICE_UNAVAILABLE,
             message,
             "channel_recovering",
+        ));
+    }
+
+    if let Some(failure) = client_error {
+        record_stream_attempt(
+            state,
+            request_id,
+            &identity,
+            model,
+            Some(failure.channel_id),
+            Some(&failure.upstream_model),
+            inbound,
+            failure.upstream,
+            failure.status,
+            attempts,
+            started,
+            Some((failure.error_type.as_str(), failure.message.as_str())),
+            Usage::default(),
+        )
+        .await;
+        store_request_detail(
+            state,
+            request_id,
+            identity.api_key_id,
+            detail_request.as_deref(),
+            &error::client_error_value(inbound, &failure.message, &failure.error_type).to_string(),
+        )
+        .await;
+        return Ok(error::client_error(
+            inbound,
+            failure.status,
+            failure.message,
+            &failure.error_type,
         ));
     }
 
@@ -1388,16 +1413,34 @@ fn response_usage(protocol: Protocol, value: &Value) -> Usage {
     }
 }
 
-fn is_retryable(status: StatusCode) -> bool {
-    matches!(status.as_u16(), 401 | 403 | 404 | 408 | 409 | 425 | 429) || status.is_server_error()
+/// Whether an upstream failure says something about the channel's health.
+///
+/// Failover itself no longer depends on the status code: the same model may
+/// work on another channel, so every failure is retried on the next candidate.
+/// Only failures that point at the channel (auth, quota, rate limit, missing
+/// model, timeout, server error) feed the cooldown. Request-shaped errors such
+/// as 400/413/422 are passed through without cooling the channel down.
+pub(crate) fn penalizes_channel(status: StatusCode) -> bool {
+    if status.is_client_error() {
+        // 4xx that points at the channel rather than at the request payload.
+        matches!(
+            status.as_u16(),
+            401 | 402 | 403 | 404 | 408 | 409 | 425 | 429
+        )
+    } else {
+        // 5xx, unexpected redirects and informational responses are all
+        // upstream-side failures.
+        true
+    }
 }
 
-fn upstream_error_info(value: Option<&Value>, body: &str) -> (String, String) {
+pub(crate) fn upstream_error_info(value: Option<&Value>, body: &str) -> (String, String) {
     if let Some(value) = value {
         let error = value.get("error");
         let message = error
             .and_then(|error| error.get("message"))
             .and_then(Value::as_str)
+            .or_else(|| error.and_then(Value::as_str))
             .or_else(|| value.get("message").and_then(Value::as_str))
             .unwrap_or("upstream request failed");
         let error_type = error
@@ -1441,8 +1484,51 @@ fn strip_include_usage(body: &mut Value) {
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
 
-    use super::{rejects_stream_options, resolve_request_id, response_usage, strip_include_usage};
+    use super::{
+        penalizes_channel, rejects_stream_options, resolve_request_id, response_usage,
+        strip_include_usage, upstream_error_info,
+    };
     use crate::protocol::Protocol;
+
+    #[test]
+    fn channel_penalty_distinguishes_request_and_channel_failures() {
+        use axum::http::StatusCode;
+
+        // Request-shaped errors fail over but do not cool a channel down.
+        assert!(!penalizes_channel(StatusCode::BAD_REQUEST));
+        assert!(!penalizes_channel(StatusCode::PAYLOAD_TOO_LARGE));
+        assert!(!penalizes_channel(StatusCode::UNPROCESSABLE_ENTITY));
+        // Auth, quota, rate limit and server errors are channel problems.
+        assert!(penalizes_channel(StatusCode::UNAUTHORIZED));
+        assert!(penalizes_channel(StatusCode::PAYMENT_REQUIRED));
+        assert!(penalizes_channel(StatusCode::FORBIDDEN));
+        assert!(penalizes_channel(StatusCode::NOT_FOUND));
+        assert!(penalizes_channel(StatusCode::TOO_MANY_REQUESTS));
+        assert!(penalizes_channel(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(penalizes_channel(StatusCode::BAD_GATEWAY));
+        // Unexpected redirects are not client errors.
+        assert!(penalizes_channel(StatusCode::FOUND));
+    }
+
+    #[test]
+    fn extracts_string_and_object_upstream_errors() {
+        let string_error = serde_json::json!({"error": "overloaded"});
+        assert_eq!(
+            upstream_error_info(Some(&string_error), ""),
+            ("upstream_error".to_string(), "overloaded".to_string())
+        );
+
+        let object_error = serde_json::json!({
+            "error": {"message": "quota exhausted", "type": "insufficient_quota"}
+        });
+        assert_eq!(
+            upstream_error_info(Some(&object_error), ""),
+            (
+                "insufficient_quota".to_string(),
+                "quota exhausted".to_string()
+            )
+        );
+    }
 
     #[test]
     fn reads_usage_without_converting_the_whole_response() {

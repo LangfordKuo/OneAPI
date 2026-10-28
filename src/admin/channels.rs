@@ -975,14 +975,14 @@ async fn run_test(
     channel: &Channel,
     route: &ResolvedRoute,
 ) -> Result<Value, AppError> {
-    let model = first_test_model(&route.config).ok_or_else(|| {
+    let model = upstream::probe_model(&route.config).ok_or_else(|| {
         AppError::BadRequest(
             "channel has no concrete model to test; add a model name first".to_string(),
         )
     })?;
 
     let started = Instant::now();
-    let body = test_body(&route.upstream_kind, &model);
+    let body = upstream::probe_body(&route.upstream_kind, &model);
     let result = send_test(state, channel, route, body).await;
 
     Ok(match result {
@@ -1032,42 +1032,6 @@ async fn run_fetch_models(
             "message": error.to_string(),
         }),
     })
-}
-
-fn first_test_model(config: &ProtocolConfig) -> Option<String> {
-    let model = config
-        .models
-        .iter()
-        .find(|model| !model.is_empty() && model.as_str() != "*")?;
-    Some(
-        config
-            .model_mapping
-            .get(model)
-            .cloned()
-            .unwrap_or_else(|| model.clone()),
-    )
-}
-
-fn test_body(kind: &str, model: &str) -> Value {
-    match kind {
-        "openai_responses" => json!({
-            "model": model,
-            "input": "ping",
-            "max_output_tokens": 16,
-            "store": false,
-        }),
-        "anthropic" => json!({
-            "model": model,
-            "max_tokens": 16,
-            "messages": [{"role": "user", "content": "ping"}],
-        }),
-        _ => json!({
-            "model": model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-            "stream": false,
-        }),
-    }
 }
 
 async fn send_test(
@@ -1146,15 +1110,15 @@ mod tests {
 
     #[test]
     fn test_body_matches_protocol() {
-        let chat = test_body("openai_chat", "gpt-test");
+        let chat = upstream::probe_body("openai_chat", "gpt-test");
         assert_eq!(chat["model"], json!("gpt-test"));
         assert_eq!(chat["max_tokens"], json!(1));
 
-        let responses = test_body("openai_responses", "gpt-test");
+        let responses = upstream::probe_body("openai_responses", "gpt-test");
         assert_eq!(responses["max_output_tokens"], json!(16));
         assert_eq!(responses["store"], json!(false));
 
-        let anthropic = test_body("anthropic", "claude-test");
+        let anthropic = upstream::probe_body("anthropic", "claude-test");
         assert_eq!(anthropic["max_tokens"], json!(16));
         assert_eq!(anthropic["messages"][0]["role"], json!("user"));
     }

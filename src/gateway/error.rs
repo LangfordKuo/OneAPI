@@ -37,21 +37,6 @@ pub fn client_error(
         .into_response()
 }
 
-pub fn upstream_error(protocol: Protocol, status: StatusCode, value: &Value) -> Response {
-    let error = value.get("error");
-    let message = error
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .or_else(|| value.get("message").and_then(Value::as_str))
-        .unwrap_or("upstream request failed");
-    let error_type = error
-        .and_then(|error| error.get("type"))
-        .and_then(Value::as_str)
-        .unwrap_or("upstream_error");
-
-    client_error(protocol, status, message, error_type)
-}
-
 pub fn protocol_for_path(path: &str) -> Protocol {
     if path.starts_with("/v1/messages") {
         Protocol::Anthropic

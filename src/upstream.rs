@@ -163,10 +163,15 @@ pub fn build_client(channel: &Channel, default_timeout_ms: u64) -> Result<Client
         .timeout_ms
         .map(|value| value.max(1) as u64)
         .unwrap_or(default_timeout_ms);
+    build_client_with_timeout(channel, timeout_ms)
+}
 
+/// Build a client with an explicit total timeout. Recovery probes use a short
+/// cap so one unhealthy channel cannot hold the background loop for long.
+pub fn build_client_with_timeout(channel: &Channel, timeout_ms: u64) -> Result<Client> {
     let mut builder = Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
-        .timeout(Duration::from_millis(timeout_ms))
+        .timeout(Duration::from_millis(timeout_ms.max(1)))
         .redirect(redirect_policy())
         .user_agent(format!("OneAPI/{}", env!("CARGO_PKG_VERSION")));
 
@@ -291,6 +296,47 @@ pub fn build_request(
 ) -> Result<RequestBuilder> {
     let request = client.post(endpoint_url(config, kind)).json(body);
     apply_auth(request, config, crypto, kind, client_headers)
+}
+
+/// First concrete model configured for a route, translated through the
+/// channel's model mapping. `None` means the route only accepts any model
+/// (`*`) or has no models, so callers must use a model-independent probe.
+pub fn probe_model(config: &ProtocolConfig) -> Option<String> {
+    let model = config
+        .models
+        .iter()
+        .find(|model| !model.is_empty() && model.as_str() != "*")?;
+    Some(
+        config
+            .model_mapping
+            .get(model)
+            .cloned()
+            .unwrap_or_else(|| model.clone()),
+    )
+}
+
+/// Minimal non-streaming request used by connectivity tests and the automatic
+/// recovery probe. It deliberately asks for very few output tokens.
+pub fn probe_body(kind: &str, model: &str) -> serde_json::Value {
+    match kind {
+        "openai_responses" => serde_json::json!({
+            "model": model,
+            "input": "ping",
+            "max_output_tokens": 16,
+            "store": false,
+        }),
+        "anthropic" => serde_json::json!({
+            "model": model,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "ping"}],
+        }),
+        _ => serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "stream": false,
+        }),
+    }
 }
 
 #[cfg(test)]

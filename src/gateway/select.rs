@@ -34,6 +34,56 @@ impl Candidate {
     }
 }
 
+/// Resolve the route a channel would use for one inbound protocol and model.
+/// Shared by candidate construction and the "all channels cooling" check so
+/// both apply exactly the same enable/allowlist/route/model filters.
+fn matching_route(
+    prepared: &PreparedChannel,
+    model: &str,
+    inbound_kind: &str,
+    allowed_channels: Option<&HashSet<i64>>,
+) -> Option<(String, usize, String)> {
+    let channel = &prepared.channel;
+    if channel.enabled == 0 {
+        return None;
+    }
+    if allowed_channels.is_some_and(|allowed| !allowed.contains(&channel.id)) {
+        return None;
+    }
+    let (upstream_kind, config_index) = prepared.resolve_route_ref(inbound_kind)?;
+    let config = prepared.config_at(config_index);
+    if !config
+        .models
+        .iter()
+        .any(|item| item == "*" || item == model)
+    {
+        return None;
+    }
+    let upstream_model = config
+        .model_mapping
+        .get(model)
+        .cloned()
+        .unwrap_or_else(|| model.to_string());
+    Some((upstream_kind.to_string(), config_index, upstream_model))
+}
+
+/// Whether any enabled, allowlisted channel could serve this model once its
+/// cooldown expires. Used to distinguish "model does not exist" (404) from
+/// "every channel for this model is temporarily cooling down" (503).
+pub fn has_matching_channel(
+    channels: &[Arc<PreparedChannel>],
+    model: &str,
+    inbound: Protocol,
+    allowed_channel_ids: &[i64],
+) -> bool {
+    let inbound_kind = channel::kind_for_protocol(inbound.as_str());
+    let allowed_channels: Option<HashSet<i64>> =
+        (!allowed_channel_ids.is_empty()).then(|| allowed_channel_ids.iter().copied().collect());
+    channels.iter().any(|prepared| {
+        matching_route(prepared, model, inbound_kind, allowed_channels.as_ref()).is_some()
+    })
+}
+
 /// Pick candidate channels for one request. Only channels that match the
 /// requested model and the API key's channel allowlist are considered; the
 /// cached channel list itself is shared.
@@ -52,15 +102,11 @@ pub fn candidates(
 
     for prepared in channels {
         let channel = &prepared.channel;
-        if channel.enabled == 0 {
+        let Some((upstream_kind, config_index, upstream_model)) =
+            matching_route(prepared, model, inbound_kind, allowed_channels.as_ref())
+        else {
             continue;
-        }
-        if allowed_channels
-            .as_ref()
-            .is_some_and(|allowed| !allowed.contains(&channel.id))
-        {
-            continue;
-        }
+        };
         // The in-process overlay is newer than the cached row after a failure.
         let disabled_until = health
             .get(&channel.id)
@@ -73,30 +119,12 @@ pub fn candidates(
             continue;
         }
 
-        let Some((upstream_kind, config_index)) = prepared.resolve_route_ref(inbound_kind) else {
-            continue;
-        };
-        let config = prepared.config_at(config_index);
-        if !config
-            .models
-            .iter()
-            .any(|item| item == "*" || item == model)
-        {
-            continue;
-        }
-
-        let upstream_model = config
-            .model_mapping
-            .get(model)
-            .cloned()
-            .unwrap_or_else(|| model.to_string());
-
         let weight = channel.weight.max(1);
         grouped.entry(channel.priority).or_default().push((
             Candidate {
                 prepared: prepared.clone(),
                 upstream_model,
-                upstream_kind: upstream_kind.to_string(),
+                upstream_kind,
                 config_index,
             },
             weight,
