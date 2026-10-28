@@ -10,6 +10,7 @@ mod metrics;
 mod models;
 #[allow(dead_code)]
 mod protocol;
+mod recovery;
 mod security;
 mod state;
 mod telemetry;
@@ -95,6 +96,7 @@ async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     };
 
     maintenance::spawn(state.clone());
+    recovery::spawn(state.clone());
 
     let updates = state.updates.clone();
     let shutdown_updates = updates.clone();

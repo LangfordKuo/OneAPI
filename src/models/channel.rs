@@ -612,6 +612,49 @@ pub async fn mark_failure(
     )
 }
 
+/// Record a failed background recovery probe without counting another traffic
+/// failure or growing the exponential backoff.
+///
+/// An already-running cooldown is left untouched so a probe cannot shorten the
+/// backoff a real traffic failure earned. If the cooldown had already expired,
+/// it is extended by the retry delay so client requests do not immediately hit
+/// a channel the background probe just found unhealthy.
+pub async fn defer_recovery(
+    pool: &SqlitePool,
+    id: i64,
+    error: &str,
+    now: i64,
+    retry_at: i64,
+) -> sqlx::Result<Option<ChannelHealth>> {
+    let error = truncate_error(error);
+    let row = sqlx::query_as::<_, (i64, Option<i64>)>(
+        "UPDATE channels SET
+            last_error = ?,
+            last_error_at = ?,
+            updated_at = ?,
+            disabled_until = CASE
+                WHEN disabled_until IS NULL OR disabled_until <= ? THEN ?
+                ELSE disabled_until
+            END
+         WHERE id = ?
+         RETURNING consecutive_failures, disabled_until",
+    )
+    .bind(&error)
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .bind(retry_at)
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(
+        row.map(|(consecutive_failures, disabled_until)| ChannelHealth {
+            consecutive_failures,
+            disabled_until,
+        }),
+    )
+}
+
 /// Clear failure state after a successful attempt. Returns whether a row was
 /// changed so callers can skip cache invalidation for healthy channels.
 pub async fn mark_success(pool: &SqlitePool, id: i64) -> sqlx::Result<bool> {

@@ -311,17 +311,30 @@ impl ChannelProbes {
             return ProbeAttempt::NotNeeded;
         }
 
+        self.try_acquire(channel.id)
+            .map(ProbeAttempt::Acquired)
+            .unwrap_or(ProbeAttempt::Busy)
+    }
+
+    /// Claim the single probe slot for a channel that is still cooling down.
+    /// Shared with client half-open probes so a background recovery check and
+    /// a client request never probe the same channel at the same time.
+    pub fn try_acquire_recovery(self: &Arc<Self>, channel_id: i64) -> Option<ProbeLease> {
+        self.try_acquire(channel_id)
+    }
+
+    fn try_acquire(self: &Arc<Self>, channel_id: i64) -> Option<ProbeLease> {
         let mut active = self
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if active.insert(channel.id) {
-            ProbeAttempt::Acquired(ProbeLease {
+        if active.insert(channel_id) {
+            Some(ProbeLease {
                 probes: self.clone(),
-                channel_id: channel.id,
+                channel_id,
             })
         } else {
-            ProbeAttempt::Busy
+            None
         }
     }
 }
@@ -378,6 +391,21 @@ impl AppState {
     pub async fn mark_channel_success_if_needed(&self, channel_id: i64, may_have_failure: bool) {
         if may_have_failure {
             self.mark_channel_success(channel_id).await;
+        }
+    }
+
+    /// A background recovery probe failed. Keep the channel out of rotation
+    /// until `retry_at` without counting another traffic failure, so the
+    /// exponential backoff reflects real client traffic rather than probes.
+    pub async fn defer_channel_recovery(&self, channel_id: i64, message: &str, retry_at: i64) {
+        match channel::defer_recovery(&self.db, channel_id, message, now_ms(), retry_at).await {
+            Ok(Some(health)) => self.cache.record_channel_failure(channel_id, health),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                channel_id,
+                error = %error,
+                "failed to defer channel recovery"
+            ),
         }
     }
 }
