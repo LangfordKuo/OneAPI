@@ -13,6 +13,7 @@ import { api } from '@/api/client';
 import type {
   Channel,
   ChannelKind,
+  ChannelProtocolMode,
   ChannelTestResult,
   ModelFetchResult,
 } from '@/api/types';
@@ -25,10 +26,7 @@ import { PageHeader } from '@/components/common/page-header';
 import { TagInput } from '@/components/common/tag-input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import {
-  Card,
-  CardContent,
-} from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import {
   Dialog,
   DialogContent,
@@ -69,16 +67,20 @@ interface MappingRow {
   value: string;
 }
 
-interface ChannelDraft {
-  name: string;
-  kinds: ChannelKind[];
-  fallbackKind: ChannelKind;
+interface ProtocolDraft {
+  mode: ChannelProtocolMode;
+  target: ChannelKind | '';
   baseUrl: string;
   apiKey: string;
   authHeader: 'bearer' | 'x-api-key';
   models: string[];
   modelMapping: MappingRow[];
   extraHeaders: MappingRow[];
+}
+
+interface ChannelDraft {
+  name: string;
+  protocols: Record<ChannelKind, ProtocolDraft>;
   priority: string;
   weight: string;
   timeoutMs: string;
@@ -86,33 +88,58 @@ interface ChannelDraft {
   enabled: boolean;
 }
 
+const PROTOCOL_ORDER: ChannelKind[] = [
+  'openai_chat',
+  'openai_responses',
+  'anthropic',
+];
+
 const KIND_LABELS: Record<ChannelKind, string> = {
   openai_chat: 'OpenAI Chat',
   openai_responses: 'OpenAI Responses',
   anthropic: 'Anthropic',
 };
 
-const KIND_OPTIONS = (Object.keys(KIND_LABELS) as ChannelKind[]).map((value) => ({
-  value,
-  label: KIND_LABELS[value],
-}));
-
 const AUTH_HEADER_OPTIONS = [
   { value: 'bearer', label: 'Authorization: Bearer' },
   { value: 'x-api-key', label: 'x-api-key' },
 ];
 
-function emptyDraft(): ChannelDraft {
+const NO_CONVERSION = 'none';
+
+function defaultAuthHeader(kind: ChannelKind): 'bearer' | 'x-api-key' {
+  return kind === 'anthropic' ? 'x-api-key' : 'bearer';
+}
+
+function defaultProtocol(kind: ChannelKind): ProtocolDraft {
   return {
-    name: '',
-    kinds: ['openai_chat'],
-    fallbackKind: 'openai_chat',
+    mode: 'native',
+    target: '',
     baseUrl: '',
     apiKey: '',
-    authHeader: 'bearer',
+    authHeader: defaultAuthHeader(kind),
     models: [],
     modelMapping: [],
     extraHeaders: [],
+  };
+}
+
+function emptyDraft(): ChannelDraft {
+  return {
+    name: '',
+    protocols: {
+      openai_chat: defaultProtocol('openai_chat'),
+      openai_responses: {
+        ...defaultProtocol('openai_responses'),
+        mode: 'convert',
+        target: 'openai_chat',
+      },
+      anthropic: {
+        ...defaultProtocol('anthropic'),
+        mode: 'convert',
+        target: 'openai_chat',
+      },
+    },
     priority: '0',
     weight: '1',
     timeoutMs: '',
@@ -121,23 +148,97 @@ function emptyDraft(): ChannelDraft {
   };
 }
 
+function rowsFromObject(value: Record<string, string>): MappingRow[] {
+  return Object.entries(value ?? {}).map(([key, itemValue]) => ({
+    key,
+    value: itemValue,
+  }));
+}
+
+function objectFromRows(rows: MappingRow[]): Record<string, string> {
+  return Object.fromEntries(
+    rows
+      .filter((row) => row.key.trim())
+      .map((row) => [row.key.trim(), row.value.trim()]),
+  );
+}
+
+function protocolDraft(
+  channel: Channel,
+  kind: ChannelKind,
+): ProtocolDraft {
+  const stored = channel.protocols?.find((item) => item.protocol === kind);
+  if (stored) {
+    return {
+      mode: stored.mode,
+      target: stored.mode === 'convert' ? (stored.target ?? '') : '',
+      baseUrl: stored.base_url,
+      apiKey: '',
+      authHeader: stored.auth_header,
+      models: stored.models,
+      modelMapping: rowsFromObject(stored.model_mapping),
+      extraHeaders: rowsFromObject(stored.extra_headers),
+    };
+  }
+
+  const native = (channel.kinds ?? []).includes(kind);
+  return {
+    mode: native ? 'native' : 'convert',
+    target: native ? '' : channel.fallback_kind,
+    baseUrl: native ? channel.base_url : '',
+    apiKey: '',
+    authHeader: native ? channel.auth_header : defaultAuthHeader(kind),
+    models: native ? channel.models : [],
+    modelMapping: native ? rowsFromObject(channel.model_mapping) : [],
+    extraHeaders: native ? rowsFromObject(channel.extra_headers) : [],
+  };
+}
+
+function normalizeProtocols(
+  protocols: Record<ChannelKind, ProtocolDraft>,
+): Record<ChannelKind, ProtocolDraft> {
+  const next = { ...protocols };
+  const nativeKinds = PROTOCOL_ORDER.filter(
+    (kind) => next[kind].mode === 'native',
+  );
+  if (nativeKinds.length === 0) {
+    next.openai_chat = { ...next.openai_chat, mode: 'native', target: '' };
+    nativeKinds.push('openai_chat');
+  }
+
+  for (const kind of PROTOCOL_ORDER) {
+    const protocol = next[kind];
+    if (protocol.mode !== 'convert') {
+      if (protocol.target) {
+        next[kind] = { ...protocol, target: '' };
+      }
+      continue;
+    }
+    const target = protocol.target;
+    const valid =
+      target !== '' &&
+      target !== kind &&
+      next[target].mode === 'native' &&
+      target !== undefined;
+    if (!valid) {
+      const fallback = nativeKinds.find((item) => item !== kind);
+      next[kind] = { ...protocol, target: fallback ?? '' };
+      if (!fallback) {
+        next[kind] = { ...protocol, mode: 'native', target: '' };
+      }
+    }
+  }
+  return next;
+}
+
 function draftFromChannel(channel: Channel): ChannelDraft {
+  const protocols = Object.fromEntries(
+    PROTOCOL_ORDER.map((kind) => [kind, protocolDraft(channel, kind)]),
+  ) as Record<ChannelKind, ProtocolDraft>;
+
   return {
     name: channel.name,
-    kinds: channel.kinds,
-    fallbackKind: channel.fallback_kind,
-    baseUrl: channel.base_url,
-    apiKey: '',
-    authHeader: channel.auth_header,
-    models: channel.models,
-    modelMapping: Object.entries(channel.model_mapping).map(([key, value]) => ({
-      key,
-      value,
-    })),
-    extraHeaders: Object.entries(channel.extra_headers).map(([key, value]) => ({
-      key,
-      value,
-    })),
+    protocols: normalizeProtocols(protocols),
     priority: String(channel.priority),
     weight: String(channel.weight),
     timeoutMs: channel.timeout_ms == null ? '' : String(channel.timeout_ms),
@@ -151,25 +252,26 @@ function toNumber(value: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function toPayload(draft: ChannelDraft, editing: boolean) {
+function toPayload(draft: ChannelDraft) {
   return {
     name: draft.name.trim(),
-    kinds: draft.kinds,
-    fallback_kind: draft.fallbackKind,
-    base_url: draft.baseUrl.trim(),
-    api_key: draft.apiKey.trim() || (editing ? undefined : ''),
-    auth_header: draft.authHeader,
-    models: draft.models,
-    model_mapping: Object.fromEntries(
-      draft.modelMapping
-        .filter((row) => row.key.trim())
-        .map((row) => [row.key.trim(), row.value.trim()]),
-    ),
-    extra_headers: Object.fromEntries(
-      draft.extraHeaders
-        .filter((row) => row.key.trim())
-        .map((row) => [row.key.trim(), row.value.trim()]),
-    ),
+    protocols: PROTOCOL_ORDER.map((kind) => {
+      const protocol = draft.protocols[kind];
+      return {
+        protocol: kind,
+        mode: protocol.mode,
+        target:
+          protocol.mode === 'convert' && protocol.target
+            ? protocol.target
+            : null,
+        base_url: protocol.baseUrl.trim(),
+        api_key: protocol.apiKey.trim() || undefined,
+        auth_header: protocol.authHeader,
+        models: protocol.models,
+        model_mapping: objectFromRows(protocol.modelMapping),
+        extra_headers: objectFromRows(protocol.extraHeaders),
+      };
+    }),
     priority: toNumber(draft.priority, 0),
     weight: toNumber(draft.weight, 1),
     timeout_ms: draft.timeoutMs.trim()
@@ -180,27 +282,62 @@ function toPayload(draft: ChannelDraft, editing: boolean) {
   };
 }
 
-function validateDraft(draft: ChannelDraft, editing: boolean) {
+function existingKey(channel: Channel | null, kind: ChannelKind): string {
+  if (!channel) {
+    return '';
+  }
+  return (
+    channel.protocols?.find((item) => item.protocol === kind)?.api_key_masked ??
+    (channel.kinds.includes(kind) ? channel.api_key_masked : '')
+  );
+}
+
+function validateDraft(
+  draft: ChannelDraft,
+  editing: Channel | null,
+): Record<string, string> {
   const errors: Record<string, string> = {};
   if (!draft.name.trim()) {
     errors.name = '请输入渠道名称';
   }
-  if (draft.kinds.length === 0) {
-    errors.kinds = '至少选择一种协议';
+
+  const nativeKinds = PROTOCOL_ORDER.filter(
+    (kind) => draft.protocols[kind].mode === 'native',
+  );
+  if (nativeKinds.length === 0) {
+    errors.protocols = '至少保留一个「不转换」的协议';
   }
-  if (!draft.kinds.includes(draft.fallbackKind)) {
-    errors.fallbackKind = '转换目标必须是已支持的协议';
+
+  for (const kind of PROTOCOL_ORDER) {
+    const protocol = draft.protocols[kind];
+    if (protocol.mode === 'native') {
+      if (!protocol.baseUrl.trim()) {
+        errors[`protocols.${kind}.baseUrl`] = '请输入 Base URL';
+      }
+      if (protocol.models.length === 0) {
+        errors[`protocols.${kind}.models`] = '至少填写一个模型';
+      }
+      if (!protocol.apiKey.trim() && !existingKey(editing, kind)) {
+        errors[`protocols.${kind}.apiKey`] = '请输入上游 API Key';
+      }
+    } else {
+      if (!protocol.target) {
+        errors[`protocols.${kind}.target`] = '请选择转换目标';
+      } else if (draft.protocols[protocol.target].mode !== 'native') {
+        errors[`protocols.${kind}.target`] =
+          '转换目标必须是不转换的协议';
+      }
+    }
   }
-  if (!draft.baseUrl.trim()) {
-    errors.baseUrl = '请输入 Base URL';
-  }
-  if (!editing && !draft.apiKey.trim()) {
-    errors.apiKey = '请输入上游 API Key';
-  }
-  if (draft.models.length === 0) {
-    errors.models = '至少填写一个模型';
-  }
+
   return errors;
+}
+
+function channelModels(channel: Channel): string[] {
+  const protocols = channel.protocols ?? [];
+  const native = protocols.filter((item) => item.mode === 'native');
+  const source = native.length > 0 ? native : protocols;
+  return Array.from(new Set(source.flatMap((item) => item.models)));
 }
 
 export default function Channels() {
@@ -214,10 +351,14 @@ export default function Channels() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Channel | null>(null);
   const [draft, setDraft] = useState<ChannelDraft>(emptyDraft);
+  const [activeProtocol, setActiveProtocol] =
+    useState<ChannelKind>('openai_chat');
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [deleteTarget, setDeleteTarget] = useState<Channel | null>(null);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  const [modelTarget, setModelTarget] =
+    useState<ChannelKind>('openai_chat');
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
 
   const channelsQuery = useQuery({
@@ -225,14 +366,20 @@ export default function Channels() {
     queryFn: () => api.get<Channel[]>('/api/channels'),
   });
 
-  function update(patch: Partial<ChannelDraft>) {
-    setDraft((current) => {
-      const next = { ...current, ...patch };
-      if (patch.kinds && !next.kinds.includes(next.fallbackKind)) {
-        next.fallbackKind = next.kinds[0] ?? 'openai_chat';
+  function clearProtocolErrors(kind: ChannelKind) {
+    setErrors((current) => {
+      const next = { ...current };
+      for (const key of Object.keys(next)) {
+        if (key.startsWith(`protocols.${kind}.`)) {
+          delete next[key];
+        }
       }
       return next;
     });
+  }
+
+  function updateShared(patch: Partial<ChannelDraft>) {
+    setDraft((current) => ({ ...current, ...patch }));
     setErrors((current) => {
       const next = { ...current };
       for (const key of Object.keys(patch)) {
@@ -240,6 +387,64 @@ export default function Channels() {
       }
       return next;
     });
+  }
+
+  function updateProtocol(kind: ChannelKind, patch: Partial<ProtocolDraft>) {
+    setDraft((current) => {
+      const next = {
+        ...current,
+        protocols: {
+          ...current.protocols,
+          [kind]: { ...current.protocols[kind], ...patch },
+        },
+      };
+      return { ...next, protocols: normalizeProtocols(next.protocols) };
+    });
+    clearProtocolErrors(kind);
+  }
+
+  function conversionOptions(kind: ChannelKind) {
+    return PROTOCOL_ORDER.filter(
+      (item) =>
+        item !== kind && draft.protocols[item].mode === 'native',
+    );
+  }
+
+  function setConversion(kind: ChannelKind, value: string) {
+    if (value === NO_CONVERSION) {
+      updateProtocol(kind, { mode: 'native', target: '' });
+      return;
+    }
+
+    const target = value as ChannelKind;
+    if (
+      target === kind ||
+      draft.protocols[target].mode !== 'native'
+    ) {
+      return;
+    }
+
+    setDraft((current) => {
+      const protocols = {
+        ...current.protocols,
+        [kind]: {
+          ...current.protocols[kind],
+          mode: 'convert' as ChannelProtocolMode,
+          target,
+        },
+      };
+      for (const item of PROTOCOL_ORDER) {
+        if (
+          item !== kind &&
+          protocols[item].mode === 'convert' &&
+          protocols[item].target === kind
+        ) {
+          protocols[item] = { ...protocols[item], target };
+        }
+      }
+      return { ...current, protocols: normalizeProtocols(protocols) };
+    });
+    clearProtocolErrors(kind);
   }
 
   const saveMutation = useMutation({
@@ -310,21 +515,35 @@ export default function Channels() {
       toast.error(error instanceof Error ? error.message : String(error)),
   });
 
+  function showErrors(nextErrors: Record<string, string>) {
+    setErrors(nextErrors);
+    const firstProtocol = PROTOCOL_ORDER.find((kind) =>
+      Object.keys(nextErrors).some((key) =>
+        key.startsWith(`protocols.${kind}.`),
+      ),
+    );
+    if (firstProtocol) {
+      setActiveProtocol(firstProtocol);
+    }
+  }
+
   function probe(action: 'test' | 'fetch-models') {
-    const nextErrors = validateDraft(draft, editing != null);
+    const nextErrors = validateDraft(draft, editing);
     if (Object.keys(nextErrors).length > 0) {
-      setErrors(nextErrors);
+      showErrors(nextErrors);
       toast.error('请先补全表单必填项');
       return;
     }
 
     const payload = {
-      ...toPayload(draft, editing != null),
+      ...toPayload(draft),
       id: editing?.id,
+      probe_protocol: activeProtocol,
     };
     if (action === 'test') {
       probeTestMutation.mutate(payload);
     } else {
+      setModelTarget(activeProtocol);
       probeFetchMutation.mutate(payload);
     }
   }
@@ -332,6 +551,7 @@ export default function Channels() {
   function openCreate() {
     setEditing(null);
     setDraft(emptyDraft());
+    setActiveProtocol('openai_chat');
     setErrors({});
     setOpen(true);
   }
@@ -339,19 +559,24 @@ export default function Channels() {
   function openEdit(channel: Channel) {
     setEditing(channel);
     setDraft(draftFromChannel(channel));
+    const primary =
+      channel.protocols?.find((item) => item.mode === 'native')?.protocol ??
+      channel.kinds[0] ??
+      'openai_chat';
+    setActiveProtocol(primary);
     setErrors({});
     setOpen(true);
   }
 
   function submit() {
-    const nextErrors = validateDraft(draft, editing != null);
+    const nextErrors = validateDraft(draft, editing);
     if (Object.keys(nextErrors).length > 0) {
-      setErrors(nextErrors);
+      showErrors(nextErrors);
       return;
     }
     saveMutation.mutate({
       id: editing?.id,
-      payload: toPayload(draft, editing != null),
+      payload: toPayload(draft),
     });
   }
 
@@ -364,9 +589,19 @@ export default function Channels() {
   }
 
   const channels = channelsQuery.data ?? [];
-  const availableKinds = KIND_OPTIONS.filter((option) =>
-    draft.kinds.includes(option.value),
+  const active = draft.protocols[activeProtocol];
+  const savedProtocol = editing?.protocols?.find(
+    (item) => item.protocol === activeProtocol,
   );
+  const targets = conversionOptions(activeProtocol);
+  const targetItems = [
+    { value: NO_CONVERSION, label: '不转换' },
+    ...targets.map((kind) => ({ value: kind, label: KIND_LABELS[kind] })),
+  ];
+  const conversionValue =
+    active.mode === 'convert' && active.target
+      ? active.target
+      : NO_CONVERSION;
 
   return (
     <>
@@ -438,6 +673,7 @@ export default function Channels() {
                 <TableBody>
                   {channels.map((channel) => {
                     const rate = liveRates.get(channel.id) ?? 0;
+                    const models = channelModels(channel);
                     return (
                       <TableRow key={channel.id}>
                         <TableCell>
@@ -460,10 +696,8 @@ export default function Channels() {
                         </TableCell>
                         <TableCell className="hidden md:table-cell">
                           <div className="flex items-center gap-1.5">
-                            <span className="text-sm">
-                              {channel.models.length} 个
-                            </span>
-                            {channel.models.includes('*') ? (
+                            <span className="text-sm">{models.length} 个</span>
+                            {models.includes('*') ? (
                               <Badge variant="secondary" className="text-xs">
                                 通配
                               </Badge>
@@ -593,7 +827,7 @@ export default function Channels() {
               拉取模型
             </Button>
             <span className="text-xs text-muted-foreground">
-              使用当前表单配置，无需先保存
+              使用当前协议页的配置，无需先保存
             </span>
           </div>
 
@@ -602,36 +836,36 @@ export default function Channels() {
               <Input
                 id="channel-name"
                 value={draft.name}
-                onChange={(event) => update({ name: event.target.value })}
+                onChange={(event) =>
+                  updateShared({ name: event.target.value })
+                }
                 placeholder="例如：OpenAI 主账号"
               />
             </Field>
 
             <Field
               label="支持的协议"
-              error={errors.kinds}
-              hint="入站协议在列表中时原样转发；不在列表中时转换到下方「转换目标」。"
+              error={errors.protocols}
+              hint="每个协议页单独配置上游；选择转换时复用目标协议的地址与密钥。"
             >
               <div className="flex flex-wrap gap-2">
-                {KIND_OPTIONS.map((option) => {
-                  const active = draft.kinds.includes(option.value);
+                {PROTOCOL_ORDER.map((kind) => {
+                  const selected = activeProtocol === kind;
+                  const hasError = Object.keys(errors).some((key) =>
+                    key.startsWith(`protocols.${kind}.`),
+                  );
                   return (
                     <Button
-                      key={option.value}
+                      key={kind}
                       type="button"
-                      variant={active ? 'default' : 'outline'}
+                      variant={selected ? 'default' : 'outline'}
                       size="sm"
-                      onClick={() =>
-                        update({
-                          kinds: active
-                            ? draft.kinds.filter(
-                                (kind) => kind !== option.value,
-                              )
-                            : [...draft.kinds, option.value],
-                        })
-                      }
+                      onClick={() => setActiveProtocol(kind)}
                     >
-                      {option.label}
+                      {KIND_LABELS[kind]}
+                      {hasError ? (
+                        <span className="size-1.5 rounded-full bg-destructive" />
+                      ) : null}
                     </Button>
                   );
                 })}
@@ -640,109 +874,145 @@ export default function Channels() {
 
             <Field
               label="转换目标"
-              error={errors.fallbackKind}
-              hint="只有入站协议不被该渠道支持时才会使用。"
+              error={errors[`protocols.${activeProtocol}.target`]}
+              hint="选「不转换」时使用本页配置；选某个协议时，入站请求会转换成该协议并使用它的配置。"
             >
               <Select
-                items={availableKinds}
-                value={draft.fallbackKind}
-                onValueChange={(value) =>
-                  update({ fallbackKind: value as ChannelKind })
-                }
-                disabled={availableKinds.length === 0}
+                items={targetItems}
+                value={conversionValue}
+                onValueChange={(value) => {
+                  if (value) {
+                    setConversion(activeProtocol, value);
+                  }
+                }}
               >
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="选择转换目标" />
                 </SelectTrigger>
                 <SelectContent>
-                  {availableKinds.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
+                  {targetItems.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </Field>
 
-            <Field label="Base URL" htmlFor="channel-url" error={errors.baseUrl}>
-              <Input
-                id="channel-url"
-                value={draft.baseUrl}
-                onChange={(event) => update({ baseUrl: event.target.value })}
-                placeholder="https://api.openai.com/v1"
-                className="font-mono"
-              />
-            </Field>
+            {active.mode === 'native' ? (
+              <>
+                <Field
+                  label="Base URL"
+                  htmlFor="channel-url"
+                  error={errors[`protocols.${activeProtocol}.baseUrl`]}
+                >
+                  <Input
+                    id="channel-url"
+                    value={active.baseUrl}
+                    onChange={(event) =>
+                      updateProtocol(activeProtocol, {
+                        baseUrl: event.target.value,
+                      })
+                    }
+                    placeholder="https://api.openai.com/v1"
+                    className="font-mono"
+                  />
+                </Field>
 
-            <Field
-              label="上游 API Key"
-              htmlFor="channel-key"
-              error={errors.apiKey}
-              hint={editing ? '留空表示保持原值。' : undefined}
-            >
-              <Input
-                id="channel-key"
-                type="password"
-                autoComplete="new-password"
-                value={draft.apiKey}
-                onChange={(event) => update({ apiKey: event.target.value })}
-                placeholder={editing ? '留空保持不变' : 'sk-...'}
-                className="font-mono"
-              />
-            </Field>
+                <Field
+                  label="上游 API Key"
+                  htmlFor="channel-key"
+                  error={errors[`protocols.${activeProtocol}.apiKey`]}
+                  hint={
+                    savedProtocol?.api_key_masked
+                      ? `当前：${savedProtocol.api_key_masked}`
+                      : undefined
+                  }
+                >
+                  <Input
+                    id="channel-key"
+                    type="password"
+                    autoComplete="new-password"
+                    value={active.apiKey}
+                    onChange={(event) =>
+                      updateProtocol(activeProtocol, {
+                        apiKey: event.target.value,
+                      })
+                    }
+                    placeholder={
+                      savedProtocol?.api_key_masked
+                        ? '留空保持不变'
+                        : 'sk-...'
+                    }
+                    className="font-mono"
+                  />
+                </Field>
 
-            <Field label="鉴权头">
-              <Select
-                items={AUTH_HEADER_OPTIONS}
-                value={draft.authHeader}
-                onValueChange={(value) =>
-                  update({ authHeader: value as 'bearer' | 'x-api-key' })
-                }
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="bearer">
-                    Authorization: Bearer
-                  </SelectItem>
-                  <SelectItem value="x-api-key">x-api-key</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
+                <Field label="鉴权头">
+                  <Select
+                    items={AUTH_HEADER_OPTIONS}
+                    value={active.authHeader}
+                    onValueChange={(value) => {
+                      if (value) {
+                        updateProtocol(activeProtocol, {
+                          authHeader: value as 'bearer' | 'x-api-key',
+                        });
+                      }
+                    }}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {AUTH_HEADER_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
 
-            <Field
-              label="模型"
-              error={errors.models}
-              hint="输入模型名后回车；* 表示接受任意模型。"
-            >
-              <TagInput
-                value={draft.models}
-                onChange={(models) => update({ models })}
-                placeholder="gpt-4o-mini"
-              />
-            </Field>
+                <Field
+                  label="模型"
+                  error={errors[`protocols.${activeProtocol}.models`]}
+                  hint="输入模型名后回车；* 表示接受任意模型。"
+                >
+                  <TagInput
+                    value={active.models}
+                    onChange={(models) =>
+                      updateProtocol(activeProtocol, { models })
+                    }
+                    placeholder="gpt-4o-mini"
+                  />
+                </Field>
 
-            <Field
-              label="模型映射"
-              hint="客户端模型 → 上游模型；未命中的模型原样转发。"
-            >
-              <KeyValueEditor
-                value={draft.modelMapping}
-                onChange={(modelMapping) => update({ modelMapping })}
-                keyPlaceholder="客户端模型"
-                valuePlaceholder="上游模型"
-              />
-            </Field>
+                <Field
+                  label="模型映射"
+                  hint="客户端模型 → 上游模型；未命中的模型原样转发。"
+                >
+                  <KeyValueEditor
+                    value={active.modelMapping}
+                    onChange={(modelMapping) =>
+                      updateProtocol(activeProtocol, { modelMapping })
+                    }
+                    keyPlaceholder="客户端模型"
+                    valuePlaceholder="上游模型"
+                  />
+                </Field>
 
-            <Field label="自定义请求头">
-              <KeyValueEditor
-                value={draft.extraHeaders}
-                onChange={(extraHeaders) => update({ extraHeaders })}
-                keyPlaceholder="Header 名称"
-                valuePlaceholder="Header 值"
-              />
-            </Field>
+                <Field label="自定义请求头">
+                  <KeyValueEditor
+                    value={active.extraHeaders}
+                    onChange={(extraHeaders) =>
+                      updateProtocol(activeProtocol, { extraHeaders })
+                    }
+                    keyPlaceholder="Header 名称"
+                    valuePlaceholder="Header 值"
+                  />
+                </Field>
+              </>
+            ) : null}
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <Field label="优先级" htmlFor="channel-priority">
@@ -753,7 +1023,7 @@ export default function Channels() {
                   max={1000}
                   value={draft.priority}
                   onChange={(event) =>
-                    update({ priority: event.target.value })
+                    updateShared({ priority: event.target.value })
                   }
                 />
               </Field>
@@ -764,7 +1034,9 @@ export default function Channels() {
                   min={1}
                   max={1000}
                   value={draft.weight}
-                  onChange={(event) => update({ weight: event.target.value })}
+                  onChange={(event) =>
+                    updateShared({ weight: event.target.value })
+                  }
                 />
               </Field>
               <Field label="超时 (ms)" htmlFor="channel-timeout">
@@ -774,7 +1046,7 @@ export default function Channels() {
                   min={1}
                   value={draft.timeoutMs}
                   onChange={(event) =>
-                    update({ timeoutMs: event.target.value })
+                    updateShared({ timeoutMs: event.target.value })
                   }
                   placeholder="默认"
                 />
@@ -789,7 +1061,9 @@ export default function Channels() {
               <Input
                 id="channel-proxy"
                 value={draft.proxyUrl}
-                onChange={(event) => update({ proxyUrl: event.target.value })}
+                onChange={(event) =>
+                  updateShared({ proxyUrl: event.target.value })
+                }
                 placeholder="http://127.0.0.1:7890"
                 className="font-mono"
               />
@@ -804,7 +1078,9 @@ export default function Channels() {
               </div>
               <Switch
                 checked={draft.enabled}
-                onCheckedChange={(checked) => update({ enabled: checked })}
+                onCheckedChange={(checked) =>
+                  updateShared({ enabled: checked })
+                }
               />
             </div>
           </div>
@@ -836,7 +1112,7 @@ export default function Channels() {
           <DialogHeader>
             <DialogTitle>从上游拉取的模型</DialogTitle>
             <DialogDescription>
-              选择要写入渠道的模型，保存表单后生效。
+              选择要写入「{KIND_LABELS[modelTarget]}」页的模型，保存表单后生效。
             </DialogDescription>
           </DialogHeader>
           <div className="max-h-[320px] space-y-1 overflow-y-auto rounded-lg border p-1">
@@ -876,7 +1152,7 @@ export default function Channels() {
             <Button
               type="button"
               onClick={() => {
-                update({ models: selectedModels });
+                updateProtocol(modelTarget, { models: selectedModels });
                 setModelDialogOpen(false);
                 toast.success('已填入表单，保存后生效');
               }}

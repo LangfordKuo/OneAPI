@@ -13,6 +13,7 @@ import {
 } from 'recharts';
 import type { BreakdownItem, TimeseriesPoint } from '@/api/types';
 import { EmptyState } from '@/components/common/empty-state';
+import { formatCompactNumber, formatNumber } from '@/lib/format';
 import {
   Card,
   CardContent,
@@ -204,12 +205,22 @@ export default function DashboardCharts({ points, models, channels }: Props) {
                 <YAxis
                   tickLine={false}
                   axisLine={false}
-                  width={44}
+                  width={56}
                   allowDecimals={false}
+                  tickFormatter={formatCompactNumber}
                 />
                 <ChartTooltip
                   cursor={{ fill: 'var(--muted)' }}
-                  content={<ChartTooltipContent indicator="dashed" />}
+                  content={
+                    <ChartTooltipContent
+                      indicator="dashed"
+                      formatter={(value) =>
+                        typeof value === 'number'
+                          ? formatNumber(value)
+                          : String(value)
+                      }
+                    />
+                  }
                 />
                 <Bar
                   dataKey="tokens"

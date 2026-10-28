@@ -354,7 +354,7 @@ pub async fn proxy_with_identity(
 
         let request = match upstream::build_request(
             &client,
-            channel,
+            &candidate.upstream_config,
             &state.crypto,
             &candidate.upstream_kind,
             &request_body,
@@ -830,7 +830,7 @@ async fn proxy_stream(
 
         let request = match upstream::build_request(
             &client,
-            channel,
+            &candidate.upstream_config,
             &state.crypto,
             &candidate.upstream_kind,
             &request_body,

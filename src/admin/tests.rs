@@ -59,6 +59,7 @@ async fn seed_channel(state: &AppState, base_url: &str) -> i64 {
         kind: "openai_chat".to_string(),
         kinds: r#"["openai_chat"]"#.to_string(),
         fallback_kind: "openai_chat".to_string(),
+        protocol_configs: "[]".to_string(),
         base_url: base_url.to_string(),
         api_key_enc: state.crypto.encrypt("upstream-key").expect("encrypt"),
         auth_header: "bearer".to_string(),
@@ -864,6 +865,182 @@ async fn channel_probe_works_before_saving() {
         .await
         .expect("channel count");
     assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn channel_protocols_use_their_own_upstream_configs() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let server = MockServer::start().await;
+
+    for (path_value, body) in [
+        ("/chat/v1/chat/completions", chat_response("chat")),
+        ("/resp/v1/responses", json!({"id": "resp_1", "output": []})),
+        (
+            "/ant/v1/messages",
+            json!({"id": "msg_1", "content": [{"type": "text", "text": "ant"}]}),
+        ),
+    ] {
+        Mock::given(method("POST"))
+            .and(path(path_value))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+    }
+
+    let draft = json!({
+        "name": "three-endpoints",
+        "protocols": [
+            {
+                "protocol": "openai_chat",
+                "mode": "native",
+                "base_url": format!("{}/chat/v1", server.uri()),
+                "api_key": "key-chat",
+                "models": ["gpt-test"],
+            },
+            {
+                "protocol": "openai_responses",
+                "mode": "native",
+                "base_url": format!("{}/resp/v1", server.uri()),
+                "api_key": "key-resp",
+                "models": ["gpt-test"],
+            },
+            {
+                "protocol": "anthropic",
+                "mode": "native",
+                "base_url": format!("{}/ant/v1", server.uri()),
+                "api_key": "key-ant",
+                "models": ["claude-test"],
+            },
+        ],
+    });
+
+    let router = app::router(state.clone());
+    for protocol in ["openai_chat", "openai_responses", "anthropic"] {
+        let mut payload = draft.clone();
+        payload["probe_protocol"] = json!(protocol);
+        let (status, body) =
+            admin_post(router.clone(), "/api/channels/test", &token, payload).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["ok"],
+            json!(true),
+            "{protocol} probe failed: {}",
+            body["message"]
+        );
+    }
+
+    let (status, body) = admin_post(router, "/api/channels", &token, draft).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["protocols"][0]["mode"], json!("native"));
+    assert_eq!(body["protocols"][1]["mode"], json!("native"));
+    assert_eq!(body["protocols"][2]["mode"], json!("native"));
+    assert_eq!(body["protocols"][0]["api_key_masked"], json!("••••chat"));
+    assert_eq!(body["protocols"][1]["api_key_masked"], json!("••••resp"));
+    assert_eq!(body["protocols"][2]["api_key_masked"], json!("••••-ant"));
+    assert_eq!(
+        body["protocols"][1]["base_url"],
+        json!(format!("{}/resp/v1", server.uri()))
+    );
+}
+
+#[tokio::test]
+async fn converted_protocol_reuses_the_target_native_config() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat_response("converted")))
+        .mount(&server)
+        .await;
+
+    let router = app::router(state.clone());
+    let (status, body) = admin_post(
+        router,
+        "/api/channels",
+        &token,
+        json!({
+            "name": "converted",
+            "protocols": [
+                {
+                    "protocol": "openai_chat",
+                    "mode": "native",
+                    "base_url": format!("{}/chat/v1", server.uri()),
+                    "api_key": "chat-key",
+                    "models": ["gpt-test"],
+                },
+                {
+                    "protocol": "openai_responses",
+                    "mode": "convert",
+                    "target": "openai_chat",
+                },
+                {
+                    "protocol": "anthropic",
+                    "mode": "convert",
+                    "target": "openai_chat",
+                },
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["protocols"][1]["target"], json!("openai_chat"));
+    assert_eq!(body["protocols"][2]["target"], json!("openai_chat"));
+
+    let key = seed_key(&state).await;
+    let router = app::router(state);
+    let (status, body) = send_gateway(
+        router,
+        "/v1/messages",
+        &key,
+        json!({
+            "model": "gpt-test",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["content"][0]["text"], json!("converted"));
+}
+
+#[tokio::test]
+async fn conversion_target_must_be_a_native_protocol() {
+    let (_temp, state) = test_state().await;
+    let token = admin_token(&state).await;
+    let router = app::router(state);
+
+    let (status, _) = admin_post(
+        router,
+        "/api/channels",
+        &token,
+        json!({
+            "name": "bad-target",
+            "protocols": [
+                {
+                    "protocol": "openai_chat",
+                    "mode": "native",
+                    "base_url": "https://example.invalid/v1",
+                    "api_key": "chat-key",
+                    "models": ["gpt-test"],
+                },
+                {
+                    "protocol": "openai_responses",
+                    "mode": "convert",
+                    "target": "anthropic",
+                },
+                {
+                    "protocol": "anthropic",
+                    "mode": "convert",
+                    "target": "openai_chat",
+                },
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

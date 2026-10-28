@@ -4,7 +4,7 @@ use rand::Rng;
 
 use crate::{
     models::{
-        channel::{self, Channel},
+        channel::{self, Channel, ProtocolConfig},
         now_ms,
     },
     protocol::Protocol,
@@ -15,6 +15,7 @@ pub struct Candidate {
     pub channel: Channel,
     pub upstream_model: String,
     pub upstream_kind: String,
+    pub upstream_config: ProtocolConfig,
 }
 
 pub fn candidates(channels: Vec<Channel>, model: &str, inbound: Protocol) -> Vec<Candidate> {
@@ -34,25 +35,32 @@ pub fn candidates(channels: Vec<Channel>, model: &str, inbound: Protocol) -> Vec
             continue;
         }
 
-        let models: Vec<String> = serde_json::from_str(&channel.models).unwrap_or_default();
-        if !models.iter().any(|item| item == "*" || item == model) {
+        let Some(route) = channel::resolve_route(&channel, inbound_kind) else {
+            continue;
+        };
+        if !route
+            .config
+            .models
+            .iter()
+            .any(|item| item == "*" || item == model)
+        {
             continue;
         }
 
-        let mapping: HashMap<String, String> =
-            serde_json::from_str(&channel.model_mapping).unwrap_or_default();
-        let upstream_model = mapping
+        let upstream_model = route
+            .config
+            .model_mapping
             .get(model)
             .cloned()
             .unwrap_or_else(|| model.to_string());
 
         let weight = channel.weight.max(1);
-        let upstream_kind = channel::upstream_kind(&channel, inbound_kind);
         grouped.entry(channel.priority).or_default().push((
             Candidate {
                 channel,
                 upstream_model,
-                upstream_kind,
+                upstream_kind: route.upstream_kind,
+                upstream_config: route.config,
             },
             weight,
         ));

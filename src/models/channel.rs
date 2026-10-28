@@ -1,3 +1,6 @@
+use std::collections::{BTreeSet, HashMap};
+
+use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 
 #[derive(Debug, Clone, FromRow)]
@@ -7,6 +10,7 @@ pub struct Channel {
     pub kind: String,
     pub kinds: String,
     pub fallback_kind: Option<String>,
+    pub protocol_configs: String,
     pub base_url: String,
     pub api_key_enc: String,
     pub auth_header: String,
@@ -32,6 +36,7 @@ pub struct ChannelWrite {
     pub kind: String,
     pub kinds: String,
     pub fallback_kind: String,
+    pub protocol_configs: String,
     pub base_url: String,
     pub api_key_enc: String,
     pub auth_header: String,
@@ -45,13 +50,64 @@ pub struct ChannelWrite {
     pub enabled: i64,
 }
 
+pub const PROTOCOLS: [&str; 3] = ["openai_chat", "openai_responses", "anthropic"];
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolMode {
+    #[default]
+    Native,
+    Convert,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProtocolConfig {
+    pub protocol: String,
+    #[serde(default)]
+    pub mode: ProtocolMode,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key_enc: String,
+    #[serde(default)]
+    pub auth_header: String,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub model_mapping: HashMap<String, String>,
+    #[serde(default)]
+    pub extra_headers: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedRoute {
+    pub upstream_kind: String,
+    pub config: ProtocolConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CatalogModels {
+    pub models: Vec<String>,
+    pub has_wildcard: bool,
+}
+
 const SELECT_COLUMNS: &str =
-    "id, name, kind, kinds, fallback_kind, base_url, api_key_enc, auth_header, models,
+    "id, name, kind, kinds, fallback_kind, protocol_configs, base_url, api_key_enc, auth_header, models,
     model_mapping, extra_headers, proxy_url, priority, weight, timeout_ms, enabled,
     last_error, last_error_at, disabled_until, consecutive_failures, created_at, updated_at";
 
 pub fn is_known_kind(kind: &str) -> bool {
-    matches!(kind, "openai_chat" | "openai_responses" | "anthropic")
+    PROTOCOLS.contains(&kind)
+}
+
+pub fn default_auth_header(kind: &str) -> &'static str {
+    if kind == "anthropic" {
+        "x-api-key"
+    } else {
+        "bearer"
+    }
 }
 
 /// Map an inbound protocol name (`chat`/`responses`/`anthropic`) to the channel
@@ -64,11 +120,24 @@ pub fn kind_for_protocol(protocol: &str) -> &'static str {
     }
 }
 
-/// Supported upstream kinds in configuration order, falling back to the legacy
-/// single `kind` column for rows created before `kinds` existed.
-pub fn supported_kinds(channel: &Channel) -> Vec<String> {
+/// Everything needed to synthesize per-protocol configs from the legacy single
+/// configuration. Used both for the one-time backfill and for legacy API input.
+#[derive(Debug, Clone, Copy)]
+pub struct LegacyConfigSource<'a> {
+    pub kind: &'a str,
+    pub kinds_json: &'a str,
+    pub fallback_kind: Option<&'a str>,
+    pub base_url: &'a str,
+    pub api_key_enc: &'a str,
+    pub auth_header: &'a str,
+    pub models_json: &'a str,
+    pub model_mapping_json: &'a str,
+    pub extra_headers_json: &'a str,
+}
+
+pub fn legacy_protocol_configs(source: LegacyConfigSource<'_>) -> Vec<ProtocolConfig> {
     let mut kinds = Vec::new();
-    if let Ok(parsed) = serde_json::from_str::<Vec<String>>(&channel.kinds) {
+    if let Ok(parsed) = serde_json::from_str::<Vec<String>>(source.kinds_json) {
         for kind in parsed {
             if is_known_kind(&kind) && !kinds.contains(&kind) {
                 kinds.push(kind);
@@ -76,29 +145,199 @@ pub fn supported_kinds(channel: &Channel) -> Vec<String> {
         }
     }
     if kinds.is_empty() {
-        kinds.push(if is_known_kind(&channel.kind) {
-            channel.kind.clone()
+        kinds.push(if is_known_kind(source.kind) {
+            source.kind.to_string()
         } else {
             "openai_chat".to_string()
         });
     }
-    kinds
+
+    let fallback = source
+        .fallback_kind
+        .filter(|kind| kinds.iter().any(|item| item == kind))
+        .unwrap_or(&kinds[0])
+        .to_string();
+
+    let models: Vec<String> = serde_json::from_str(source.models_json).unwrap_or_default();
+    let model_mapping: HashMap<String, String> =
+        serde_json::from_str(source.model_mapping_json).unwrap_or_default();
+    let extra_headers: HashMap<String, String> =
+        serde_json::from_str(source.extra_headers_json).unwrap_or_default();
+
+    PROTOCOLS
+        .iter()
+        .map(|protocol| {
+            let native = kinds.iter().any(|kind| kind == protocol);
+            ProtocolConfig {
+                protocol: protocol.to_string(),
+                mode: if native {
+                    ProtocolMode::Native
+                } else {
+                    ProtocolMode::Convert
+                },
+                target: (!native).then(|| fallback.clone()),
+                base_url: source.base_url.to_string(),
+                api_key_enc: source.api_key_enc.to_string(),
+                auth_header: source.auth_header.to_string(),
+                models: models.clone(),
+                model_mapping: model_mapping.clone(),
+                extra_headers: extra_headers.clone(),
+            }
+        })
+        .collect()
 }
 
-/// Kind to use upstream for an inbound kind: the same kind when supported,
-/// otherwise the configured fallback, otherwise the first supported kind.
-pub fn upstream_kind(channel: &Channel, inbound_kind: &str) -> String {
-    let kinds = supported_kinds(channel);
-    if kinds.iter().any(|kind| kind == inbound_kind) {
-        return inbound_kind.to_string();
+fn legacy_source(channel: &Channel) -> LegacyConfigSource<'_> {
+    LegacyConfigSource {
+        kind: &channel.kind,
+        kinds_json: &channel.kinds,
+        fallback_kind: channel.fallback_kind.as_deref(),
+        base_url: &channel.base_url,
+        api_key_enc: &channel.api_key_enc,
+        auth_header: &channel.auth_header,
+        models_json: &channel.models,
+        model_mapping_json: &channel.model_mapping,
+        extra_headers_json: &channel.extra_headers,
     }
-    channel
-        .fallback_kind
-        .as_deref()
-        .filter(|kind| kinds.iter().any(|item| item == kind))
-        .or_else(|| kinds.first().map(String::as_str))
-        .unwrap_or("openai_chat")
-        .to_string()
+}
+
+/// The three protocol configs in canonical order. Malformed or missing entries
+/// are repaired so callers and the UI always see exactly three routes.
+pub fn parse_protocol_configs(channel: &Channel) -> Vec<ProtocolConfig> {
+    let parsed: Vec<ProtocolConfig> =
+        serde_json::from_str(&channel.protocol_configs).unwrap_or_default();
+    if parsed.is_empty() {
+        return legacy_protocol_configs(legacy_source(channel));
+    }
+
+    let mut by_kind: HashMap<String, ProtocolConfig> = HashMap::new();
+    for config in parsed {
+        if is_known_kind(&config.protocol) {
+            by_kind.entry(config.protocol.clone()).or_insert(config);
+        }
+    }
+
+    let first_native = PROTOCOLS.iter().find(|protocol| {
+        by_kind.get(**protocol).is_some_and(|config| {
+            config.mode == ProtocolMode::Native && !config.base_url.is_empty()
+        })
+    });
+
+    PROTOCOLS
+        .iter()
+        .map(|protocol| match by_kind.remove(*protocol) {
+            Some(mut config) => {
+                config.protocol = protocol.to_string();
+                if config.auth_header.is_empty() {
+                    config.auth_header = default_auth_header(protocol).to_string();
+                }
+                if config.mode == ProtocolMode::Convert {
+                    let target_valid = config
+                        .target
+                        .as_deref()
+                        .is_some_and(|target| is_known_kind(target) && target != *protocol);
+                    if !target_valid {
+                        config.target = first_native
+                            .filter(|native| **native != *protocol)
+                            .map(|native| native.to_string());
+                    }
+                }
+                config
+            }
+            None => {
+                let target = first_native
+                    .filter(|native| **native != *protocol)
+                    .map(|native| native.to_string());
+                ProtocolConfig {
+                    protocol: protocol.to_string(),
+                    mode: if target.is_some() {
+                        ProtocolMode::Convert
+                    } else {
+                        ProtocolMode::Native
+                    },
+                    target,
+                    auth_header: default_auth_header(protocol).to_string(),
+                    ..Default::default()
+                }
+            }
+        })
+        .collect()
+}
+
+/// Resolve the upstream route for an inbound protocol. `None` means the channel
+/// cannot serve that protocol (unconfigured native route or invalid target).
+pub fn resolve_route(channel: &Channel, inbound_kind: &str) -> Option<ResolvedRoute> {
+    let configs = parse_protocol_configs(channel);
+    let inbound = configs
+        .iter()
+        .find(|config| config.protocol == inbound_kind)?;
+    match inbound.mode {
+        ProtocolMode::Native => {
+            if inbound.base_url.is_empty() {
+                return None;
+            }
+            Some(ResolvedRoute {
+                upstream_kind: inbound.protocol.clone(),
+                config: inbound.clone(),
+            })
+        }
+        ProtocolMode::Convert => {
+            let target = inbound.target.as_deref()?;
+            if target == inbound_kind {
+                return None;
+            }
+            let target_config = configs.iter().find(|config| {
+                config.protocol == target
+                    && config.mode == ProtocolMode::Native
+                    && !config.base_url.is_empty()
+            })?;
+            Some(ResolvedRoute {
+                upstream_kind: target_config.protocol.clone(),
+                config: target_config.clone(),
+            })
+        }
+    }
+}
+
+pub fn native_configs(channel: &Channel) -> Vec<ProtocolConfig> {
+    parse_protocol_configs(channel)
+        .into_iter()
+        .filter(|config| config.mode == ProtocolMode::Native)
+        .collect()
+}
+
+/// Models advertised to clients: the union of models from the native routes.
+/// Conversion routes reuse their target's models, so they are already covered.
+pub fn catalog_models(channel: &Channel) -> CatalogModels {
+    let mut models = BTreeSet::new();
+    let mut has_wildcard = false;
+
+    for config in native_configs(channel) {
+        for model in config.models {
+            if model == "*" {
+                has_wildcard = true;
+            } else if !model.is_empty() {
+                models.insert(model);
+            }
+        }
+    }
+
+    if models.is_empty() && !has_wildcard {
+        if let Ok(legacy) = serde_json::from_str::<Vec<String>>(&channel.models) {
+            for model in legacy {
+                if model == "*" {
+                    has_wildcard = true;
+                } else if !model.is_empty() {
+                    models.insert(model);
+                }
+            }
+        }
+    }
+
+    CatalogModels {
+        models: models.into_iter().collect(),
+        has_wildcard,
+    }
 }
 
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<Channel>> {
@@ -114,14 +353,15 @@ pub async fn get(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<Channel>> {
 pub async fn create(pool: &SqlitePool, input: &ChannelWrite, now: i64) -> sqlx::Result<Channel> {
     let result = sqlx::query(
         "INSERT INTO channels
-         (name, kind, kinds, fallback_kind, base_url, api_key_enc, auth_header, models, model_mapping, extra_headers,
-          proxy_url, priority, weight, timeout_ms, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (name, kind, kinds, fallback_kind, protocol_configs, base_url, api_key_enc, auth_header, models,
+          model_mapping, extra_headers, proxy_url, priority, weight, timeout_ms, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&input.name)
     .bind(&input.kind)
     .bind(&input.kinds)
     .bind(&input.fallback_kind)
+    .bind(&input.protocol_configs)
     .bind(&input.base_url)
     .bind(&input.api_key_enc)
     .bind(&input.auth_header)
@@ -151,15 +391,16 @@ pub async fn update(
 ) -> sqlx::Result<bool> {
     let result = sqlx::query(
         "UPDATE channels SET
-            name = ?, kind = ?, kinds = ?, fallback_kind = ?, base_url = ?, api_key_enc = ?, auth_header = ?, models = ?,
-            model_mapping = ?, extra_headers = ?, proxy_url = ?, priority = ?, weight = ?,
-            timeout_ms = ?, enabled = ?, updated_at = ?
+            name = ?, kind = ?, kinds = ?, fallback_kind = ?, protocol_configs = ?, base_url = ?,
+            api_key_enc = ?, auth_header = ?, models = ?, model_mapping = ?, extra_headers = ?,
+            proxy_url = ?, priority = ?, weight = ?, timeout_ms = ?, enabled = ?, updated_at = ?
          WHERE id = ?",
     )
     .bind(&input.name)
     .bind(&input.kind)
     .bind(&input.kinds)
     .bind(&input.fallback_kind)
+    .bind(&input.protocol_configs)
     .bind(&input.base_url)
     .bind(&input.api_key_enc)
     .bind(&input.auth_header)
@@ -185,6 +426,55 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> sqlx::Result<bool> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Populate `protocol_configs` for rows created before the per-protocol layout.
+/// Idempotent: only rows with an empty JSON array are read.
+pub async fn backfill_protocol_configs(pool: &SqlitePool) -> sqlx::Result<()> {
+    #[derive(FromRow)]
+    struct LegacyRow {
+        id: i64,
+        kind: String,
+        kinds: String,
+        fallback_kind: Option<String>,
+        base_url: String,
+        api_key_enc: String,
+        auth_header: String,
+        models: String,
+        model_mapping: String,
+        extra_headers: String,
+    }
+
+    let rows = sqlx::query_as::<_, LegacyRow>(
+        "SELECT id, kind, kinds, fallback_kind, base_url, api_key_enc, auth_header, models,
+                model_mapping, extra_headers
+         FROM channels
+         WHERE protocol_configs IS NULL OR protocol_configs = '[]'",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for row in rows {
+        let configs = legacy_protocol_configs(LegacyConfigSource {
+            kind: &row.kind,
+            kinds_json: &row.kinds,
+            fallback_kind: row.fallback_kind.as_deref(),
+            base_url: &row.base_url,
+            api_key_enc: &row.api_key_enc,
+            auth_header: &row.auth_header,
+            models_json: &row.models,
+            model_mapping_json: &row.model_mapping,
+            extra_headers_json: &row.extra_headers,
+        });
+        let encoded = serde_json::to_string(&configs).unwrap_or_else(|_| "[]".to_string());
+        sqlx::query("UPDATE channels SET protocol_configs = ? WHERE id = ?")
+            .bind(encoded)
+            .bind(row.id)
+            .execute(pool)
+            .await?;
+    }
+
+    Ok(())
 }
 
 /// Record a failed attempt. Once a channel has failed twice in a row it enters
@@ -323,11 +613,12 @@ mod tests {
             kind: legacy_kind.to_string(),
             kinds: kinds.to_string(),
             fallback_kind: fallback.map(str::to_string),
+            protocol_configs: "[]".to_string(),
             base_url: "http://localhost".to_string(),
             api_key_enc: String::new(),
             auth_header: "bearer".to_string(),
-            models: "[]".to_string(),
-            model_mapping: "{}".to_string(),
+            models: r#"["m1"]"#.to_string(),
+            model_mapping: r#"{"m1":"upstream-m1"}"#.to_string(),
             extra_headers: "{}".to_string(),
             proxy_url: None,
             priority: 0,
@@ -344,48 +635,125 @@ mod tests {
     }
 
     #[test]
-    fn supported_kinds_prefers_configured_values_and_dedups() {
+    fn legacy_configs_mark_configured_kinds_native_and_convert_the_rest() {
         let channel = config_channel(
-            r#"["openai_chat","anthropic","openai_chat","unknown"]"#,
-            None,
-            "openai_responses",
-        );
-        assert_eq!(supported_kinds(&channel), vec!["openai_chat", "anthropic"]);
-    }
-
-    #[test]
-    fn supported_kinds_falls_back_to_legacy_kind() {
-        let channel = config_channel("[]", None, "anthropic");
-        assert_eq!(supported_kinds(&channel), vec!["anthropic"]);
-    }
-
-    #[test]
-    fn upstream_kind_matches_native_protocol_first() {
-        let channel = config_channel(
-            r#"["openai_chat","openai_responses"]"#,
+            r#"["openai_chat","anthropic"]"#,
             Some("openai_chat"),
             "openai_chat",
         );
-        assert_eq!(
-            upstream_kind(&channel, "openai_responses"),
-            "openai_responses"
-        );
-        assert_eq!(upstream_kind(&channel, "anthropic"), "openai_chat");
+        let configs = legacy_protocol_configs(legacy_source(&channel));
+
+        assert_eq!(configs.len(), 3);
+        assert_eq!(configs[0].protocol, "openai_chat");
+        assert_eq!(configs[0].mode, ProtocolMode::Native);
+        assert_eq!(configs[1].protocol, "openai_responses");
+        assert_eq!(configs[1].mode, ProtocolMode::Convert);
+        assert_eq!(configs[1].target.as_deref(), Some("openai_chat"));
+        assert_eq!(configs[2].mode, ProtocolMode::Native);
     }
 
     #[test]
-    fn upstream_kind_uses_fallback_or_first_supported() {
+    fn resolve_route_uses_the_native_config_or_the_target() {
         let channel = config_channel(
-            r#"["openai_chat","openai_responses"]"#,
-            Some("openai_responses"),
+            r#"["openai_chat","anthropic"]"#,
+            Some("openai_chat"),
             "openai_chat",
         );
-        assert_eq!(upstream_kind(&channel, "anthropic"), "openai_responses");
 
-        let no_fallback = config_channel(r#"["openai_chat","anthropic"]"#, None, "openai_chat");
-        assert_eq!(
-            upstream_kind(&no_fallback, "openai_responses"),
-            "openai_chat"
-        );
+        let chat = resolve_route(&channel, "openai_chat").expect("chat route");
+        assert_eq!(chat.upstream_kind, "openai_chat");
+        assert_eq!(chat.config.models, vec!["m1"]);
+
+        let responses = resolve_route(&channel, "openai_responses").expect("converted route");
+        assert_eq!(responses.upstream_kind, "openai_chat");
+        assert_eq!(responses.config.model_mapping["m1"], "upstream-m1");
+    }
+
+    #[test]
+    fn resolve_route_rejects_convert_targets_that_are_not_native() {
+        let channel = config_channel(r#"["openai_chat"]"#, None, "openai_chat");
+        let configs = legacy_protocol_configs(legacy_source(&channel));
+        let mut encoded = configs;
+        encoded[1].mode = ProtocolMode::Convert;
+        encoded[1].target = Some("anthropic".to_string());
+        let mut with_configs = config_channel("[]", None, "openai_chat");
+        with_configs.protocol_configs = serde_json::to_string(&encoded).expect("json");
+
+        // `anthropic` is itself a convert route, so it cannot be a target.
+        assert!(resolve_route(&with_configs, "openai_responses").is_none());
+    }
+
+    #[test]
+    fn catalog_models_unions_native_configs() {
+        let channel = config_channel(r#"["openai_chat"]"#, None, "openai_chat");
+        let mut configs = legacy_protocol_configs(legacy_source(&channel));
+        configs[2].mode = ProtocolMode::Native;
+        configs[2].models = vec!["claude-x".to_string()];
+        let mut channel = config_channel("[]", None, "openai_chat");
+        channel.protocol_configs = serde_json::to_string(&configs).expect("json");
+
+        let catalog = catalog_models(&channel);
+        assert_eq!(catalog.models, vec!["claude-x", "m1"]);
+        assert!(!catalog.has_wildcard);
+    }
+
+    #[tokio::test]
+    async fn backfill_generates_protocol_routes_for_legacy_rows() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("memory database");
+        sqlx::query(
+            "CREATE TABLE channels (
+                id INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL,
+                kinds TEXT NOT NULL,
+                fallback_kind TEXT,
+                protocol_configs TEXT NOT NULL DEFAULT '[]',
+                base_url TEXT NOT NULL,
+                api_key_enc TEXT NOT NULL,
+                auth_header TEXT NOT NULL,
+                models TEXT NOT NULL,
+                model_mapping TEXT NOT NULL,
+                extra_headers TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("schema");
+        sqlx::query(
+            "INSERT INTO channels
+             (id, kind, kinds, fallback_kind, base_url, api_key_enc, auth_header, models, model_mapping, extra_headers)
+             VALUES (1, 'openai_chat', '[\"openai_chat\",\"anthropic\"]', 'openai_chat',
+                     'http://old.example/v1', 'encrypted', 'bearer', '[\"m1\"]', '{}', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed");
+
+        backfill_protocol_configs(&pool).await.expect("backfill");
+
+        let encoded: String =
+            sqlx::query_scalar("SELECT protocol_configs FROM channels WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        let configs: Vec<ProtocolConfig> = serde_json::from_str(&encoded).expect("json");
+        assert_eq!(configs.len(), 3);
+        assert_eq!(configs[0].mode, ProtocolMode::Native);
+        assert_eq!(configs[1].mode, ProtocolMode::Convert);
+        assert_eq!(configs[1].target.as_deref(), Some("openai_chat"));
+        assert_eq!(configs[1].base_url, "http://old.example/v1");
+        assert_eq!(configs[2].mode, ProtocolMode::Native);
+
+        // Running again must not rewrite already migrated rows.
+        backfill_protocol_configs(&pool).await.expect("idempotent");
+        let after: String =
+            sqlx::query_scalar("SELECT protocol_configs FROM channels WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(after, encoded);
     }
 }
