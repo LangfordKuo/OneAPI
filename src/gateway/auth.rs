@@ -35,6 +35,15 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
             .ok_or_else(|| unauthorized(parts))?;
 
         let now = models::now_ms();
+        if record.token_limit_reached() {
+            if record.enabled != 0 {
+                if let Err(error) = models::api_key::disable(&state.db, record.id).await {
+                    tracing::warn!(error = %error, key_id = record.id, "failed to disable over-quota API key");
+                }
+            }
+            return Err(limit_reached(parts));
+        }
+
         if record.enabled == 0
             || record
                 .expires_at
@@ -89,6 +98,15 @@ fn unauthorized(parts: &Parts) -> Response {
         StatusCode::UNAUTHORIZED,
         "invalid or missing API key",
         "authentication_error",
+    )
+}
+
+fn limit_reached(parts: &Parts) -> Response {
+    client_error(
+        protocol_for_path(parts.uri.path()),
+        StatusCode::FORBIDDEN,
+        "API key token limit reached",
+        "permission_error",
     )
 }
 

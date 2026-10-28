@@ -70,7 +70,7 @@ async fn messages(
 /// so clients that probe context size keep working across providers.
 async fn count_tokens(
     State(state): State<AppState>,
-    _auth: ApiKeyAuth,
+    auth: ApiKeyAuth,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response, AppError> {
@@ -79,7 +79,20 @@ async fn count_tokens(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
     {
+        if !auth.key.allows_model(model) {
+            return Ok(error::client_error(
+                Protocol::Anthropic,
+                StatusCode::FORBIDDEN,
+                "model is not allowed for this API key",
+                "permission_error",
+            ));
+        }
+
         let channels = state.cache.channels(&state.db).await?;
+        let channels: Vec<_> = channels
+            .into_iter()
+            .filter(|channel| auth.key.allows_channel(channel.id))
+            .collect();
         if let Some(candidate) = select::candidates(channels, model, Protocol::Anthropic)
             .into_iter()
             .find(|candidate| candidate.upstream_kind == "anthropic")
@@ -208,9 +221,9 @@ async fn delete_response(
 
 async fn list_models(
     State(state): State<AppState>,
-    _auth: ApiKeyAuth,
+    auth: ApiKeyAuth,
 ) -> Result<Json<Value>, AppError> {
-    let models = available_models(&state).await?;
+    let models = available_models(&state, &auth.key).await?;
     let first_id = models.first().cloned();
     let last_id = models.last().cloned();
     let data: Vec<Value> = models
@@ -236,10 +249,10 @@ async fn list_models(
 
 async fn get_model(
     State(state): State<AppState>,
-    _auth: ApiKeyAuth,
+    auth: ApiKeyAuth,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
-    let models = available_models(&state).await?;
+    let models = available_models(&state, &auth.key).await?;
     if models.iter().any(|model| model == &id) {
         Ok(Json(json!({
             "id": id,
@@ -258,13 +271,16 @@ async fn get_model(
     }
 }
 
-async fn available_models(state: &AppState) -> sqlx::Result<Vec<String>> {
+async fn available_models(
+    state: &AppState,
+    key: &models::api_key::ApiKey,
+) -> sqlx::Result<Vec<String>> {
     let channels = state.cache.channels(&state.db).await?;
     let mut result = BTreeSet::new();
     let mut has_wildcard = false;
 
     for channel in channels {
-        if channel.enabled == 0 {
+        if channel.enabled == 0 || !key.allows_channel(channel.id) {
             continue;
         }
         let catalog = models::channel::catalog_models(&channel);
@@ -285,6 +301,13 @@ async fn available_models(state: &AppState) -> sqlx::Result<Vec<String>> {
                 result.insert(model);
             }
         }
+    }
+
+    // A per-key model allowlist narrows the catalog to models that can actually
+    // be served by the channels this key may use.
+    let allowed = key.model_names();
+    if !allowed.is_empty() && !allowed.iter().any(|model| model == "*") {
+        result.retain(|model| allowed.contains(model));
     }
 
     Ok(result.into_iter().collect())

@@ -1,13 +1,18 @@
+use std::collections::HashSet;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     error::AppError,
-    models::{self, api_key::ApiKey},
+    models::{
+        self,
+        api_key::{self, ApiKey, ApiKeyCreate, ApiKeyUpdate},
+    },
     security,
     state::AppState,
 };
@@ -22,6 +27,10 @@ pub struct KeyOutput {
     pub enabled: bool,
     pub expires_at: Option<i64>,
     pub last_used_at: Option<i64>,
+    pub allowed_channel_ids: Vec<i64>,
+    pub allowed_models: Vec<String>,
+    pub token_limit: Option<i64>,
+    pub token_usage: i64,
     pub created_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -29,6 +38,8 @@ pub struct KeyOutput {
 
 impl KeyOutput {
     fn from_row(row: ApiKey) -> Self {
+        let allowed_channel_ids = row.channel_ids();
+        let allowed_models = row.model_names();
         Self {
             id: row.id,
             name: row.name,
@@ -36,6 +47,10 @@ impl KeyOutput {
             enabled: row.enabled != 0,
             expires_at: row.expires_at,
             last_used_at: row.last_used_at,
+            allowed_channel_ids,
+            allowed_models,
+            token_limit: row.token_limit,
+            token_usage: row.token_usage,
             created_at: row.created_at,
             key: None,
         }
@@ -49,6 +64,12 @@ pub struct KeyCreateInput {
     pub expires_at: Option<i64>,
     #[serde(default)]
     pub enabled: Option<bool>,
+    #[serde(default)]
+    pub allowed_channel_ids: Vec<i64>,
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
+    #[serde(default)]
+    pub token_limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,8 +78,62 @@ pub struct KeyUpdateInput {
     pub name: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     pub expires_at: Option<Option<i64>>,
+    #[serde(default)]
+    pub allowed_channel_ids: Option<Vec<i64>>,
+    #[serde(default)]
+    pub allowed_models: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub token_limit: Option<Option<i64>>,
+}
+
+/// Distinguish "field omitted" (None) from an explicit `null` (Some(None)).
+fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(deserializer)?))
+}
+
+/// Validate and normalize optional restrictions. Empty lists mean "no limit".
+async fn validate_restrictions(
+    state: &AppState,
+    channel_ids: Vec<i64>,
+    models: Vec<String>,
+    token_limit: Option<i64>,
+) -> Result<(Vec<i64>, Vec<String>, Option<i64>), AppError> {
+    let channel_ids = api_key::parse_channel_ids(&channel_ids);
+    if !channel_ids.is_empty() {
+        let existing: HashSet<i64> = models::channel::list(&state.db)
+            .await?
+            .into_iter()
+            .map(|channel| channel.id)
+            .collect();
+        if let Some(missing) = channel_ids.iter().find(|id| !existing.contains(id)) {
+            return Err(AppError::BadRequest(format!(
+                "channel {missing} does not exist"
+            )));
+        }
+    }
+
+    let models = api_key::parse_model_names(models);
+    let token_limit = match token_limit {
+        Some(value) if value < 0 => {
+            return Err(AppError::BadRequest(
+                "token_limit cannot be negative".to_string(),
+            ))
+        }
+        Some(0) | None => None,
+        Some(value) => Some(value),
+    };
+
+    Ok((channel_ids, models, token_limit))
+}
+
+fn encode<T: Serialize>(value: &T) -> Result<String, AppError> {
+    serde_json::to_string(value).map_err(|error| AppError::Internal(error.into()))
 }
 
 pub async fn list(
@@ -79,19 +154,34 @@ pub async fn create(
         return Err(AppError::BadRequest("key name is required".to_string()));
     }
 
+    let (channel_ids, model_names, token_limit) = validate_restrictions(
+        &state,
+        input.allowed_channel_ids,
+        input.allowed_models,
+        input.token_limit,
+    )
+    .await?;
+
     let key = security::generate_api_key();
     let key_hash = security::api_key_hash(&key);
     let key_prefix: String = key.chars().take(12).collect();
     let enabled = if input.enabled.unwrap_or(true) { 1 } else { 0 };
+    let allowed_channel_ids = encode(&channel_ids)?;
+    let allowed_models = encode(&model_names)?;
 
-    let row = models::api_key::create(
+    let row = models::api_key::create_with_limits(
         &state.db,
-        name,
-        &key_hash,
-        &key_prefix,
-        enabled,
-        input.expires_at,
-        models::now_ms(),
+        &ApiKeyCreate {
+            name,
+            key_hash: &key_hash,
+            key_prefix: &key_prefix,
+            enabled,
+            expires_at: input.expires_at,
+            allowed_channel_ids: &allowed_channel_ids,
+            allowed_models: &allowed_models,
+            token_limit,
+            created_at: models::now_ms(),
+        },
     )
     .await?;
 
@@ -114,7 +204,7 @@ pub async fn update(
         .name
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or(existing.name);
+        .unwrap_or_else(|| existing.name.clone());
     let enabled = input
         .enabled
         .map(|value| if value { 1 } else { 0 })
@@ -124,7 +214,32 @@ pub async fn update(
         None => existing.expires_at,
     };
 
-    if !models::api_key::update(&state.db, id, &name, enabled, expires_at).await? {
+    let channel_ids = input
+        .allowed_channel_ids
+        .unwrap_or_else(|| existing.channel_ids());
+    let models = input
+        .allowed_models
+        .unwrap_or_else(|| existing.model_names());
+    let token_limit = input.token_limit.unwrap_or(existing.token_limit);
+    let (channel_ids, models, token_limit) =
+        validate_restrictions(&state, channel_ids, models, token_limit).await?;
+    let allowed_channel_ids = encode(&channel_ids)?;
+    let allowed_models = encode(&models)?;
+
+    if !models::api_key::update(
+        &state.db,
+        id,
+        &ApiKeyUpdate {
+            name: &name,
+            enabled,
+            expires_at,
+            allowed_channel_ids: &allowed_channel_ids,
+            allowed_models: &allowed_models,
+            token_limit,
+        },
+    )
+    .await?
+    {
         return Err(AppError::NotFound("key not found".to_string()));
     }
 
