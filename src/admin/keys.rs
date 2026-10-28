@@ -31,6 +31,8 @@ pub struct KeyOutput {
     pub allowed_models: Vec<String>,
     pub token_limit: Option<i64>,
     pub token_usage: i64,
+    pub daily_token_limit: Option<i64>,
+    pub daily_token_usage: i64,
     pub created_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -40,6 +42,7 @@ impl KeyOutput {
     fn from_row(row: ApiKey) -> Self {
         let allowed_channel_ids = row.channel_ids();
         let allowed_models = row.model_names();
+        let daily_token_usage = row.usage_today(models::now_ms() / 86_400_000);
         Self {
             id: row.id,
             name: row.name,
@@ -51,6 +54,8 @@ impl KeyOutput {
             allowed_models,
             token_limit: row.token_limit,
             token_usage: row.token_usage,
+            daily_token_limit: row.daily_token_limit,
+            daily_token_usage,
             created_at: row.created_at,
             key: None,
         }
@@ -70,6 +75,8 @@ pub struct KeyCreateInput {
     pub allowed_models: Vec<String>,
     #[serde(default)]
     pub token_limit: Option<i64>,
+    #[serde(default)]
+    pub daily_token_limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +93,8 @@ pub struct KeyUpdateInput {
     pub allowed_models: Option<Vec<String>>,
     #[serde(default, deserialize_with = "double_option")]
     pub token_limit: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub daily_token_limit: Option<Option<i64>>,
 }
 
 /// Distinguish "field omitted" (None) from an explicit `null` (Some(None)).
@@ -103,7 +112,8 @@ async fn validate_restrictions(
     channel_ids: Vec<i64>,
     models: Vec<String>,
     token_limit: Option<i64>,
-) -> Result<(Vec<i64>, Vec<String>, Option<i64>), AppError> {
+    daily_token_limit: Option<i64>,
+) -> Result<(Vec<i64>, Vec<String>, Option<i64>, Option<i64>), AppError> {
     let channel_ids = api_key::parse_channel_ids(&channel_ids);
     if !channel_ids.is_empty() {
         let existing: HashSet<i64> = models::channel::list(&state.db)
@@ -119,17 +129,20 @@ async fn validate_restrictions(
     }
 
     let models = api_key::parse_model_names(models);
-    let token_limit = match token_limit {
-        Some(value) if value < 0 => {
-            return Err(AppError::BadRequest(
-                "token_limit cannot be negative".to_string(),
-            ))
-        }
-        Some(0) | None => None,
-        Some(value) => Some(value),
-    };
+    let token_limit = normalize_limit(token_limit, "token_limit")?;
+    let daily_token_limit = normalize_limit(daily_token_limit, "daily_token_limit")?;
 
-    Ok((channel_ids, models, token_limit))
+    Ok((channel_ids, models, token_limit, daily_token_limit))
+}
+
+fn normalize_limit(value: Option<i64>, field: &str) -> Result<Option<i64>, AppError> {
+    match value {
+        Some(value) if value < 0 => {
+            Err(AppError::BadRequest(format!("{field} cannot be negative")))
+        }
+        Some(0) | None => Ok(None),
+        Some(value) => Ok(Some(value)),
+    }
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -154,11 +167,12 @@ pub async fn create(
         return Err(AppError::BadRequest("key name is required".to_string()));
     }
 
-    let (channel_ids, model_names, token_limit) = validate_restrictions(
+    let (channel_ids, model_names, token_limit, daily_token_limit) = validate_restrictions(
         &state,
         input.allowed_channel_ids,
         input.allowed_models,
         input.token_limit,
+        input.daily_token_limit,
     )
     .await?;
 
@@ -180,6 +194,7 @@ pub async fn create(
             allowed_channel_ids: &allowed_channel_ids,
             allowed_models: &allowed_models,
             token_limit,
+            daily_token_limit,
             created_at: models::now_ms(),
         },
     )
@@ -221,8 +236,11 @@ pub async fn update(
         .allowed_models
         .unwrap_or_else(|| existing.model_names());
     let token_limit = input.token_limit.unwrap_or(existing.token_limit);
-    let (channel_ids, models, token_limit) =
-        validate_restrictions(&state, channel_ids, models, token_limit).await?;
+    let daily_token_limit = input
+        .daily_token_limit
+        .unwrap_or(existing.daily_token_limit);
+    let (channel_ids, models, token_limit, daily_token_limit) =
+        validate_restrictions(&state, channel_ids, models, token_limit, daily_token_limit).await?;
     let allowed_channel_ids = encode(&channel_ids)?;
     let allowed_models = encode(&models)?;
 
@@ -236,6 +254,7 @@ pub async fn update(
             allowed_channel_ids: &allowed_channel_ids,
             allowed_models: &allowed_models,
             token_limit,
+            daily_token_limit,
         },
     )
     .await?

@@ -51,6 +51,8 @@ export interface ApiKey {
   allowed_models: string[];
   token_limit: number | null;
   token_usage: number;
+  daily_token_limit: number | null;
+  daily_token_usage: number;
   created_at: number;
   key?: string;
 }

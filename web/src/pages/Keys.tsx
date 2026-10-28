@@ -49,6 +49,7 @@ interface KeyDraft {
   channelIds: number[];
   models: string[];
   tokenLimit: string;
+  dailyTokenLimit: string;
 }
 
 function emptyDraft(): KeyDraft {
@@ -59,6 +60,7 @@ function emptyDraft(): KeyDraft {
     channelIds: [],
     models: [],
     tokenLimit: '',
+    dailyTokenLimit: '',
   };
 }
 
@@ -76,6 +78,7 @@ function draftFromKey(key: ApiKey, channels: Channel[]): KeyDraft {
         : key.allowed_channel_ids,
     models: key.allowed_models,
     tokenLimit: key.token_limit ? String(key.token_limit) : '',
+    dailyTokenLimit: key.daily_token_limit ? String(key.daily_token_limit) : '',
   };
 }
 
@@ -198,6 +201,13 @@ export default function Keys() {
         nextErrors.tokenLimit = '请输入正整数，或留空表示不限制';
       }
     }
+    const dailyLimit = draft.dailyTokenLimit.trim();
+    if (dailyLimit) {
+      const parsed = Number(dailyLimit);
+      if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+        nextErrors.dailyTokenLimit = '请输入正整数，或留空表示不限制';
+      }
+    }
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) {
       return;
@@ -219,6 +229,7 @@ export default function Keys() {
         allowed_channel_ids: channelIds,
         allowed_models: draft.models,
         token_limit: limit ? Number(limit) : null,
+        daily_token_limit: dailyLimit ? Number(dailyLimit) : null,
       },
     });
   }
@@ -334,6 +345,12 @@ export default function Keys() {
                                   style={{ width: `${percent}%` }}
                                 />
                               </div>
+                            ) : null}
+                            {key.daily_token_limit ? (
+                              <p className="whitespace-nowrap text-[11px] text-muted-foreground">
+                                今日 {formatCompactNumber(key.daily_token_usage)}{' '}
+                                / {formatCompactNumber(key.daily_token_limit)}
+                              </p>
                             ) : null}
                           </div>
                         </TableCell>
@@ -507,6 +524,24 @@ export default function Keys() {
                 value={draft.tokenLimit}
                 onChange={(event) =>
                   update({ tokenLimit: event.target.value })
+                }
+                placeholder="留空不限制"
+              />
+            </Field>
+
+            <Field
+              label="每日 Token 上限（可选）"
+              htmlFor="key-daily-token-limit"
+              error={errors.dailyTokenLimit}
+              hint="按 UTC 自然日统计，达到上限后当天返回 429，次日自动恢复；留空表示不限制。"
+            >
+              <Input
+                id="key-daily-token-limit"
+                type="number"
+                min={1}
+                value={draft.dailyTokenLimit}
+                onChange={(event) =>
+                  update({ dailyTokenLimit: event.target.value })
                 }
                 placeholder="留空不限制"
               />

@@ -1,6 +1,6 @@
 # OneAPI 实施计划
 
-- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度，v0.1.7 渠道按协议内分页并修复 Token 图表轴，v0.1.8 API Key 支持渠道/模型/Token 限额，v0.1.9 完成审查优化批次 1–5，v0.1.10 完成流式 Responses `store` 一致性、渠道健康缓存覆盖、大响应字节级缓冲与在线更新信任边界，v0.1.11 完成两轮复审修复、归档计划文档并清理工程债；v0.1.12 实现同模型渠道无缝故障转移与冷却期主动恢复
+- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度，v0.1.7 渠道按协议内分页并修复 Token 图表轴，v0.1.8 API Key 支持渠道/模型/Token 限额，v0.1.9 完成审查优化批次 1–5，v0.1.10 完成流式 Responses `store` 一致性、渠道健康缓存覆盖、大响应字节级缓冲与在线更新信任边界，v0.1.11 完成两轮复审修复、归档计划文档并清理工程债；v0.1.12 实现同模型渠道无缝故障转移与冷却期主动恢复；v0.1.13 增加轻量备份/恢复、故障转移预算、运行状态信息与每 Key 每日额度
 - 最后更新：2026-10-29
 - 关联文档：`docs/PROGRESS.md`
 - 适用仓库：`/root/OneAPI`
@@ -71,10 +71,10 @@ SQLite，时间统一存 unix 毫秒 `INTEGER`。
 - `admin(id=1, username, password_hash, created_at)`
 - `sessions(token_hash PK, admin_id, created_at, expires_at)`
 - `channels(id, name, kind, kinds TEXT JSON, fallback_kind, protocol_configs TEXT JSON, base_url, api_key_enc, auth_header TEXT 'bearer'|'x-api-key', models TEXT JSON, model_mapping TEXT JSON, extra_headers TEXT JSON, proxy_url, priority INT, weight INT, timeout_ms, enabled, last_error, last_error_at, disabled_until, consecutive_failures, created_at, updated_at)`：`protocol_configs` 为每个协议保存一套 `{protocol, mode: native|convert, target, base_url, api_key_enc, auth_header, models, model_mapping, extra_headers}`；`mode=convert` 时使用 `target` 指向的原生协议配置。旧列保留为第一个原生协议的兼容视图，旧数据由启动时的 backfill 自动生成三条路由。
-- `api_keys(id, name, key_hash UNIQUE, key_prefix, enabled, expires_at, last_used_at, allowed_channel_ids TEXT JSON, allowed_models TEXT JSON, token_limit INT, token_usage INT, created_at)`：两个 JSON 数组为空表示不限制；`token_limit` 为空/0 表示不限制，`token_usage` 累计该 Key 的 total_tokens，达到上限时自动置 `enabled=0`。
+- `api_keys(id, name, key_hash UNIQUE, key_prefix, enabled, expires_at, last_used_at, allowed_channel_ids TEXT JSON, allowed_models TEXT JSON, token_limit INT, token_usage INT, daily_token_limit INT, daily_token_usage INT, daily_usage_day INT, created_at)`：两个 JSON 数组为空表示不限制；`token_limit` 为空/0 表示不限制，`token_usage` 累计该 Key 的 total_tokens，达到上限时自动置 `enabled=0`；`daily_token_limit` 为空/0 表示不限，按 `daily_usage_day`（UTC 日序号）懒重置，达到上限时请求返回 429 但不永久停用 Key。
 - `usage_logs(id, request_id, source 'gateway'|'playground', api_key_id, channel_id, model, upstream_model, inbound_protocol, upstream_protocol, stream, status_code, attempts, error_type, error_message, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, latency_ms, first_token_ms, created_at)`
 - `responses(id 'resp_...' PK, api_key_id, model, request_json, response_json, status, created_at)`
-- `request_details(request_id PK, request_body, response_body, created_at)`（可选，默认关闭，截断 64KB）
+- `request_details(request_id, api_key_id) PK, request_body, response_body, created_at`（可选，默认关闭，截断 64KB）
 - `settings(key PK, value)`：站点名、默认 max_tokens、超时、日志/响应保留天数、是否存请求体
 
 索引：`usage_logs(created_at)`、`(model)`、`(channel_id)`、`(api_key_id)`、`responses(api_key_id)`。WAL + `busy_timeout=5s` + `synchronous=NORMAL`；日志写入走单 writer 任务（mpsc + 批量 flush），避免高并发写锁竞争。
@@ -134,7 +134,7 @@ StreamEvent { Start | BlockStart{index,kind} | TextDelta | ReasoningDelta |
 3. Responses 路由先处理 `previous_response_id` 历史展开。
 4. 选渠道：`enabled=1` 且 `disabled_until` 未到；`models` 命中或为 `"*"`；按 priority 降序分组，同组按 weight 加权随机；记录上游模型名。
 5. 逐渠道尝试：构造上游请求（同协议只改 model；跨协议编码），用渠道专属 client（代理、extra_headers、超时）发送。
-6. 失败切换：只要还有同模型候选，任何上游失败都继续切换到下一个渠道（任意 4xx/5xx、连接/超时、空响应、非 JSON、响应解析/编码失败、2xx 内 `error`）；候选耗尽才向客户端返回错误，优先返回第一个请求语义错误（如 400）的状态码，纯渠道故障返回 502。**一旦已向客户端写出字节就停止切换**。流式在提交前先缓冲首个 SSE event，若为 error 事件则继续切换。渠道冷却与切换解耦：仅 401/402/403/404/408/409/425/429/5xx 等渠道侧失败累计 `consecutive_failures`，首次失败只记录错误，第二次起进入冷却，时长按 60s × 2^(n-2) 指数增长并在 30 分钟封顶；400/413/422 等请求语义错误不冷却渠道；成功清零。冷却到期后仅放行一个进程内半开探测请求，探测成功即恢复，失败则继续翻倍冷却。冷却期间后台每 60 秒主动探测一次不健康渠道（每请求 10 秒超时、最多 8 路并发），成功立即清除冷却并失效渠道缓存，失败只更新 `last_error` 并保持或延长到下一次探测，不增加 `consecutive_failures`；无客户端流量时也能自动恢复上线。同模型渠道全部处于冷却时返回 `503 channel_recovering`，仅当确实没有该模型渠道时返回 404。
+6. 失败切换：只要还有同模型候选，上游失败都继续切换到下一个渠道（任意 4xx/5xx、连接/超时、空响应、非 JSON、响应解析/编码失败、2xx 内 `error`）；单次请求最多尝试 3 个渠道，且从请求开始累计 60 秒后不再切换，同一请求语义错误在第二个渠道重复出现时立即停止；候选耗尽才向客户端返回错误，优先返回第一个请求语义错误（如 400）的状态码，纯渠道故障返回 502。**一旦已向客户端写出字节就停止切换**。流式在提交前先缓冲首个 SSE event，若为 error 事件则继续切换。渠道冷却与切换解耦：仅 401/402/403/404/408/409/425/429/5xx 等渠道侧失败累计 `consecutive_failures`，首次失败只记录错误，第二次起进入冷却，时长按 60s × 2^(n-2) 指数增长并在 30 分钟封顶；400/413/422 等请求语义错误不冷却渠道；成功清零。冷却到期后仅放行一个进程内半开探测请求，探测成功即恢复，失败则继续翻倍冷却。冷却期间后台每 60 秒主动探测一次不健康渠道（每请求 10 秒超时、最多 8 路并发），成功立即清除冷却并失效渠道缓存，失败只更新 `last_error` 并保持或延长到下一次探测，不增加 `consecutive_failures`；无客户端流量时也能自动恢复上线。同模型渠道全部处于冷却时返回 `503 channel_recovering`，仅当确实没有该模型渠道时返回 404。
 7. 响应：
    - 同协议：字节透传 + tee 观察者；Chat 流可注入 include_usage 并过滤尾块。
    - 跨协议：解码→IR 事件→编码；非流式先完整解码再编码。
@@ -256,6 +256,7 @@ GET /healthz  /readyz
 - 2026-10-28：复审追加项（版本升至 `0.1.11`，归档原计划文档至 §16）：Responses `request_json` 改为只存本轮请求并按链回溯展开（旧行兼容，新增 256 链/2000 项/16MB 上限）；`request_details` 并入用量写队列与批量事务；`Crypto::mask` 增加按密文缓存；流式透传改为轻量观测（不构建 IR 事件），Responses 终帧仍走状态机；帧改写保留 `id:`/`retry:`/注释；渠道缓存元素改为 `Arc<PreparedChannel>` 并由候选持有索引；`.env` 在 tokio 运行时启动前加载；`client_ip_header` 并入 `RuntimeCache`。版本号未变更。
 - 2026-10-29：同模型渠道无缝故障转移（v0.1.12）：非流式与流式提交前的所有上游失败（任意 4xx/5xx、连接/超时、空响应、非 JSON、解析/编码失败、2xx 内 `error`）都会切换到下一个同模型候选，候选耗尽才向客户端返回错误；全部失败时优先返回第一个请求语义错误的状态码，纯渠道故障仍返回 502；新增 `penalizes_channel` 将渠道冷却与故障转移解耦，400/413/422 等请求语义错误不冷却渠道；同模型渠道全部冷却时返回 `503 channel_recovering` 而不是 404；`count_tokens` 同样在多个 Anthropic 原生渠道间切换。版本升至 `0.1.12`。
 - 2026-10-29：渠道冷却主动恢复（v0.1.12）：新增 `src/recovery.rs` 后台任务，每 60 秒探测所有有失败记录且处于冷却的渠道；每个协议请求最多 10 秒、最多 8 路并发，优先用配置中的具体模型发一次最小补全请求，只有 `*` 模型时改用 `/models`。探测成功立即清零失败状态并失效渠道缓存（无需等待 30 秒 TTL 或客户端流量）；失败只更新 `last_error`，不增加 `consecutive_failures`，正在运行的指数退避不被缩短，冷却已到期则顺延 60 秒。`upstream` 新增可复用的 `build_client_with_timeout`、`probe_model`、`probe_body`，后台任务与渠道探活共用；`ChannelProbes` 增加与客户端半开探测共享的恢复探测闸门。
+- 2026-10-29：个人使用与轻量运维增强（v0.1.13）：启动时执行 `PRAGMA quick_check`，有未应用迁移时先 `VACUUM INTO` 快照到 `data/backups`（保留最近 5 份）；设置页新增数据库导出/导入，导入先校验再在重启时换库并自动保留当前库；`/api/system` 增加 DB/WAL 大小、最近备份、写队列、冷却渠道与 24 小时故障转移次数；故障转移增加 3 渠道/60 秒预算与重复请求错误提前停止；`api_keys` 新增按 UTC 自然日的 `daily_token_limit`，超限返回 429 且次日自动恢复（迁移 `0008_api_key_daily_limit.sql`，并为 `usage_logs.created_at` 增加索引）。
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。
@@ -273,7 +274,7 @@ GET /healthz  /readyz
 1. 按 Key / 渠道的速率限制与日/月配额（令牌桶，超限返回 429/402；需确定计费单位与后端）。
 2. Prometheus `/metrics`：请求数、错误率、延迟直方图、渠道健康、队列深度。
 3. 日志导出（CSV/JSON）与请求重放（含脱敏）。
-4. SQLite 在线备份/恢复（`VACUUM INTO` 或 backup API）与配置导入导出。
+4. 配置导入导出（数据库快照备份/恢复已在 v0.1.13 完成；渠道/Key 的可迁移 JSON 导出仍未做）。
 5. Playground 增强：工具定义编辑、图片输入、历史会话。
 6. 多协议扩展：Embeddings、图片生成、Responses 的 background/files（当前明确不做）。
 7. 多管理员与 RBAC、审计日志（当前明确不做）。
@@ -289,3 +290,5 @@ GET /healthz  /readyz
 - Responses `previous_response_id` 链式展开上限为 256 轮 / 2000 项 / 16MB，超限返回 400。
 - 开启请求体记录时，请求详情经写队列异步落库，刚结束的请求可能短暂查不到详情。
 - SSE 解析的单帧上限为 8MB（覆盖整个未完成事件）。
+- 数据库导出/导入只支持默认的 `data/oneapi.db`；设置 `ONEAPI_DATABASE_URL` 时接口会拒绝。恢复会短暂中断服务并依赖进程重启。
+- 每日 Token 上限在请求进入时检查、请求完成后异步累加，并发请求可能短暂超过上限；按 UTC 自然日重置。

@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-29
-- 当前阶段：v0.1.12 已发布（同模型渠道无缝故障转移与冷却期主动恢复）
+- 当前阶段：v0.1.13 已发布（轻量备份/恢复、故障转移预算、运行状态与每日额度）
 - 当前分支：`main`
-- 最近发布：`v0.1.12`
+- 最近发布：`v0.1.13`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -209,6 +209,15 @@
 - 设置页渠道表单改为多选协议，并显示当前可选的转换目标；自定义请求头与模型映射仍由整个渠道共享。
 - `count_tokens` 只在渠道原生支持 Anthropic 时转发，否则保持原有字符估算。
 - 验证：新增 4 个协议选择单元测试、2 个网关集成测试（原生匹配不转换、缺失协议走 fallback）与 1 个渠道 CRUD 测试；108 个测试通过。
+
+## v0.1.13 发布记录
+
+- 版本号从 `0.1.12` 升至 `0.1.13`。
+- 轻量备份与恢复：启动时 `PRAGMA quick_check`；有未应用迁移时先 `VACUUM INTO` 快照到 `data/backups`（保留最近 5 份）；设置页支持导出/导入 SQLite 快照，导入校验后自动重启换库并保留当前库。
+- 故障转移预算：单请求最多尝试 3 个渠道、累计 60 秒后停止切换，同一请求语义错误在第二个渠道重复出现时提前结束。
+- 运行状态：`/api/system` 与仪表盘新增数据库/WAL 大小、最近备份时间、写队列深度、冷却渠道数与 24 小时故障转移次数。
+- 每日额度：API Key 新增 `daily_token_limit`，按 UTC 自然日统计，超限返回 429 且次日自动恢复；迁移 `0008_api_key_daily_limit.sql` 同时为 `usage_logs.created_at` 增加索引。
+- 验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（196 个测试）与 `web/` `npm run build` 通过；本地二进制实测初始化、导出、导入换库与重启后会话保持。
 
 ## v0.1.12 发布记录
 
@@ -443,6 +452,17 @@
 - 复用抽取：`upstream::build_client_with_timeout`、`upstream::probe_model`、`upstream::probe_body` 同时供后台恢复与后台“探活”接口使用，测试请求体只有一份定义。
 
 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（189 个测试）通过；新增覆盖恢复成功重新上线、恢复失败保持冷却且不增加失败计数、`defer_recovery` 不缩短既有退避、探测请求体协议形状。版本号未变更。
+
+## 个人轻量运维与每日额度（2026-10-29，v0.1.13）
+
+- **启动自检**：`db::connect` 在打开连接池后执行 `PRAGMA quick_check`，失败时拒绝启动并提示从 `data/backups` 恢复。
+- **迁移前快照**：检测到 `_sqlx_migrations` 中存在未应用版本时，先 `VACUUM INTO data/backups/oneapi-<UTC 时间>.db`，再执行迁移；目录保留最近 5 份 `*.db`。
+- **导出/导入**：`GET /api/backup/export` 生成一致快照并以附件下载；`POST /api/backup/import` 限制 256MB，校验 SQLite 头与 `quick_check`，写入 `<db>.import` 后先对当前库做一次 `pre-import` 快照，500ms 后自动重启；新进程在连接前把 `.import` 换入并清理旧 WAL/SHM。设置页新增“数据库备份”卡片。
+- **故障转移预算**：`MAX_FAILOVER_ATTEMPTS=3`、`FAILOVER_BUDGET=60s`，仅在准备尝试下一个渠道时检查；相同 `status + error_type` 的请求语义错误重复出现时立即停止。`count_tokens` 同样最多尝试 3 个 Anthropic 候选。
+- **运行状态**：`/api/system` 返回 `database_bytes`、`wal_bytes`、`last_backup_at`、`usage_queue_depth`、`cooling_channels`、`failovers_24h`；仪表盘“系统信息”卡片展示。
+- **每日额度**：`api_keys` 新增 `daily_token_limit/daily_token_usage/daily_usage_day`（迁移 `0008_api_key_daily_limit.sql`）。鉴权在累计限额检查之后判断当日用量，超限返回 429 `rate_limit_error` 且不永久停用；用量写入时按 UTC 日序号懒重置。Key 页面新增“每日 Token 上限”，列表显示“今日 x / y”。
+
+验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（196 个测试）与 `web/` `npm run build` 通过；本地二进制实测 `/api/setup` → `/api/backup/export` → `/api/backup/import` → 自动重启，导入后同一会话仍可访问 `/api/system`，`data/backups` 中存在 pre-import 快照。
 
 ## AOCI 状态
 

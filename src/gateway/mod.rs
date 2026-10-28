@@ -126,6 +126,7 @@ async fn count_tokens(
         )
         .into_iter()
         .filter(|candidate| candidate.upstream_kind == "anthropic")
+        .take(execute::MAX_FAILOVER_ATTEMPTS as usize)
         .collect();
 
         if !candidates.is_empty() {
@@ -1137,6 +1138,236 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["type"], json!("channel_recovering"));
+    }
+
+    #[tokio::test]
+    async fn failover_stops_after_three_channels() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+
+        let mut servers = Vec::new();
+        for (index, priority) in [400, 300, 200, 100].into_iter().enumerate() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                    "error": {"message": format!("boom-{index}"), "type": "server_error"}
+                })))
+                .mount(&server)
+                .await;
+            seed_channel(
+                &state,
+                "openai_chat",
+                &format!("{}/v1", server.uri()),
+                &["gpt-test"],
+                priority,
+                "bad-key",
+            )
+            .await;
+            servers.push(server);
+        }
+
+        let (status, _) = send(
+            app::router(state.clone()),
+            "/v1/chat/completions",
+            Some(&key),
+            json!({"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+        let attempts: i64 =
+            sqlx::query_scalar("SELECT attempts FROM usage_logs ORDER BY id DESC LIMIT 1")
+                .fetch_one(&state.db)
+                .await
+                .expect("attempts");
+        assert_eq!(attempts, 3);
+        let mut received = 0;
+        for server in &servers {
+            received += server.received_requests().await.unwrap_or_default().len();
+        }
+        assert_eq!(received, 3);
+    }
+
+    #[tokio::test]
+    async fn repeated_client_error_stops_failover_early() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+
+        let mut servers = Vec::new();
+        for priority in [300, 200, 100] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                    "error": {"message": "bad input", "type": "invalid_request_error"}
+                })))
+                .mount(&server)
+                .await;
+            seed_channel(
+                &state,
+                "openai_chat",
+                &format!("{}/v1", server.uri()),
+                &["gpt-test"],
+                priority,
+                "bad-key",
+            )
+            .await;
+            servers.push(server);
+        }
+
+        let (status, body) = send(
+            app::router(state.clone()),
+            "/v1/chat/completions",
+            Some(&key),
+            json!({"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["message"], json!("bad input"));
+
+        let attempts: i64 =
+            sqlx::query_scalar("SELECT attempts FROM usage_logs ORDER BY id DESC LIMIT 1")
+                .fetch_one(&state.db)
+                .await
+                .expect("attempts");
+        // The first rejection is remembered, the second identical one stops
+        // the loop before the third channel.
+        assert_eq!(attempts, 2);
+        let mut received = 0;
+        for server in &servers {
+            received += server.received_requests().await.unwrap_or_default().len();
+        }
+        assert_eq!(received, 2);
+    }
+
+    #[tokio::test]
+    async fn streaming_failover_stops_after_three_channels() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+
+        let mut servers = Vec::new();
+        for (index, priority) in [400, 300, 200, 100].into_iter().enumerate() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                    "error": {"message": format!("boom-{index}"), "type": "server_error"}
+                })))
+                .mount(&server)
+                .await;
+            seed_channel(
+                &state,
+                "openai_chat",
+                &format!("{}/v1", server.uri()),
+                &["gpt-test"],
+                priority,
+                "bad-key",
+            )
+            .await;
+            servers.push(server);
+        }
+
+        let (status, _) = send_stream(
+            app::router(state.clone()),
+            "/v1/chat/completions",
+            &key,
+            json!({
+                "model": "gpt-test",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+        let attempts: i64 =
+            sqlx::query_scalar("SELECT attempts FROM usage_logs ORDER BY id DESC LIMIT 1")
+                .fetch_one(&state.db)
+                .await
+                .expect("attempts");
+        assert_eq!(attempts, 3);
+        let mut received = 0;
+        for server in &servers {
+            received += server.received_requests().await.unwrap_or_default().len();
+        }
+        assert_eq!(received, 3);
+    }
+
+    #[tokio::test]
+    async fn daily_token_limit_rejects_until_the_day_rolls_over() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_success_body("ok")))
+            .mount(&server)
+            .await;
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let key_id: i64 = sqlx::query_scalar("SELECT id FROM api_keys ORDER BY id DESC LIMIT 1")
+            .fetch_one(&state.db)
+            .await
+            .expect("key id");
+        let today = now_ms() / 86_400_000;
+        sqlx::query(
+            "UPDATE api_keys SET daily_token_limit = 5, daily_usage_day = ?, daily_token_usage = 5 WHERE id = ?",
+        )
+        .bind(today)
+        .bind(key_id)
+        .execute(&state.db)
+        .await
+        .expect("daily limit");
+
+        let body = json!({"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]});
+        let (status, value) = send(
+            app::router(state.clone()),
+            "/v1/chat/completions",
+            Some(&key),
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(value["error"]["type"], json!("rate_limit_error"));
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            0
+        );
+
+        // Pretend the last usage was yesterday: the limit no longer applies.
+        sqlx::query("UPDATE api_keys SET daily_usage_day = ? WHERE id = ?")
+            .bind(today - 1)
+            .bind(key_id)
+            .execute(&state.db)
+            .await
+            .expect("previous day");
+        let (status, _) = send(
+            app::router(state.clone()),
+            "/v1/chat/completions",
+            Some(&key),
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (usage, day): (i64, i64) =
+            sqlx::query_as("SELECT daily_token_usage, daily_usage_day FROM api_keys WHERE id = ?")
+                .bind(key_id)
+                .fetch_one(&state.db)
+                .await
+                .expect("daily usage");
+        assert_eq!(day, today);
+        assert_eq!(usage, 15);
     }
 
     #[tokio::test]

@@ -134,6 +134,12 @@ struct SystemInfo {
     uptime_seconds: i64,
     database: &'static str,
     data_dir: String,
+    database_bytes: u64,
+    wal_bytes: u64,
+    last_backup_at: Option<i64>,
+    usage_queue_depth: usize,
+    cooling_channels: usize,
+    failovers_24h: i64,
 }
 
 async fn system_info(
@@ -143,11 +149,51 @@ async fn system_info(
     let _: i64 = sqlx::query_scalar("SELECT 1").fetch_one(&state.db).await?;
     let uptime_seconds = (chrono::Utc::now() - state.started_at).num_seconds().max(0);
 
+    let (database_bytes, wal_bytes) = if state.config.database_url.is_none() {
+        crate::backup::database_sizes(&state.config.database_path)
+    } else {
+        (0, 0)
+    };
+    let last_backup_at = crate::backup::last_backup_at(&state.config.data_dir);
+    let usage_queue_depth = state
+        .usage_writer
+        .as_ref()
+        .map(|writer| writer.snapshot().queue_depth)
+        .unwrap_or(0);
+
+    let now = crate::models::now_ms();
+    let health = state.cache.channel_health();
+    let cooling_channels = state
+        .cache
+        .channels(&state.db)
+        .await?
+        .iter()
+        .filter(|prepared| {
+            let disabled_until = health
+                .get(&prepared.channel.id)
+                .and_then(|health| health.disabled_until)
+                .or(prepared.channel.disabled_until);
+            disabled_until.is_some_and(|until| until > now)
+        })
+        .count();
+    let failovers_24h: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM usage_logs WHERE created_at >= ? AND attempts > 1",
+    )
+    .bind(now - 86_400_000)
+    .fetch_one(&state.db)
+    .await?;
+
     Ok(Json(SystemInfo {
         name: "OneAPI",
         version: env!("CARGO_PKG_VERSION"),
         uptime_seconds,
         database: "ok",
         data_dir: state.config.data_dir_display(),
+        database_bytes,
+        wal_bytes,
+        last_backup_at,
+        usage_queue_depth,
+        cooling_channels,
+        failovers_24h,
     }))
 }

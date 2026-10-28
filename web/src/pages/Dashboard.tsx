@@ -24,7 +24,12 @@ import type {
 import { EmptyState } from '@/components/common/empty-state';
 import { PageHeader } from '@/components/common/page-header';
 import { StatusCodeBadge } from '@/components/common/badges';
-import { formatDateTime, formatNumber, formatUptime } from '@/lib/format';
+import {
+  formatBytes,
+  formatDateTime,
+  formatNumber,
+  formatUptime,
+} from '@/lib/format';
 import { useLiveMetrics } from '@/hooks/useLiveMetrics';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -66,6 +71,12 @@ interface SystemInfo {
   uptime_seconds: number;
   database: string;
   data_dir: string;
+  database_bytes: number;
+  wal_bytes: number;
+  last_backup_at: number | null;
+  usage_queue_depth: number;
+  cooling_channels: number;
+  failovers_24h: number;
 }
 
 interface StatCardProps {
@@ -397,6 +408,33 @@ export default function Dashboard() {
                 <InfoItem
                   label="活跃 Key"
                   value={summary?.active_keys ?? '-'}
+                />
+                <InfoItem
+                  label="数据库 / WAL"
+                  value={
+                    systemQuery.data
+                      ? `${formatBytes(systemQuery.data.database_bytes)} / ${formatBytes(systemQuery.data.wal_bytes)}`
+                      : '-'
+                  }
+                />
+                <InfoItem
+                  label="最近备份"
+                  value={formatDateTime(
+                    systemQuery.data?.last_backup_at,
+                    'YYYY-MM-DD HH:mm',
+                  )}
+                />
+                <InfoItem
+                  label="冷却渠道"
+                  value={formatNumber(systemQuery.data?.cooling_channels)}
+                />
+                <InfoItem
+                  label="24h 故障转移"
+                  value={formatNumber(systemQuery.data?.failovers_24h)}
+                />
+                <InfoItem
+                  label="写队列"
+                  value={formatNumber(systemQuery.data?.usage_queue_depth)}
                 />
               </dl>
             )}

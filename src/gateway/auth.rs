@@ -44,6 +44,10 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
             return Err(limit_reached(parts));
         }
 
+        if record.daily_limit_reached(now / 86_400_000) {
+            return Err(daily_limit_reached(parts));
+        }
+
         if record.enabled == 0
             || record
                 .expires_at
@@ -107,6 +111,15 @@ fn limit_reached(parts: &Parts) -> Response {
         StatusCode::FORBIDDEN,
         "API key token limit reached",
         "permission_error",
+    )
+}
+
+fn daily_limit_reached(parts: &Parts) -> Response {
+    client_error(
+        protocol_for_path(parts.uri.path()),
+        StatusCode::TOO_MANY_REQUESTS,
+        "API key daily token limit reached; it resets at 00:00 UTC",
+        "rate_limit_error",
     )
 }
 
