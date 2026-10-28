@@ -1,24 +1,56 @@
-import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { RotateCcw, Search } from 'lucide-react';
+import { useMemo, useState, type ReactNode } from 'react';
+import { api } from '@/api/client';
+import type {
+  ApiKey,
+  Channel,
+  LogDetail,
+  LogEntry,
+  LogList,
+} from '@/api/types';
 import {
-  Alert,
-  Button,
-  Card,
-  Descriptions,
-  Drawer,
-  Input,
+  ProtocolBadge,
+  SourceBadge,
+  StatusCodeBadge,
+  StreamBadge,
+} from '@/components/common/badges';
+import { CodeBlock } from '@/components/common/code-block';
+import { EmptyState } from '@/components/common/empty-state';
+import { PageHeader } from '@/components/common/page-header';
+import { Pagination } from '@/components/common/pagination';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import {
   Select,
-  Space,
-  Spin,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
   Table,
-  Tag,
-  Tooltip,
-  Typography,
-} from 'antd';
-import type { TableProps } from 'antd';
-import dayjs from 'dayjs';
-import { api } from '../api/client';
-import type { ApiKey, Channel, LogDetail, LogEntry, LogList, ProtocolName } from '../api/types';
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import {
+  formatDateTime,
+  formatLatency,
+  formatNumber,
+  formatTokensPerSecond,
+} from '@/lib/format';
 
 const RANGE_OPTIONS = [
   { value: '1h', label: '最近 1 小时' },
@@ -57,8 +89,8 @@ interface Filters {
   range: string;
   model: string;
   requestId: string;
-  channelId?: number;
-  apiKeyId?: number;
+  channelId: number | null;
+  apiKeyId: number | null;
   status: string;
   protocol: string;
   source: string;
@@ -69,37 +101,36 @@ const INITIAL_FILTERS: Filters = {
   range: '24h',
   model: '',
   requestId: '',
+  channelId: null,
+  apiKeyId: null,
   status: 'all',
   protocol: 'all',
   source: 'all',
   stream: 'all',
 };
 
-function protocolLabel(protocol: ProtocolName): string {
-  return protocol === 'chat' ? 'Chat' : protocol === 'responses' ? 'Responses' : 'Anthropic';
-}
-
-function formatTime(timestamp: number): string {
-  return dayjs(timestamp).format('YYYY-MM-DD HH:mm:ss');
-}
-
-function formatNumber(value: number | null | undefined): string {
-  return value == null ? '-' : value.toLocaleString('zh-CN');
-}
-
-function formatLatency(value: number | null | undefined): string {
-  return value == null ? '-' : `${value} ms`;
-}
-
-function formatTokensPerSecond(value: number | null | undefined): string {
-  return value == null ? '-' : `${value.toFixed(1)} tok/s`;
-}
-
-function statusTag(entry: LogEntry) {
-  return entry.status_code >= 400 ? (
-    <Tag color="red">{entry.status_code}</Tag>
-  ) : (
-    <Tag color="green">{entry.status_code}</Tag>
+function DetailRow({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: ReactNode;
+  mono?: boolean;
+}) {
+  return (
+    <div className="min-w-0 space-y-0.5">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd
+        className={
+          mono
+            ? 'truncate font-mono text-xs'
+            : 'truncate text-sm text-foreground'
+        }
+      >
+        {value}
+      </dd>
+    </div>
   );
 }
 
@@ -109,10 +140,10 @@ export default function Logs() {
   const [pageSize, setPageSize] = useState(20);
   const [selected, setSelected] = useState<LogEntry | null>(null);
 
-  const update = <K extends keyof Filters>(key: K, value: Filters[K]) => {
+  function update<K extends keyof Filters>(key: K, value: Filters[K]) {
     setFilters((previous) => ({ ...previous, [key]: value }));
     setPage(1);
-  };
+  }
 
   const channelsQuery = useQuery({
     queryKey: ['channels'],
@@ -129,9 +160,12 @@ export default function Logs() {
     params.set('limit', String(pageSize));
     params.set('offset', String((page - 1) * pageSize));
     if (filters.model.trim()) params.set('model', filters.model.trim());
-    if (filters.requestId.trim()) params.set('request_id', filters.requestId.trim());
-    if (filters.channelId != null) params.set('channel_id', String(filters.channelId));
-    if (filters.apiKeyId != null) params.set('api_key_id', String(filters.apiKeyId));
+    if (filters.requestId.trim())
+      params.set('request_id', filters.requestId.trim());
+    if (filters.channelId != null)
+      params.set('channel_id', String(filters.channelId));
+    if (filters.apiKeyId != null)
+      params.set('api_key_id', String(filters.apiKeyId));
     if (filters.status !== 'all') params.set('status', filters.status);
     if (filters.protocol !== 'all') params.set('protocol', filters.protocol);
     if (filters.source !== 'all') params.set('source', filters.source);
@@ -150,342 +184,547 @@ export default function Logs() {
     enabled: selected != null,
   });
 
-  const columns: TableProps<LogEntry>['columns'] = [
-    {
-      title: '时间',
-      dataIndex: 'created_at',
-      width: 170,
-      render: (value: number) => formatTime(value),
-    },
-    {
-      title: '请求 ID',
-      dataIndex: 'request_id',
-      width: 180,
-      render: (value: string) => (
-        <Tooltip title={value}>
-          <Typography.Text copyable={{ text: value }} ellipsis style={{ maxWidth: 150 }}>
-            {value.slice(0, 12)}…
-          </Typography.Text>
-        </Tooltip>
-      ),
-    },
-    { title: '模型', dataIndex: 'model', width: 150, ellipsis: true },
-    {
-      title: '协议',
-      key: 'protocol',
-      width: 150,
-      render: (_, entry) =>
-        `${protocolLabel(entry.inbound_protocol)} → ${protocolLabel(entry.upstream_protocol)}`,
-    },
-    {
-      title: '来源',
-      dataIndex: 'source',
-      width: 100,
-      render: (value: string) =>
-        value === 'playground' ? <Tag color="purple">Playground</Tag> : <Tag>网关</Tag>,
-    },
-    {
-      title: '渠道',
-      key: 'channel',
-      width: 140,
-      ellipsis: true,
-      render: (_, entry) => entry.channel_name ?? (entry.channel_id ? `#${entry.channel_id}` : '-'),
-    },
-    {
-      title: 'API Key',
-      key: 'key',
-      width: 130,
-      ellipsis: true,
-      render: (_, entry) =>
-        entry.api_key_name ?? (entry.api_key_id ? `#${entry.api_key_id}` : '-'),
-    },
-    { title: '状态', key: 'status', width: 80, render: (_, entry) => statusTag(entry) },
-    {
-      title: '流式',
-      dataIndex: 'stream',
-      width: 70,
-      render: (value: boolean) => (value ? <Tag color="blue">是</Tag> : <Tag>否</Tag>),
-    },
-    {
-      title: 'Tokens',
-      key: 'tokens',
-      width: 110,
-      render: (_, entry) => (
-        <Tooltip
-          title={`输入 ${formatNumber(entry.prompt_tokens)} / 输出 ${formatNumber(
-            entry.completion_tokens,
-          )}`}
-        >
-          {formatNumber(entry.total_tokens)}
-        </Tooltip>
-      ),
-    },
-    {
-      title: '延迟',
-      key: 'latency',
-      width: 130,
-      render: (_, entry) => (
-        <Tooltip title={`首 token ${formatLatency(entry.first_token_ms)}`}>
-          {formatLatency(entry.latency_ms)}
-        </Tooltip>
-      ),
-    },
-    {
-      title: '速度',
-      key: 'speed',
-      width: 100,
-      render: (_, entry) => (
-        <Tooltip title="输出 tokens ÷ 生成耗时；流式已扣除首 token 等待">
-          {formatTokensPerSecond(entry.tokens_per_second)}
-        </Tooltip>
-      ),
-    },
-    { title: '尝试', dataIndex: 'attempts', width: 70 },
-    {
-      title: '错误',
-      key: 'error',
-      ellipsis: true,
-      render: (_, entry) =>
-        entry.error_message ? (
-          <Tooltip title={entry.error_message}>
-            <Typography.Text type="danger" ellipsis style={{ maxWidth: 180 }}>
-              {entry.error_type ?? 'error'}: {entry.error_message}
-            </Typography.Text>
-          </Tooltip>
-        ) : (
-          '-'
-        ),
-    },
-  ];
+  const logs = logsQuery.data?.items ?? [];
 
   return (
     <>
-      <Card style={{ marginBottom: 16 }}>
-        <Space wrap size={[8, 8]}>
+      <PageHeader
+        title="日志"
+        description="查看每次请求的协议转换、路由结果、Token 用量与耗时。"
+      />
+
+      <Card className="mb-4">
+        <CardContent className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
           <Select
+            items={RANGE_OPTIONS}
             value={filters.range}
-            options={RANGE_OPTIONS}
-            style={{ width: 140 }}
-            onChange={(value) => update('range', value)}
-          />
+            onValueChange={(value) => {
+              if (value) {
+                update('range', value);
+              }
+            }}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {RANGE_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
           <Input
-            allowClear
             placeholder="模型"
             value={filters.model}
-            style={{ width: 160 }}
             onChange={(event) => update('model', event.target.value)}
           />
           <Input
-            allowClear
             placeholder="请求 ID"
             value={filters.requestId}
-            style={{ width: 220 }}
             onChange={(event) => update('requestId', event.target.value)}
           />
+
           <Select
-            allowClear
-            showSearch
-            optionFilterProp="label"
-            placeholder="渠道"
-            value={filters.channelId}
-            style={{ width: 160 }}
-            options={(channelsQuery.data ?? []).map((channel) => ({
-              value: channel.id,
-              label: channel.name,
-            }))}
-            onChange={(value) => update('channelId', value)}
-          />
+            items={[
+              { value: 'all', label: '全部渠道' },
+              ...(channelsQuery.data ?? []).map((channel) => ({
+                value: String(channel.id),
+                label: channel.name,
+              })),
+            ]}
+            value={filters.channelId == null ? 'all' : String(filters.channelId)}
+            onValueChange={(value) => {
+              if (value != null) {
+                update('channelId', value === 'all' ? null : Number(value));
+              }
+            }}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="渠道" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部渠道</SelectItem>
+              {(channelsQuery.data ?? []).map((channel) => (
+                <SelectItem key={channel.id} value={String(channel.id)}>
+                  {channel.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
           <Select
-            allowClear
-            showSearch
-            optionFilterProp="label"
-            placeholder="API Key"
-            value={filters.apiKeyId}
-            style={{ width: 160 }}
-            options={(keysQuery.data ?? []).map((key) => ({
-              value: key.id,
-              label: key.name,
-            }))}
-            onChange={(value) => update('apiKeyId', value)}
-          />
+            items={[
+              { value: 'all', label: '全部 Key' },
+              ...(keysQuery.data ?? []).map((key) => ({
+                value: String(key.id),
+                label: key.name,
+              })),
+            ]}
+            value={filters.apiKeyId == null ? 'all' : String(filters.apiKeyId)}
+            onValueChange={(value) => {
+              if (value != null) {
+                update('apiKeyId', value === 'all' ? null : Number(value));
+              }
+            }}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="API Key" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部 Key</SelectItem>
+              {(keysQuery.data ?? []).map((key) => (
+                <SelectItem key={key.id} value={String(key.id)}>
+                  {key.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
           <Select
+            items={STATUS_OPTIONS}
             value={filters.status}
-            options={STATUS_OPTIONS}
-            style={{ width: 120 }}
-            onChange={(value) => update('status', value)}
-          />
+            onValueChange={(value) => {
+              if (value) {
+                update('status', value);
+              }
+            }}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {STATUS_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
           <Select
+            items={PROTOCOL_OPTIONS}
             value={filters.protocol}
-            options={PROTOCOL_OPTIONS}
-            style={{ width: 130 }}
-            onChange={(value) => update('protocol', value)}
-          />
+            onValueChange={(value) => {
+              if (value) {
+                update('protocol', value);
+              }
+            }}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PROTOCOL_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
           <Select
+            items={SOURCE_OPTIONS}
             value={filters.source}
-            options={SOURCE_OPTIONS}
-            style={{ width: 130 }}
-            onChange={(value) => update('source', value)}
-          />
+            onValueChange={(value) => {
+              if (value) {
+                update('source', value);
+              }
+            }}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SOURCE_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
           <Select
+            items={STREAM_OPTIONS}
             value={filters.stream}
-            options={STREAM_OPTIONS}
-            style={{ width: 110 }}
-            onChange={(value) => update('stream', value)}
-          />
+            onValueChange={(value) =>
+              update('stream', value as Filters['stream'])
+            }
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {STREAM_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
           <Button
+            variant="outline"
             onClick={() => {
               setFilters(INITIAL_FILTERS);
               setPage(1);
             }}
           >
+            <RotateCcw />
             重置
           </Button>
-        </Space>
+        </CardContent>
       </Card>
 
-      {logsQuery.error ? (
-        <Alert
-          type="error"
-          showIcon
-          message="加载日志失败"
-          description={
-            logsQuery.error instanceof Error ? logsQuery.error.message : String(logsQuery.error)
-          }
-        />
+      {logsQuery.isError ? (
+        <Alert variant="destructive">
+          <AlertTitle>加载日志失败</AlertTitle>
+          <AlertDescription>
+            {logsQuery.error instanceof Error
+              ? logsQuery.error.message
+              : String(logsQuery.error)}
+          </AlertDescription>
+        </Alert>
       ) : (
-        <Table<LogEntry>
-          rowKey="id"
-          columns={columns}
-          dataSource={logsQuery.data?.items ?? []}
-          loading={logsQuery.isLoading}
-          size="middle"
-          scroll={{ x: 1620 }}
-          rowClassName={() => 'clickable-row'}
-          onRow={(record) => ({ onClick: () => setSelected(record) })}
-          pagination={{
-            current: page,
-            pageSize,
-            total: logsQuery.data?.total ?? 0,
-            showSizeChanger: true,
-            pageSizeOptions: [20, 50, 100],
-            showTotal: (total) => `共 ${total} 条`,
-            onChange: (nextPage, nextPageSize) => {
-              setPage(nextPage);
-              setPageSize(nextPageSize);
-            },
-          }}
-        />
+        <Card className="overflow-hidden">
+          <CardContent className="p-0">
+            {logsQuery.isLoading ? (
+              <div className="space-y-2 p-4">
+                {Array.from({ length: 8 }).map((_, index) => (
+                  <Skeleton key={index} className="h-10 w-full" />
+                ))}
+              </div>
+            ) : logs.length === 0 ? (
+              <div className="p-6">
+                <EmptyState
+                  title="没有匹配的日志"
+                  description="尝试放宽筛选条件或切换时间范围。"
+                  icon={<Search className="size-5" />}
+                />
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="whitespace-nowrap">时间</TableHead>
+                      <TableHead className="hidden 2xl:table-cell">
+                        请求 ID
+                      </TableHead>
+                      <TableHead>模型</TableHead>
+                      <TableHead className="hidden md:table-cell">协议</TableHead>
+                      <TableHead className="hidden lg:table-cell">来源</TableHead>
+                      <TableHead className="hidden lg:table-cell">渠道</TableHead>
+                      <TableHead className="hidden 2xl:table-cell">
+                        API Key
+                      </TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead className="hidden 2xl:table-cell">模式</TableHead>
+                      <TableHead className="hidden sm:table-cell">Tokens</TableHead>
+                      <TableHead>延迟</TableHead>
+                      <TableHead className="hidden 2xl:table-cell">速度</TableHead>
+                      <TableHead className="hidden 2xl:table-cell">尝试</TableHead>
+                      <TableHead>错误</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {logs.map((entry) => (
+                      <TableRow
+                        key={entry.id}
+                        className="cursor-pointer"
+                        onClick={() => setSelected(entry)}
+                      >
+                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                          {formatDateTime(entry.created_at)}
+                        </TableCell>
+                        <TableCell className="hidden 2xl:table-cell">
+                          <span
+                            className="font-mono text-xs text-muted-foreground"
+                            title={entry.request_id}
+                          >
+                            {entry.request_id.slice(0, 12)}…
+                          </span>
+                        </TableCell>
+                        <TableCell className="max-w-[160px] truncate font-mono text-xs">
+                          {entry.model}
+                        </TableCell>
+                        <TableCell className="hidden md:table-cell">
+                          <div className="flex items-center gap-1 whitespace-nowrap">
+                            <ProtocolBadge protocol={entry.inbound_protocol} />
+                            <span className="text-xs text-muted-foreground">
+                              →
+                            </span>
+                            <ProtocolBadge protocol={entry.upstream_protocol} />
+                          </div>
+                        </TableCell>
+                        <TableCell className="hidden lg:table-cell">
+                          <SourceBadge source={entry.source} />
+                        </TableCell>
+                        <TableCell className="hidden max-w-[140px] truncate text-xs lg:table-cell">
+                          {entry.channel_name ??
+                            (entry.channel_id ? `#${entry.channel_id}` : '-')}
+                        </TableCell>
+                        <TableCell className="hidden max-w-[130px] truncate text-xs 2xl:table-cell">
+                          {entry.api_key_name ??
+                            (entry.api_key_id ? `#${entry.api_key_id}` : '-')}
+                        </TableCell>
+                        <TableCell>
+                          <StatusCodeBadge code={entry.status_code} />
+                        </TableCell>
+                        <TableCell className="hidden 2xl:table-cell">
+                          <StreamBadge stream={entry.stream} />
+                        </TableCell>
+                        <TableCell
+                          className="hidden whitespace-nowrap text-xs tabular-nums sm:table-cell"
+                          title={`输入 ${formatNumber(entry.prompt_tokens)} / 输出 ${formatNumber(
+                            entry.completion_tokens,
+                          )}`}
+                        >
+                          {formatNumber(entry.total_tokens)}
+                        </TableCell>
+                        <TableCell
+                          className="whitespace-nowrap text-xs tabular-nums"
+                          title={`首 token ${formatLatency(entry.first_token_ms)}`}
+                        >
+                          {formatLatency(entry.latency_ms)}
+                        </TableCell>
+                        <TableCell
+                          className="hidden whitespace-nowrap text-xs tabular-nums 2xl:table-cell"
+                          title="输出 tokens ÷ 生成耗时；流式已扣除首 token 等待"
+                        >
+                          {formatTokensPerSecond(entry.tokens_per_second)}
+                        </TableCell>
+                        <TableCell className="hidden text-xs tabular-nums 2xl:table-cell">
+                          {entry.attempts}
+                        </TableCell>
+                        <TableCell className="max-w-[200px] truncate text-xs">
+                          {entry.error_message ? (
+                            <span
+                              className="text-destructive"
+                              title={entry.error_message}
+                            >
+                              {entry.error_type ?? 'error'}:{' '}
+                              {entry.error_message}
+                            </span>
+                          ) : (
+                            '-'
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+
+            <div className="px-4 pb-4">
+              <Pagination
+                page={page}
+                pageSize={pageSize}
+                total={logsQuery.data?.total ?? 0}
+                onPageChange={setPage}
+                onPageSizeChange={(size) => {
+                  setPageSize(size);
+                  setPage(1);
+                }}
+              />
+            </div>
+          </CardContent>
+        </Card>
       )}
 
-      <Drawer
-        title="请求详情"
-        width={720}
+      <Sheet
         open={selected != null}
-        onClose={() => setSelected(null)}
+        onOpenChange={(next) => {
+          if (!next) {
+            setSelected(null);
+          }
+        }}
       >
-        {detailQuery.isLoading ? (
-          <div className="center-shell">
-            <Spin />
-          </div>
-        ) : detailQuery.error ? (
-          <Alert
-            type="error"
-            showIcon
-            message="加载详情失败"
-            description={
-              detailQuery.error instanceof Error
-                ? detailQuery.error.message
-                : String(detailQuery.error)
-            }
-          />
-        ) : detailQuery.data ? (
-          <>
-            <Descriptions column={2} size="small" bordered>
-              <Descriptions.Item label="请求 ID" span={2}>
-                {detailQuery.data.request_id}
-              </Descriptions.Item>
-              <Descriptions.Item label="时间">
-                {formatTime(detailQuery.data.created_at)}
-              </Descriptions.Item>
-              <Descriptions.Item label="来源">{detailQuery.data.source}</Descriptions.Item>
-              <Descriptions.Item label="入站协议">
-                {protocolLabel(detailQuery.data.inbound_protocol)}
-              </Descriptions.Item>
-              <Descriptions.Item label="上游协议">
-                {protocolLabel(detailQuery.data.upstream_protocol)}
-              </Descriptions.Item>
-              <Descriptions.Item label="客户端模型">{detailQuery.data.model}</Descriptions.Item>
-              <Descriptions.Item label="上游模型">
-                {detailQuery.data.upstream_model ?? '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="渠道">
-                {detailQuery.data.channel_name ??
-                  (detailQuery.data.channel_id ? `#${detailQuery.data.channel_id}` : '-')}
-              </Descriptions.Item>
-              <Descriptions.Item label="API Key">
-                {detailQuery.data.api_key_name ??
-                  (detailQuery.data.api_key_id ? `#${detailQuery.data.api_key_id}` : '-')}
-              </Descriptions.Item>
-              <Descriptions.Item label="状态码">
-                {statusTag(detailQuery.data)}
-              </Descriptions.Item>
-              <Descriptions.Item label="流式">
-                {detailQuery.data.stream ? '是' : '否'}
-              </Descriptions.Item>
-              <Descriptions.Item label="尝试次数">
-                {detailQuery.data.attempts}
-              </Descriptions.Item>
-              <Descriptions.Item label="延迟">
-                {formatLatency(detailQuery.data.latency_ms)}
-              </Descriptions.Item>
-              <Descriptions.Item label="首 token">
-                {formatLatency(detailQuery.data.first_token_ms)}
-              </Descriptions.Item>
-              <Descriptions.Item label="生成速度">
-                {formatTokensPerSecond(detailQuery.data.tokens_per_second)}
-              </Descriptions.Item>
-              <Descriptions.Item label="输入 / 输出 / 总计">
-                {formatNumber(detailQuery.data.prompt_tokens)} /{' '}
-                {formatNumber(detailQuery.data.completion_tokens)} /{' '}
-                {formatNumber(detailQuery.data.total_tokens)}
-              </Descriptions.Item>
-              <Descriptions.Item label="缓存读取 / 缓存写入 / 推理">
-                {formatNumber(detailQuery.data.cached_tokens)} /{' '}
-                {formatNumber(detailQuery.data.cache_creation_tokens)} /{' '}
-                {formatNumber(detailQuery.data.reasoning_tokens)}
-              </Descriptions.Item>
-              {detailQuery.data.error_message ? (
-                <Descriptions.Item label="错误" span={2}>
-                  <Typography.Text type="danger">
-                    {detailQuery.data.error_type ?? 'error'}: {detailQuery.data.error_message}
-                  </Typography.Text>
-                </Descriptions.Item>
-              ) : null}
-            </Descriptions>
+        <SheetContent
+          side="right"
+          className="gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-[760px]"
+        >
+          <SheetHeader className="border-b p-4">
+            <SheetTitle>请求详情</SheetTitle>
+          </SheetHeader>
 
-            <Typography.Title level={5} style={{ marginTop: 24 }}>
-              请求 / 响应体
-            </Typography.Title>
-            {detailQuery.data.request_body || detailQuery.data.response_body ? (
+          <div className="flex-1 space-y-6 overflow-y-auto p-4">
+            {detailQuery.isLoading ? (
+              <div className="space-y-2">
+                {Array.from({ length: 8 }).map((_, index) => (
+                  <Skeleton key={index} className="h-9 w-full" />
+                ))}
+              </div>
+            ) : detailQuery.isError ? (
+              <Alert variant="destructive">
+                <AlertTitle>加载详情失败</AlertTitle>
+                <AlertDescription>
+                  {detailQuery.error instanceof Error
+                    ? detailQuery.error.message
+                    : String(detailQuery.error)}
+                </AlertDescription>
+              </Alert>
+            ) : detailQuery.data ? (
               <>
-                {detailQuery.data.request_body ? (
-                  <pre className="code-block">{detailQuery.data.request_body}</pre>
+                <dl className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-3">
+                  <div className="col-span-2 space-y-0.5 sm:col-span-3">
+                    <dt className="text-xs text-muted-foreground">请求 ID</dt>
+                    <dd className="break-all font-mono text-xs">
+                      {detailQuery.data.request_id}
+                    </dd>
+                  </div>
+                  <DetailRow
+                    label="时间"
+                    value={formatDateTime(detailQuery.data.created_at)}
+                  />
+                  <DetailRow
+                    label="来源"
+                    value={<SourceBadge source={detailQuery.data.source} />}
+                  />
+                  <DetailRow
+                    label="状态码"
+                    value={<StatusCodeBadge code={detailQuery.data.status_code} />}
+                  />
+                  <DetailRow
+                    label="入站协议"
+                    value={
+                      <ProtocolBadge
+                        protocol={detailQuery.data.inbound_protocol}
+                      />
+                    }
+                  />
+                  <DetailRow
+                    label="上游协议"
+                    value={
+                      <ProtocolBadge
+                        protocol={detailQuery.data.upstream_protocol}
+                      />
+                    }
+                  />
+                  <DetailRow
+                    label="流式"
+                    value={<StreamBadge stream={detailQuery.data.stream} />}
+                  />
+                  <DetailRow
+                    label="客户端模型"
+                    value={detailQuery.data.model}
+                    mono
+                  />
+                  <DetailRow
+                    label="上游模型"
+                    value={detailQuery.data.upstream_model ?? '-'}
+                    mono
+                  />
+                  <DetailRow
+                    label="尝试次数"
+                    value={detailQuery.data.attempts}
+                  />
+                  <DetailRow
+                    label="渠道"
+                    value={
+                      detailQuery.data.channel_name ??
+                      (detailQuery.data.channel_id
+                        ? `#${detailQuery.data.channel_id}`
+                        : '-')
+                    }
+                  />
+                  <DetailRow
+                    label="API Key"
+                    value={
+                      detailQuery.data.api_key_name ??
+                      (detailQuery.data.api_key_id
+                        ? `#${detailQuery.data.api_key_id}`
+                        : '-')
+                    }
+                  />
+                  <DetailRow label="延迟" value={formatLatency(detailQuery.data.latency_ms)} />
+                  <DetailRow
+                    label="首 token"
+                    value={formatLatency(detailQuery.data.first_token_ms)}
+                  />
+                  <DetailRow
+                    label="生成速度"
+                    value={formatTokensPerSecond(
+                      detailQuery.data.tokens_per_second,
+                    )}
+                  />
+                  <DetailRow
+                    label="输入 Tokens"
+                    value={formatNumber(detailQuery.data.prompt_tokens)}
+                  />
+                  <DetailRow
+                    label="输出 Tokens"
+                    value={formatNumber(detailQuery.data.completion_tokens)}
+                  />
+                  <DetailRow
+                    label="总 Tokens"
+                    value={formatNumber(detailQuery.data.total_tokens)}
+                  />
+                  <DetailRow
+                    label="缓存读取"
+                    value={formatNumber(detailQuery.data.cached_tokens)}
+                  />
+                  <DetailRow
+                    label="缓存写入"
+                    value={formatNumber(detailQuery.data.cache_creation_tokens)}
+                  />
+                  <DetailRow
+                    label="推理 Tokens"
+                    value={formatNumber(detailQuery.data.reasoning_tokens)}
+                  />
+                </dl>
+
+                {detailQuery.data.error_message ? (
+                  <Alert variant="destructive">
+                    <AlertTitle>
+                      {detailQuery.data.error_type ?? 'error'}
+                    </AlertTitle>
+                    <AlertDescription className="break-words">
+                      {detailQuery.data.error_message}
+                    </AlertDescription>
+                  </Alert>
                 ) : null}
-                {detailQuery.data.response_body ? (
-                  <pre className="code-block">{detailQuery.data.response_body}</pre>
+
+                <div className="space-y-2">
+                  <h3 className="text-sm font-medium">请求体</h3>
+                  {detailQuery.data.request_body ? (
+                    <CodeBlock>{detailQuery.data.request_body}</CodeBlock>
+                  ) : (
+                    <p className="rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
+                      未记录请求体
+                    </p>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <h3 className="text-sm font-medium">响应体</h3>
+                  {detailQuery.data.response_body ? (
+                    <CodeBlock>{detailQuery.data.response_body}</CodeBlock>
+                  ) : (
+                    <p className="rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
+                      未记录响应体
+                    </p>
+                  )}
+                </div>
+
+                {!detailQuery.data.request_body &&
+                !detailQuery.data.response_body ? (
+                  <Alert>
+                    <AlertTitle>未记录请求/响应体</AlertTitle>
+                    <AlertDescription>
+                      可在「设置 → 记录请求/响应体」中开启；开启后单条最多保存
+                      64KB。
+                    </AlertDescription>
+                  </Alert>
                 ) : null}
               </>
-            ) : (
-              <Alert
-                type="info"
-                showIcon
-                message="未记录请求/响应体"
-                description="可在「设置 → 记录请求/响应体」中开启；开启后单条最多保存 64KB。"
-              />
-            )}
-          </>
-        ) : null}
-      </Drawer>
+            ) : null}
+          </div>
+        </SheetContent>
+      </Sheet>
     </>
   );
 }

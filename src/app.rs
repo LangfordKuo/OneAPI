@@ -19,7 +19,7 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(readyz))
         .route("/api/system", get(system_info))
         .route("/api/site", get(site_info))
-        .merge(admin::routes(state.config.trust_proxy))
+        .merge(admin::routes(state.clone()))
         .merge(gateway::routes())
         .fallback(web::fallback)
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))

@@ -32,6 +32,7 @@ const CACHE_TTL: Duration = Duration::from_secs(30);
 pub struct RuntimeCache {
     channels: RwLock<Option<(Instant, Vec<Channel>)>>,
     defaults: RwLock<Option<(Instant, GatewayDefaults)>>,
+    site_domain: RwLock<Option<(Instant, String)>>,
 }
 
 impl RuntimeCache {
@@ -78,6 +79,33 @@ impl RuntimeCache {
 
     pub fn invalidate_defaults(&self) {
         if let Ok(mut guard) = self.defaults.write() {
+            *guard = None;
+        }
+    }
+
+    /// Public site domain used by the CSRF guard after a reverse proxy. Cached
+    /// alongside the other runtime settings because it is read on every
+    /// mutating admin request.
+    pub async fn site_domain(&self, db: &SqlitePool) -> sqlx::Result<String> {
+        if let Some((loaded_at, domain)) =
+            self.site_domain.read().ok().and_then(|guard| guard.clone())
+        {
+            if loaded_at.elapsed() < CACHE_TTL {
+                return Ok(domain);
+            }
+        }
+
+        let domain = crate::models::setting::get(db, "site_domain")
+            .await?
+            .unwrap_or_default();
+        if let Ok(mut guard) = self.site_domain.write() {
+            *guard = Some((Instant::now(), domain.clone()));
+        }
+        Ok(domain)
+    }
+
+    pub fn invalidate_site_domain(&self) {
+        if let Ok(mut guard) = self.site_domain.write() {
             *guard = None;
         }
     }

@@ -1090,7 +1090,18 @@ mod tests {
                 .expect("request detail");
         assert_eq!(request_body, "{\"model\":\"gpt\"}");
         assert!(response_body.contains("\"content\":\"hello\""));
-        assert!(state.live.snapshot().global_tok_s > 0.0);
+
+        // The rate reports the last completed one-second bucket, so give the
+        // current second a chance to roll over before checking it.
+        let mut rate = 0.0;
+        for _ in 0..30 {
+            rate = state.live.snapshot().global_tok_s;
+            if rate > 0.0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(rate > 0.0);
     }
 
     #[tokio::test]

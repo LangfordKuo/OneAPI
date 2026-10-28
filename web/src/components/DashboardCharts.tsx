@@ -1,7 +1,30 @@
-import { Card, Col, Empty, Row } from 'antd';
-import { Column, Line, Pie } from '@ant-design/plots';
 import dayjs from 'dayjs';
-import type { BreakdownItem, TimeseriesPoint } from '../api/types';
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import type { BreakdownItem, TimeseriesPoint } from '@/api/types';
+import { EmptyState } from '@/components/common/empty-state';
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from '@/components/ui/chart';
 
 interface Props {
   points: TimeseriesPoint[];
@@ -9,82 +32,273 @@ interface Props {
   channels: BreakdownItem[];
 }
 
+const requestConfig = {
+  requests: { label: '请求', color: 'var(--chart-1)' },
+  errors: { label: '错误', color: 'var(--chart-5)' },
+} satisfies ChartConfig;
+
+const tokenConfig = {
+  tokens: { label: 'Tokens', color: 'var(--chart-2)' },
+} satisfies ChartConfig;
+
+const pieConfig = {
+  value: { label: '请求' },
+} satisfies ChartConfig;
+
+const PALETTE = [
+  'var(--chart-1)',
+  'var(--chart-2)',
+  'var(--chart-3)',
+  'var(--chart-4)',
+  'var(--chart-5)',
+  'var(--chart-1)',
+  'var(--chart-2)',
+  'var(--chart-3)',
+];
+
 function timeLabel(timestamp: number): string {
   return dayjs(timestamp).format('MM-DD HH:mm');
 }
 
-export default function DashboardCharts({ points, models, channels }: Props) {
-  const requestData = points.flatMap((point) => {
-    const time = timeLabel(point.timestamp);
-    return [
-      { time, value: point.requests, series: '请求' },
-      { time, value: point.errors, series: '错误' },
-    ];
-  });
-  const tokenData = points.map((point) => ({
-    time: timeLabel(point.timestamp),
-    value: point.total_tokens,
-  }));
-  const modelData = models.map((item) => ({ type: item.label, value: item.requests }));
-  const channelData = channels.map((item) => ({ type: item.label, value: item.requests }));
+function PieLegend({
+  items,
+}: {
+  items: Array<{ name: string; value: number }>;
+}) {
+  if (items.length === 0) {
+    return null;
+  }
 
   return (
-    <Row gutter={[16, 16]}>
-      <Col xs={24} lg={12}>
-        <Card title="请求 / 错误时序">
+    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5">
+      {items.slice(0, 8).map((item, index) => (
+        <div
+          key={`${item.name}-${index}`}
+          className="flex items-center gap-1.5 text-xs text-muted-foreground"
+        >
+          <span
+            className="size-2 shrink-0 rounded-[2px]"
+            style={{ backgroundColor: PALETTE[index % PALETTE.length] }}
+          />
+          <span
+            className="max-w-[140px] truncate"
+            title={item.name}
+          >
+            {item.name}
+          </span>
+          <span className="font-mono tabular-nums text-foreground">
+            {item.value.toLocaleString('zh-CN')}
+          </span>
+        </div>
+      ))}
+      {items.length > 8 ? (
+        <span className="text-xs text-muted-foreground">
+          +{items.length - 8} 项
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+export default function DashboardCharts({ points, models, channels }: Props) {
+  const requestData = points.map((point) => ({
+    time: timeLabel(point.timestamp),
+    requests: point.requests,
+    errors: point.errors,
+  }));
+  const tokenData = points.map((point) => ({
+    time: timeLabel(point.timestamp),
+    tokens: point.total_tokens,
+  }));
+  const modelData = models.map((item) => ({
+    name: item.label,
+    value: item.requests,
+  }));
+  const channelData = channels.map((item) => ({
+    name: item.label,
+    value: item.requests,
+  }));
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <Card>
+        <CardHeader>
+          <CardTitle>请求 / 错误时序</CardTitle>
+        </CardHeader>
+        <CardContent>
           {requestData.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            <EmptyState title="当前范围没有请求数据" />
           ) : (
-            <Line
-              data={requestData}
-              xField="time"
-              yField="value"
-              colorField="series"
-              height={260}
-              shapeField="smooth"
-            />
+            <ChartContainer
+              config={requestConfig}
+              className="aspect-auto h-[260px] w-full"
+            >
+              <AreaChart
+                data={requestData}
+                margin={{ left: 0, right: 8, top: 8, bottom: 0 }}
+              >
+                <CartesianGrid vertical={false} />
+                <XAxis
+                  dataKey="time"
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={8}
+                  minTickGap={24}
+                />
+                <YAxis
+                  tickLine={false}
+                  axisLine={false}
+                  width={36}
+                  allowDecimals={false}
+                />
+                <ChartTooltip
+                  cursor={false}
+                  content={<ChartTooltipContent indicator="line" />}
+                />
+                <Area
+                  dataKey="requests"
+                  type="monotone"
+                  fill="var(--color-requests)"
+                  fillOpacity={0.18}
+                  stroke="var(--color-requests)"
+                  strokeWidth={2}
+                />
+                <Area
+                  dataKey="errors"
+                  type="monotone"
+                  fill="var(--color-errors)"
+                  fillOpacity={0.14}
+                  stroke="var(--color-errors)"
+                  strokeWidth={2}
+                />
+              </AreaChart>
+            </ChartContainer>
           )}
-        </Card>
-      </Col>
-      <Col xs={24} lg={12}>
-        <Card title="Token 用量">
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Token 用量</CardTitle>
+        </CardHeader>
+        <CardContent>
           {tokenData.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            <EmptyState title="当前范围没有 Token 数据" />
           ) : (
-            <Column data={tokenData} xField="time" yField="value" height={260} />
+            <ChartContainer
+              config={tokenConfig}
+              className="aspect-auto h-[260px] w-full"
+            >
+              <BarChart
+                data={tokenData}
+                margin={{ left: 0, right: 8, top: 8, bottom: 0 }}
+              >
+                <CartesianGrid vertical={false} />
+                <XAxis
+                  dataKey="time"
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={8}
+                  minTickGap={24}
+                />
+                <YAxis
+                  tickLine={false}
+                  axisLine={false}
+                  width={44}
+                  allowDecimals={false}
+                />
+                <ChartTooltip
+                  cursor={{ fill: 'var(--muted)' }}
+                  content={<ChartTooltipContent indicator="dashed" />}
+                />
+                <Bar
+                  dataKey="tokens"
+                  fill="var(--color-tokens)"
+                  radius={[4, 4, 0, 0]}
+                />
+              </BarChart>
+            </ChartContainer>
           )}
-        </Card>
-      </Col>
-      <Col xs={24} lg={12}>
-        <Card title="模型占比">
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>模型占比</CardTitle>
+        </CardHeader>
+        <CardContent>
           {modelData.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            <EmptyState title="当前范围没有模型数据" />
           ) : (
-            <Pie
-              data={modelData}
-              angleField="value"
-              colorField="type"
-              height={260}
-              innerRadius={0.5}
-            />
+            <>
+              <ChartContainer
+                config={pieConfig}
+                className="mx-auto aspect-auto h-[240px] w-full"
+              >
+                <PieChart>
+                  <ChartTooltip content={<ChartTooltipContent hideLabel />} />
+                  <Pie
+                    data={modelData}
+                    dataKey="value"
+                    nameKey="name"
+                    innerRadius={58}
+                    outerRadius={90}
+                    paddingAngle={2}
+                    strokeWidth={0}
+                  >
+                    {modelData.map((entry, index) => (
+                      <Cell
+                        key={entry.name}
+                        fill={PALETTE[index % PALETTE.length]}
+                      />
+                    ))}
+                  </Pie>
+                </PieChart>
+              </ChartContainer>
+              <PieLegend items={modelData} />
+            </>
           )}
-        </Card>
-      </Col>
-      <Col xs={24} lg={12}>
-        <Card title="渠道占比">
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>渠道占比</CardTitle>
+        </CardHeader>
+        <CardContent>
           {channelData.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            <EmptyState title="当前范围没有渠道数据" />
           ) : (
-            <Pie
-              data={channelData}
-              angleField="value"
-              colorField="type"
-              height={260}
-              innerRadius={0.5}
-            />
+            <>
+              <ChartContainer
+                config={pieConfig}
+                className="mx-auto aspect-auto h-[240px] w-full"
+              >
+                <PieChart>
+                  <ChartTooltip content={<ChartTooltipContent hideLabel />} />
+                  <Pie
+                    data={channelData}
+                    dataKey="value"
+                    nameKey="name"
+                    innerRadius={58}
+                    outerRadius={90}
+                    paddingAngle={2}
+                    strokeWidth={0}
+                  >
+                    {channelData.map((entry, index) => (
+                      <Cell
+                        key={entry.name}
+                        fill={PALETTE[index % PALETTE.length]}
+                      />
+                    ))}
+                  </Pie>
+                </PieChart>
+              </ChartContainer>
+              <PieLegend items={channelData} />
+            </>
           )}
-        </Card>
-      </Col>
-    </Row>
+        </CardContent>
+      </Card>
+    </div>
   );
 }

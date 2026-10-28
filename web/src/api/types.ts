@@ -39,6 +39,7 @@ export interface ApiKey {
 
 export interface Settings {
   site_name: string;
+  site_domain: string;
   default_max_tokens: number;
   nonstream_timeout_seconds: number;
   stream_idle_timeout_seconds: number;

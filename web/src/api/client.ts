@@ -24,7 +24,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (
       response.status === 401 &&
       !path.startsWith('/api/auth/login') &&
-      !path.startsWith('/api/auth/me')
+      !path.startsWith('/api/auth/me') &&
+      !path.startsWith('/api/auth/password')
     ) {
       window.location.assign('/');
     }
