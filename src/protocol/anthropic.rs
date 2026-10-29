@@ -694,17 +694,19 @@ pub fn encode_response(response: &UnifiedResponse) -> Result<Value, ProtocolErro
     for part in &response.content {
         match part {
             ContentPart::Text { text } => content.push(json!({"type": "text", "text": text})),
-            ContentPart::Reasoning {
-                text,
-                signature: Some(signature),
-            } => {
-                content.push(json!({
-                    "type": "thinking",
-                    "thinking": text,
-                    "signature": signature,
-                }));
+            ContentPart::Reasoning { text, signature } => {
+                // Non-Anthropic upstreams (for example Chat `reasoning_content`)
+                // cannot provide a signature. Emit the thinking block anyway so
+                // the client can display it; only forward the signature when the
+                // upstream actually supplied one.
+                let mut block = Map::new();
+                block.insert("type".into(), json!("thinking"));
+                block.insert("thinking".into(), json!(text));
+                if let Some(signature) = signature {
+                    block.insert("signature".into(), json!(signature));
+                }
+                content.push(Value::Object(block));
             }
-            ContentPart::Reasoning { .. } => {}
             ContentPart::RedactedReasoning { data } => {
                 content.push(json!({"type": "redacted_thinking", "data": data}));
             }

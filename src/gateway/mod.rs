@@ -731,6 +731,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_client_sees_chat_reasoning_when_streaming() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        let sse = concat!(
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,",
+            "\"model\":\"gpt-test\",\"choices\":[{\"index\":0,",
+            "\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,",
+            "\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"},",
+            "\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+            .mount(&server)
+            .await;
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let (status, body) = send_stream(
+            app::router(state.clone()),
+            "/v1/messages",
+            &key,
+            json!({
+                "model": "gpt-test",
+                "max_tokens": 32,
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"type\":\"thinking_delta\""));
+        assert!(body.contains("\"thinking\":\"thinking\""));
+        assert!(body.contains("\"text\":\"answer\""));
+    }
+
+    #[tokio::test]
+    async fn anthropic_client_sees_chat_reasoning_without_streaming() {
+        let (_temp, state) = test_state().await;
+        let key = seed_key(&state).await;
+        let server = MockServer::start().await;
+
+        let mut response = chat_success_body("answer");
+        response["choices"][0]["message"]["reasoning_content"] = json!("thinking");
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(&server)
+            .await;
+        seed_channel(
+            &state,
+            "openai_chat",
+            &format!("{}/v1", server.uri()),
+            &["gpt-test"],
+            10,
+            "upstream-key",
+        )
+        .await;
+
+        let (status, body) = send(
+            app::router(state.clone()),
+            "/v1/messages",
+            Some(&key),
+            json!({
+                "model": "gpt-test",
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let content = body["content"].as_array().expect("content");
+        assert!(content
+            .iter()
+            .any(|block| block["type"] == json!("thinking")
+                && block["thinking"] == json!("thinking")));
+        assert!(content.iter().any(|block| block["text"] == json!("answer")));
+    }
+
+    #[tokio::test]
     async fn chat_request_is_converted_to_anthropic() {
         let (_temp, state) = test_state().await;
         let key = seed_key(&state).await;

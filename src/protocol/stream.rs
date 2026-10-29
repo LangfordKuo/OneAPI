@@ -395,6 +395,14 @@ impl AnthropicDecoder {
                             });
                         }
                     }
+                    "signature_delta" => {
+                        if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                            events.push(StreamEvent::ReasoningSignature {
+                                index,
+                                signature: signature.to_string(),
+                            });
+                        }
+                    }
                     "input_json_delta" => {
                         if let Some(partial) = delta.get("partial_json").and_then(Value::as_str) {
                             events.push(StreamEvent::ToolInputDelta {
@@ -1138,7 +1146,7 @@ impl AnthropicEncoder {
                 self.ensure_started(&mut frames);
                 match block.kind {
                     BlockKind::Text => {
-                        let index = self.allocate(block.index, BlockKind::Text);
+                        let index = self.allocate(block.index, BlockKind::Text, &mut frames);
                         frames.push(sse_named(
                             "content_block_start",
                             &json!({
@@ -1149,7 +1157,7 @@ impl AnthropicEncoder {
                         ));
                     }
                     BlockKind::ToolUse => {
-                        let index = self.allocate(block.index, BlockKind::ToolUse);
+                        let index = self.allocate(block.index, BlockKind::ToolUse, &mut frames);
                         let id = block
                             .id
                             .clone()
@@ -1168,9 +1176,21 @@ impl AnthropicEncoder {
                             }),
                         ));
                     }
-                    // Streaming thinking blocks require upstream signatures, which
-                    // are not representable in the shared stream IR.
-                    BlockKind::Reasoning => {}
+                    // The upstream signature is not required to display the
+                    // reasoning, and non-Anthropic upstreams cannot provide
+                    // one. Emit the thinking block anyway; a signature_delta
+                    // is forwarded when the upstream did send one.
+                    BlockKind::Reasoning => {
+                        let index = self.allocate(block.index, BlockKind::Reasoning, &mut frames);
+                        frames.push(sse_named(
+                            "content_block_start",
+                            &json!({
+                                "type": "content_block_start",
+                                "index": index,
+                                "content_block": {"type": "thinking", "thinking": ""},
+                            }),
+                        ));
+                    }
                 }
             }
             StreamEvent::TextDelta { index, text } => {
@@ -1178,7 +1198,7 @@ impl AnthropicEncoder {
                 let target = match self.blocks.get(index) {
                     Some((target, BlockKind::Text)) => *target,
                     _ => {
-                        let target = self.allocate(*index, BlockKind::Text);
+                        let target = self.allocate(*index, BlockKind::Text, &mut frames);
                         frames.push(sse_named(
                             "content_block_start",
                             &json!({
@@ -1198,6 +1218,44 @@ impl AnthropicEncoder {
                         "delta": {"type": "text_delta", "text": text},
                     }),
                 ));
+            }
+            StreamEvent::ReasoningDelta { index, text } => {
+                self.ensure_started(&mut frames);
+                let target = match self.blocks.get(index) {
+                    Some((target, BlockKind::Reasoning)) => *target,
+                    _ => {
+                        let target = self.allocate(*index, BlockKind::Reasoning, &mut frames);
+                        frames.push(sse_named(
+                            "content_block_start",
+                            &json!({
+                                "type": "content_block_start",
+                                "index": target,
+                                "content_block": {"type": "thinking", "thinking": ""},
+                            }),
+                        ));
+                        target
+                    }
+                };
+                frames.push(sse_named(
+                    "content_block_delta",
+                    &json!({
+                        "type": "content_block_delta",
+                        "index": target,
+                        "delta": {"type": "thinking_delta", "thinking": text},
+                    }),
+                ));
+            }
+            StreamEvent::ReasoningSignature { index, signature } => {
+                if let Some((target, BlockKind::Reasoning)) = self.blocks.get(index) {
+                    frames.push(sse_named(
+                        "content_block_delta",
+                        &json!({
+                            "type": "content_block_delta",
+                            "index": target,
+                            "delta": {"type": "signature_delta", "signature": signature},
+                        }),
+                    ));
+                }
             }
             StreamEvent::ToolInputDelta {
                 index,
@@ -1267,7 +1325,6 @@ impl AnthropicEncoder {
                 ));
                 self.done = true;
             }
-            _ => {}
         }
 
         frames
@@ -1302,9 +1359,18 @@ impl AnthropicEncoder {
         ));
     }
 
-    fn allocate(&mut self, ir_index: usize, kind: BlockKind) -> usize {
+    /// Start a new content block. Anthropic expects blocks to be sequential,
+    /// so any block still open (for example reasoning followed by text, which
+    /// Chat emits without block boundaries) is closed first.
+    fn allocate(&mut self, ir_index: usize, kind: BlockKind, frames: &mut Vec<String>) -> usize {
         if let Some((index, _)) = self.blocks.get(&ir_index) {
             return *index;
+        }
+        for target in std::mem::take(&mut self.open) {
+            frames.push(sse_named(
+                "content_block_stop",
+                &json!({"type": "content_block_stop", "index": target}),
+            ));
         }
         let index = self.next_index;
         self.next_index += 1;
@@ -1332,6 +1398,7 @@ struct EncodedBlock {
     name: String,
     text: String,
     arguments: String,
+    signature: Option<String>,
 }
 
 pub struct ResponsesEncoder {
@@ -1441,6 +1508,7 @@ impl ResponsesEncoder {
                             name: String::new(),
                             text: String::new(),
                             arguments: String::new(),
+                            signature: None,
                         }
                     }
                     BlockKind::Reasoning => {
@@ -1466,6 +1534,7 @@ impl ResponsesEncoder {
                             name: String::new(),
                             text: String::new(),
                             arguments: String::new(),
+                            signature: None,
                         }
                     }
                     BlockKind::ToolUse => {
@@ -1498,6 +1567,7 @@ impl ResponsesEncoder {
                             name,
                             text: String::new(),
                             arguments: String::new(),
+                            signature: None,
                         }
                     }
                 };
@@ -1535,6 +1605,13 @@ impl ResponsesEncoder {
                         "delta": text,
                     }),
                 ));
+            }
+            StreamEvent::ReasoningSignature { index, signature } => {
+                if let Some(block) = self.blocks.get_mut(index) {
+                    if block.kind == BlockKind::Reasoning {
+                        block.signature = Some(signature.clone());
+                    }
+                }
             }
             StreamEvent::ToolInputDelta {
                 index,
@@ -1675,31 +1752,37 @@ impl ResponsesEncoder {
                     }),
                 ),
             ],
-            BlockKind::Reasoning => vec![
-                sse_named(
-                    "response.reasoning_summary_text.done",
-                    &json!({
-                        "type": "response.reasoning_summary_text.done",
-                        "item_id": block.item_id,
-                        "output_index": block.output_index,
-                        "summary_index": 0,
-                        "text": block.text,
-                    }),
-                ),
-                sse_named(
-                    "response.output_item.done",
-                    &json!({
-                        "type": "response.output_item.done",
-                        "output_index": block.output_index,
-                        "item": {
-                            "type": "reasoning",
-                            "id": block.item_id,
-                            "summary": [{"type": "summary_text", "text": block.text}],
-                            "status": "completed",
-                        },
-                    }),
-                ),
-            ],
+            BlockKind::Reasoning => {
+                let mut item = json!({
+                    "type": "reasoning",
+                    "id": block.item_id,
+                    "summary": [{"type": "summary_text", "text": block.text}],
+                    "status": "completed",
+                });
+                if let Some(signature) = &block.signature {
+                    item["encrypted_content"] = json!(signature);
+                }
+                vec![
+                    sse_named(
+                        "response.reasoning_summary_text.done",
+                        &json!({
+                            "type": "response.reasoning_summary_text.done",
+                            "item_id": block.item_id,
+                            "output_index": block.output_index,
+                            "summary_index": 0,
+                            "text": block.text,
+                        }),
+                    ),
+                    sse_named(
+                        "response.output_item.done",
+                        &json!({
+                            "type": "response.output_item.done",
+                            "output_index": block.output_index,
+                            "item": item,
+                        }),
+                    ),
+                ]
+            }
             BlockKind::ToolUse => vec![
                 sse_named(
                     "response.function_call_arguments.done",
@@ -1746,12 +1829,18 @@ impl ResponsesEncoder {
                         "annotations": [],
                     }],
                 }),
-                BlockKind::Reasoning => json!({
-                    "type": "reasoning",
-                    "id": block.item_id,
-                    "summary": [{"type": "summary_text", "text": block.text}],
-                    "status": "completed",
-                }),
+                BlockKind::Reasoning => {
+                    let mut item = json!({
+                        "type": "reasoning",
+                        "id": block.item_id,
+                        "summary": [{"type": "summary_text", "text": block.text}],
+                        "status": "completed",
+                    });
+                    if let Some(signature) = &block.signature {
+                        item["encrypted_content"] = json!(signature);
+                    }
+                    item
+                }
                 BlockKind::ToolUse => json!({
                     "type": "function_call",
                     "id": block.item_id,
@@ -2067,6 +2156,84 @@ mod tests {
         assert!(joined.contains("event: message_delta"));
         assert!(joined.contains("\"stop_reason\":\"end_turn\""));
         assert!(joined.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn chat_reasoning_stream_is_encoded_for_anthropic() {
+        let mut decoder = StreamDecoder::new(Protocol::Chat);
+        let mut encoder = StreamEncoder::new(Protocol::Anthropic, StreamEncodeOptions::default());
+
+        let mut output = Vec::new();
+        for value in [
+            json!({"id": "chatcmpl-1", "model": "gpt", "created": 1,
+                   "choices": [{"index": 0, "delta": {"reasoning_content": "think"}}]}),
+            json!({"choices": [{"index": 0, "delta": {"content": "answer"}}]}),
+        ] {
+            for event in events(&mut decoder, &frame(None, value)) {
+                output.extend(encoder.encode(&event));
+            }
+        }
+        for event in events(
+            &mut decoder,
+            &SseFrame {
+                event: None,
+                data: "[DONE]".to_string(),
+                raw: Vec::new(),
+            },
+        ) {
+            output.extend(encoder.encode(&event));
+        }
+
+        let joined = output.join("");
+        assert!(joined.contains("\"content_block\":{\"thinking\":\"\",\"type\":\"thinking\"}"));
+        assert!(joined.contains("\"type\":\"thinking_delta\""));
+        assert!(joined.contains("\"thinking\":\"think\""));
+        assert!(joined.contains("\"type\":\"text_delta\""));
+        assert!(joined.contains("\"text\":\"answer\""));
+        // Chat has no signature to forward.
+        assert!(!joined.contains("signature_delta"));
+    }
+
+    #[test]
+    fn anthropic_reasoning_signature_flows_into_responses_item() {
+        let mut decoder = StreamDecoder::new(Protocol::Anthropic);
+        let mut encoder = StreamEncoder::new(Protocol::Responses, StreamEncodeOptions::default());
+
+        let mut output = Vec::new();
+        for frame in [
+            frame(
+                Some("message_start"),
+                json!({"type": "message_start", "message": {"id": "msg_1", "model": "m"}}),
+            ),
+            frame(
+                Some("content_block_start"),
+                json!({"type": "content_block_start", "index": 0,
+                       "content_block": {"type": "thinking", "thinking": ""}}),
+            ),
+            frame(
+                Some("content_block_delta"),
+                json!({"type": "content_block_delta", "index": 0,
+                       "delta": {"type": "thinking_delta", "thinking": "plan"}}),
+            ),
+            frame(
+                Some("content_block_delta"),
+                json!({"type": "content_block_delta", "index": 0,
+                       "delta": {"type": "signature_delta", "signature": "sig-1"}}),
+            ),
+            frame(
+                Some("content_block_stop"),
+                json!({"type": "content_block_stop", "index": 0}),
+            ),
+            frame(Some("message_stop"), json!({"type": "message_stop"})),
+        ] {
+            for event in events(&mut decoder, &frame) {
+                output.extend(encoder.encode(&event));
+            }
+        }
+
+        let joined = output.join("");
+        assert!(joined.contains("response.reasoning_summary_text.delta"));
+        assert!(joined.contains("\"encrypted_content\":\"sig-1\""));
     }
 
     #[test]

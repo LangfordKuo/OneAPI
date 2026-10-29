@@ -1,7 +1,7 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-29
-- 当前阶段：v0.1.13 已发布（轻量备份/恢复、故障转移预算、运行状态与每日额度）
+- 当前阶段：v0.1.13 已发布；另含未发布的跨协议推理输出修复
 - 当前分支：`main`
 - 最近发布：`v0.1.13`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
@@ -463,6 +463,15 @@
 - **每日额度**：`api_keys` 新增 `daily_token_limit/daily_token_usage/daily_usage_day`（迁移 `0008_api_key_daily_limit.sql`）。鉴权在累计限额检查之后判断当日用量，超限返回 429 `rate_limit_error` 且不永久停用；用量写入时按 UTC 日序号懒重置。Key 页面新增“每日 Token 上限”，列表显示“今日 x / y”。
 
 验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（196 个测试）与 `web/` `npm run build` 通过；本地二进制实测 `/api/setup` → `/api/backup/export` → `/api/backup/import` → 自动重启，导入后同一会话仍可访问 `/api/system`，`data/backups` 中存在 pre-import 快照。
+
+## 跨协议推理输出修复（2026-10-29，未发布）
+
+- 问题：Anthropic 客户端在 Playground 或 `/v1/messages` 中使用 Chat 上游时，上游先输出 `reasoning_content`，但 Anthropic 编码器把推理全部丢弃，客户端只看到正文；首字延迟等于第一个正文 token。
+- 修复：Anthropic 流式编码器输出 `thinking` 块与 `thinking_delta`，不再要求上游签名；非流式 `encode_response` 同样在无签名时输出 thinking block，有签名时继续保留 `signature`。
+- 签名传播：流式 IR 新增 `ReasoningSignature`，Anthropic 解码器捕获 `signature_delta`；转回 Anthropic 时转发 `signature_delta`，转 Responses 时写入 reasoning item 的 `encrypted_content`。Chat 没有签名语义，忽略该事件。
+- 块顺序：Anthropic 编码器在开始新内容块前先关闭仍在打开的块，避免 reasoning 与 text 块交叠，符合 Anthropic 顺序流。
+- 覆盖范围：Anthropic 客户端 + Chat 上游（流式/非流式）、Anthropic 客户端 + Anthropic 上游、Responses 客户端 + Chat/Anthropic 上游；Playground 与普通 API 走同一路径，问题已一并修复。
+- 验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（200 个测试）通过；真实二进制 + mock 上游冒烟确认 Chat→Anthropic 现在先输出 thinking 再输出正文，非流式 content 为 `['thinking','text']`，Responses 方向保持正常。版本号未变更。
 
 ## AOCI 状态
 

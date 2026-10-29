@@ -600,10 +600,13 @@ mod tests {
         assert_eq!(converted["type"], json!("message"));
         assert_eq!(converted["stop_reason"], json!("tool_use"));
         let content = converted["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2);
-        assert_eq!(content[0]["type"], json!("text"));
-        assert_eq!(content[0]["text"], json!("Hello"));
-        assert_eq!(content[1]["type"], json!("tool_use"));
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], json!("thinking"));
+        assert_eq!(content[0]["thinking"], json!("think"));
+        assert!(content[0].get("signature").is_none());
+        assert_eq!(content[1]["type"], json!("text"));
+        assert_eq!(content[1]["text"], json!("Hello"));
+        assert_eq!(content[2]["type"], json!("tool_use"));
         assert_eq!(converted["usage"]["input_tokens"], json!(90));
         assert_eq!(converted["usage"]["cache_read_input_tokens"], json!(10));
         assert_eq!(converted["usage"]["output_tokens"], json!(20));

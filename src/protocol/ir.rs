@@ -254,6 +254,13 @@ pub enum StreamEvent {
         index: usize,
         text: String,
     },
+    /// Anthropic thinking signature, delivered as a separate `signature_delta`
+    /// frame. Other protocols ignore it, but carrying it through the IR lets
+    /// conversions back to Anthropic keep a valid signature when one exists.
+    ReasoningSignature {
+        index: usize,
+        signature: String,
+    },
     ToolInputDelta {
         index: usize,
         partial_json: String,
