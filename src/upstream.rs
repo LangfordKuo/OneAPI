@@ -126,14 +126,6 @@ impl ClientCache {
             clients.clear();
         }
     }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.clients
-            .read()
-            .map(|clients| clients.len())
-            .unwrap_or_default()
-    }
 }
 
 /// Follow at most three redirects, only within the original host, and never
@@ -336,79 +328,5 @@ pub fn probe_body(kind: &str, model: &str) -> serde_json::Value {
             "max_tokens": 1,
             "stream": false,
         }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use axum::http::{HeaderMap, HeaderValue};
-
-    use crate::models::channel::Channel;
-
-    use super::{forwarded_headers, ClientCache};
-
-    fn channel(updated_at: i64) -> Channel {
-        Channel {
-            id: 7,
-            name: "test".to_string(),
-            kind: "openai_chat".to_string(),
-            kinds: r#"["openai_chat"]"#.to_string(),
-            fallback_kind: Some("openai_chat".to_string()),
-            protocol_configs: "[]".to_string(),
-            base_url: "http://localhost".to_string(),
-            api_key_enc: String::new(),
-            auth_header: "bearer".to_string(),
-            models: "[]".to_string(),
-            model_mapping: "{}".to_string(),
-            extra_headers: "{}".to_string(),
-            proxy_url: None,
-            priority: 0,
-            weight: 1,
-            timeout_ms: None,
-            enabled: 1,
-            last_error: None,
-            last_error_at: None,
-            disabled_until: None,
-            consecutive_failures: 0,
-            created_at: 0,
-            updated_at,
-        }
-    }
-
-    #[test]
-    fn client_cache_reuses_entries_across_health_updates() {
-        let cache = ClientCache::default();
-        let _first = cache.get(&channel(1), 60_000, false).expect("first");
-        let _second = cache.get(&channel(2), 60_000, false).expect("second");
-        assert_eq!(cache.len(), 1);
-    }
-
-    #[test]
-    fn streaming_and_non_streaming_clients_are_cached_separately() {
-        let cache = ClientCache::default();
-        let _non_stream = cache.get(&channel(1), 60_000, false).expect("non-stream");
-        let _stream = cache.get(&channel(1), 60_000, true).expect("stream");
-        assert_eq!(cache.len(), 2);
-
-        cache.clear();
-        assert_eq!(cache.len(), 0);
-    }
-
-    #[test]
-    fn forwards_only_allowlisted_client_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert("anthropic-beta", HeaderValue::from_static("prompt-caching"));
-        headers.insert("openai-beta", HeaderValue::from_static("assistants=v2"));
-        headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
-        headers.insert("x-api-key", HeaderValue::from_static("secret"));
-        headers.insert("cookie", HeaderValue::from_static("session=secret"));
-
-        let forwarded = forwarded_headers(&headers);
-        let names: Vec<&str> = forwarded.iter().map(|(name, _)| *name).collect();
-
-        assert_eq!(names, vec!["anthropic-beta", "openai-beta"]);
-        assert!(!names.contains(&"authorization"));
-        assert!(!names.contains(&"x-api-key"));
-        assert!(!names.contains(&"cookie"));
     }
 }

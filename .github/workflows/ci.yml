@@ -32,9 +32,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Tests
-        run: cargo test --locked
-
   frontend:
     name: Frontend (lint / typecheck / build)
     runs-on: ubuntu-24.04

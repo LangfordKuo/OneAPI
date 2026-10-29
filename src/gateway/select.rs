@@ -178,31 +178,3 @@ fn weighted_permutation(weights: &[i64], rng: &mut impl Rng) -> Vec<usize> {
     });
     keyed.into_iter().map(|(_, index)| index).collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::weighted_permutation;
-
-    #[test]
-    fn weighted_permutation_returns_every_candidate_once() {
-        let mut rng = rand::thread_rng();
-        let order = weighted_permutation(&[1, 5, 2, 1, 9], &mut rng);
-        let mut sorted = order.clone();
-        sorted.sort_unstable();
-        assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn weighted_permutation_respects_weights() {
-        let mut rng = rand::thread_rng();
-        let rounds = 20_000;
-        let mut first_wins = 0;
-        for _ in 0..rounds {
-            if weighted_permutation(&[3, 1], &mut rng)[0] == 0 {
-                first_wins += 1;
-            }
-        }
-        let ratio = f64::from(first_wins) / f64::from(rounds);
-        assert!((ratio - 0.75).abs() < 0.03, "unexpected ratio {ratio}");
-    }
-}

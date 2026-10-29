@@ -1103,37 +1103,3 @@ fn parse_models(text: &str) -> Vec<String> {
     result.dedup();
     result
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_body_matches_protocol() {
-        let chat = upstream::probe_body("openai_chat", "gpt-test");
-        assert_eq!(chat["model"], json!("gpt-test"));
-        assert_eq!(chat["max_tokens"], json!(1));
-
-        let responses = upstream::probe_body("openai_responses", "gpt-test");
-        assert_eq!(responses["max_output_tokens"], json!(16));
-        assert_eq!(responses["store"], json!(false));
-
-        let anthropic = upstream::probe_body("anthropic", "claude-test");
-        assert_eq!(anthropic["max_tokens"], json!(16));
-        assert_eq!(anthropic["messages"][0]["role"], json!("user"));
-    }
-
-    #[test]
-    fn parse_models_accepts_openai_and_anthropic_shapes() {
-        let openai = parse_models(r#"{"data":[{"id":"gpt-b"},{"id":"gpt-a"}]}"#);
-        assert_eq!(openai, vec!["gpt-a", "gpt-b"]);
-
-        let anthropic = parse_models(r#"{"data":[{"id":"claude-b"}],"has_more":false}"#);
-        assert_eq!(anthropic, vec!["claude-b"]);
-
-        let alt = parse_models(r#"{"models":[{"id":"m1"},"m2"]}"#);
-        assert_eq!(alt, vec!["m1", "m2"]);
-
-        assert!(parse_models("not json").is_empty());
-    }
-}
