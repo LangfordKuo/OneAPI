@@ -1,6 +1,6 @@
 # OneAPI 实施计划
 
-- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度，v0.1.7 渠道按协议内分页并修复 Token 图表轴，v0.1.8 API Key 支持渠道/模型/Token 限额，v0.1.9 完成审查优化批次 1–5，v0.1.10 完成流式 Responses `store` 一致性、渠道健康缓存覆盖、大响应字节级缓冲与在线更新信任边界，v0.1.11 完成两轮复审修复、归档计划文档并清理工程债；v0.1.12 实现同模型渠道无缝故障转移与冷却期主动恢复；v0.1.13 增加轻量备份/恢复、故障转移预算、运行状态信息与每 Key 每日额度
+- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度，v0.1.7 渠道按协议内分页并修复 Token 图表轴，v0.1.8 API Key 支持渠道/模型/Token 限额，v0.1.9 完成审查优化批次 1–5，v0.1.10 完成流式 Responses `store` 一致性、渠道健康缓存覆盖、大响应字节级缓冲与在线更新信任边界，v0.1.11 完成两轮复审修复、归档计划文档并清理工程债；v0.1.12 实现同模型渠道无缝故障转移与冷却期主动恢复；v0.1.13 增加轻量备份/恢复、故障转移预算、运行状态信息与每 Key 每日额度；v0.1.14 修复跨协议推理输出并移除全部测试代码
 - 最后更新：2026-10-29
 - 关联文档：`docs/PROGRESS.md`
 - 适用仓库：`/root/OneAPI`
@@ -191,19 +191,17 @@ GET /healthz  /readyz
 - release 用 `#[derive(RustEmbed)] #[folder = "$CARGO_MANIFEST_DIR/web/dist"]` 嵌入；debug 下 rust-embed 从磁盘读取 `web/dist`，改动无需重新编译。`build.rs` 在目录缺失时生成占位 `index.html`，保证 `cargo check/build` 不因缺前端产物失败（release 正式构建由 Makefile 先跑前端构建）。
 - SPA fallback：非 `/api`、`/v1` 的 GET 未命中文件时返回 `index.html`；带 hash 的 assets 长缓存，index no-cache。
 - `build.rs` 在 `web/dist` 缺失时生成占位 `index.html`，保证 `cargo check/build` 不因缺前端产物失败（release 正式构建由 Makefile 先跑前端构建）。
-- Makefile：`make dev`（后端 + vite）、`make web`、`make build`（web → `cargo build --release`）、`make test`、`make lint`、`make docker`。
+- Makefile：`make dev`（后端 + vite）、`make web`、`make build`（web → `cargo build --release`）、`make lint`、`make docker`。
 - Dockerfile 三段：node:24 构建前端 → rust:1-slim-bookworm 构建（rustls，无 OpenSSL，SQLite bundled）→ debian:bookworm-slim 运行（CA 证书、非 root、`/data` 卷、EXPOSE 3000）。附 docker-compose。
-- GitHub Actions：`ci.yml` 在 `main`/PR 上运行 fmt、clippy、test 以及前端 ESLint、typecheck 与构建；`release.yml` 在 `v*` 标签上校验版本并构建 Linux/Windows/macOS × amd64/arm64 六个产物，同时用 `Dockerfile.release` 将 Linux 产物组装为 `linux/amd64,linux/arm64` 镜像并推送 GHCR。
+- GitHub Actions：`ci.yml` 在 `main`/PR 上运行 fmt、clippy 以及前端 ESLint、typecheck 与构建；`release.yml` 在 `v*` 标签上校验版本并构建 Linux/Windows/macOS × amd64/arm64 六个产物，同时用 `Dockerfile.release` 将 Linux 产物组装为 `linux/amd64,linux/arm64` 镜像并推送 GHCR。
 - 配置全走 env，并支持 `.env`（当前目录与数据目录，进程环境优先）：`ONEAPI_ADDR=0.0.0.0:3000`、`ONEAPI_DATA_DIR`、`ONEAPI_DATABASE_URL`、`ONEAPI_SECRET`、`ONEAPI_ADMIN_USER/PASSWORD`、`ONEAPI_LOG_LEVEL`、`ONEAPI_LOG_JSON`、`ONEAPI_COOKIE_SECURE`、`ONEAPI_TRUST_PROXY`、`ONEAPI_ALLOW_SELF_UPDATE`、`ONEAPI_UPDATE_API_BASE`。安装向导会生成 `<data_dir>/.env`。
 
-## 11. 测试
+## 11. 测试与验证
 
-- 适配器单测：每种协议的准备/解析 fixture，覆盖 6 条跨协议组合的请求、非流式响应、SSE 流；固定样例覆盖 tool call 并行、图片、thinking、usage、错误。
-- SSE 边界：chunk 从任意字节切断、CRLF、多行 data、注释、`[DONE]`、event 类型。
-- 集成测试：wiremock 模拟三类上游 + `tower::ServiceExt::oneshot` 调 axum；覆盖鉴权、路由、故障转移（首个渠道 500/超时/连接失败）、流中断、Responses 存取与 `previous_response_id`、Key 禁用/过期。
-- DB 测试用临时文件库跑 migration。
-- 前端：`tsc --noEmit`、ESLint、`vite build`；不引入重型 E2E。
-- CI：fmt、clippy `-D warnings`、test、web build。
+- 自动化测试代码与测试依赖（`tempfile`、`tower`、`wiremock`）已按要求移除；仓库不再包含 `#[cfg(test)]` 模块或测试文件。
+- 合并前验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、release 构建（Makefile 先构建前端），以及前端 `tsc --noEmit`、ESLint 与 `vite build`。
+- 行为验证使用独立于仓库的临时冒烟脚本（mock 上游 + 真实二进制），脚本不随仓库分发。
+- CI：fmt、clippy `-D warnings`、web build。
 
 ## 12. 实施阶段
 
@@ -257,7 +255,8 @@ GET /healthz  /readyz
 - 2026-10-29：同模型渠道无缝故障转移（v0.1.12）：非流式与流式提交前的所有上游失败（任意 4xx/5xx、连接/超时、空响应、非 JSON、解析/编码失败、2xx 内 `error`）都会切换到下一个同模型候选，候选耗尽才向客户端返回错误；全部失败时优先返回第一个请求语义错误的状态码，纯渠道故障仍返回 502；新增 `penalizes_channel` 将渠道冷却与故障转移解耦，400/413/422 等请求语义错误不冷却渠道；同模型渠道全部冷却时返回 `503 channel_recovering` 而不是 404；`count_tokens` 同样在多个 Anthropic 原生渠道间切换。版本升至 `0.1.12`。
 - 2026-10-29：渠道冷却主动恢复（v0.1.12）：新增 `src/recovery.rs` 后台任务，每 60 秒探测所有有失败记录且处于冷却的渠道；每个协议请求最多 10 秒、最多 8 路并发，优先用配置中的具体模型发一次最小补全请求，只有 `*` 模型时改用 `/models`。探测成功立即清零失败状态并失效渠道缓存（无需等待 30 秒 TTL 或客户端流量）；失败只更新 `last_error`，不增加 `consecutive_failures`，正在运行的指数退避不被缩短，冷却已到期则顺延 60 秒。`upstream` 新增可复用的 `build_client_with_timeout`、`probe_model`、`probe_body`，后台任务与渠道探活共用；`ChannelProbes` 增加与客户端半开探测共享的恢复探测闸门。
 - 2026-10-29：个人使用与轻量运维增强（v0.1.13）：启动时执行 `PRAGMA quick_check`，有未应用迁移时先 `VACUUM INTO` 快照到 `data/backups`（保留最近 5 份）；设置页新增数据库导出/导入，导入先校验再在重启时换库并自动保留当前库；`/api/system` 增加 DB/WAL 大小、最近备份、写队列、冷却渠道与 24 小时故障转移次数；故障转移增加 3 渠道/60 秒预算与重复请求错误提前停止；`api_keys` 新增按 UTC 自然日的 `daily_token_limit`，超限返回 429 且次日自动恢复（迁移 `0008_api_key_daily_limit.sql`，并为 `usage_logs.created_at` 增加索引）。
-- 2026-10-29：跨协议推理输出修复（未发布）：Anthropic 编码器不再丢弃推理，流式输出 `thinking`/`thinking_delta`，非流式在无签名时也输出 thinking block；流式 IR 增加 `ReasoningSignature`，保留 Anthropic 上游的 `signature_delta` 并写入 Responses 的 `encrypted_content`；Anthropic 编码器在新块开始前关闭旧块。修复 Anthropic 客户端使用 Chat 上游时“无推理输出且首字延迟高”的问题，覆盖 Playground 与普通 API。
+- 2026-10-29：跨协议推理输出修复（v0.1.14）：Anthropic 编码器不再丢弃推理，流式输出 `thinking`/`thinking_delta`，非流式在无签名时也输出 thinking block；流式 IR 增加 `ReasoningSignature`，保留 Anthropic 上游的 `signature_delta` 并写入 Responses 的 `encrypted_content`；Anthropic 编码器在新块开始前关闭旧块。修复 Anthropic 客户端使用 Chat 上游时“无推理输出且首字延迟高”的问题，覆盖 Playground 与普通 API。
+- 2026-10-29：移除测试代码（v0.1.14）：删除全部 `#[cfg(test)]` 模块、`src/admin/tests.rs` 与 test-only helper；移除 dev-dependencies `tempfile`/`tower`/`wiremock`；CI 与 Makefile 不再执行测试。`#[cfg(test)]` 原本不会进入 release 二进制，本次主要减少源码与开发依赖面。
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。

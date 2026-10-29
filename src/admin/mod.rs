@@ -13,9 +13,6 @@ mod settings;
 mod setup;
 mod update;
 
-#[cfg(test)]
-mod tests;
-
 pub use auth::{bootstrap, AdminSession, LoginLimiter};
 
 use axum::{

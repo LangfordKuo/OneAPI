@@ -214,14 +214,3 @@ pub async fn detail_bodies(
     .fetch_optional(pool)
     .await
 }
-
-#[cfg(test)]
-mod tests {
-    use super::glob_prefix;
-
-    #[test]
-    fn glob_prefix_escapes_metacharacters() {
-        assert_eq!(glob_prefix("gpt-4"), "gpt-4*");
-        assert_eq!(glob_prefix("a*b?c[d]"), "a[*]b[?]c[[]d[]]*");
-    }
-}

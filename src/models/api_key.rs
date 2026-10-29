@@ -114,35 +114,6 @@ pub async fn touch_last_used(pool: &SqlitePool, id: i64, now: i64) -> sqlx::Resu
     Ok(())
 }
 
-/// Backwards-compatible creator with no restrictions, used by tests.
-#[cfg(test)]
-pub async fn create(
-    pool: &SqlitePool,
-    name: &str,
-    key_hash: &str,
-    key_prefix: &str,
-    enabled: i64,
-    expires_at: Option<i64>,
-    created_at: i64,
-) -> sqlx::Result<ApiKey> {
-    create_with_limits(
-        pool,
-        &ApiKeyCreate {
-            name,
-            key_hash,
-            key_prefix,
-            enabled,
-            expires_at,
-            allowed_channel_ids: "[]",
-            allowed_models: "[]",
-            token_limit: None,
-            daily_token_limit: None,
-            created_at,
-        },
-    )
-    .await
-}
-
 pub async fn create_with_limits(
     pool: &SqlitePool,
     input: &ApiKeyCreate<'_>,

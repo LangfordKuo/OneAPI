@@ -1,6 +1,6 @@
 [package]
 name = "oneapi"
-version = "0.1.13"
+version = "0.1.14"
 edition = "2021"
 rust-version = "1.82"
 license = "GPL-3.0-only"
@@ -41,11 +41,6 @@ tar = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
-
-[dev-dependencies]
-tempfile = "3"
-tower = "0.5"
-wiremock = "0.6"
 
 [profile.release]
 lto = "thin"

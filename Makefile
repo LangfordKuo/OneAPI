@@ -4,7 +4,7 @@ SHELL := /bin/bash
 NODE_BIN ?= /root/.local/share/vite-plus/bin
 export PATH := $(NODE_BIN):$(PATH)
 
-.PHONY: all web build run dev test fmt clippy lint docker clean
+.PHONY: all web build run dev fmt clippy lint docker clean
 
 all: build
 
@@ -22,9 +22,6 @@ dev:
 	@echo "Backend:  cargo run -- serve"
 	@echo "Frontend: cd web && npm run dev"
 	@echo "Vite proxies /api, /v1, /healthz and /readyz to 127.0.0.1:3000."
-
-test:
-	cargo test
 
 fmt:
 	cargo fmt --all

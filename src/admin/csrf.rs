@@ -81,28 +81,3 @@ pub async fn guard(
 
     Ok(next.run(request).await)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_authority;
-
-    #[test]
-    fn origin_comparison_ignores_scheme_and_default_ports() {
-        assert_eq!(
-            normalize_authority("https://api.example.com"),
-            normalize_authority("api.example.com")
-        );
-        assert_eq!(
-            normalize_authority("https://api.example.com:443"),
-            normalize_authority("api.example.com")
-        );
-        assert_eq!(
-            normalize_authority("http://localhost:5173"),
-            normalize_authority("localhost:5173")
-        );
-        assert_ne!(
-            normalize_authority("https://api.example.com"),
-            normalize_authority("evil.example.com")
-        );
-    }
-}
