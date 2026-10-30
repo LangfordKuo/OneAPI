@@ -169,6 +169,11 @@ async fn system_info(
         .await?
         .iter()
         .filter(|prepared| {
+            // Same scope as the recovery task and `active_channels`: a channel
+            // an operator disabled is not "cooling down", it is off.
+            if prepared.channel.enabled == 0 {
+                return false;
+            }
             let disabled_until = health
                 .get(&prepared.channel.id)
                 .and_then(|health| health.disabled_until)
