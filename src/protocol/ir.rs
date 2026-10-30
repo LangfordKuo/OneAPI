@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnifiedRequest {
@@ -330,4 +330,77 @@ pub fn has_image(parts: &[ContentPart]) -> bool {
     parts
         .iter()
         .any(|part| matches!(part, ContentPart::Image { .. }))
+}
+
+impl Usage {
+    /// OpenAI Chat Completions `usage` object.
+    ///
+    /// Shared by the non-stream encoder and the streaming encoder so both
+    /// report identical accounting for the same upstream usage.
+    pub(crate) fn chat_json(&self) -> Value {
+        let mut map = Map::new();
+        let prompt = self.input_tokens.map(|input| {
+            input + self.cached_tokens.unwrap_or(0) + self.cache_creation_tokens.unwrap_or(0)
+        });
+        if let Some(prompt) = prompt {
+            map.insert("prompt_tokens".into(), json!(prompt));
+        }
+        if let Some(output) = self.output_tokens {
+            map.insert("completion_tokens".into(), json!(output));
+        }
+        if let Some(total) = self.total_tokens.or_else(|| {
+            prompt
+                .zip(self.output_tokens)
+                .map(|(input, output)| input + output)
+        }) {
+            map.insert("total_tokens".into(), json!(total));
+        }
+        if let Some(cached) = self.cached_tokens {
+            map.insert(
+                "prompt_tokens_details".into(),
+                json!({"cached_tokens": cached}),
+            );
+        }
+        if let Some(reasoning) = self.reasoning_tokens {
+            map.insert(
+                "completion_tokens_details".into(),
+                json!({"reasoning_tokens": reasoning}),
+            );
+        }
+        Value::Object(map)
+    }
+
+    /// OpenAI Responses `usage` object.
+    pub(crate) fn responses_json(&self) -> Value {
+        let mut map = Map::new();
+        let input = self.input_tokens.map(|input| {
+            input + self.cached_tokens.unwrap_or(0) + self.cache_creation_tokens.unwrap_or(0)
+        });
+        if let Some(input) = input {
+            map.insert("input_tokens".into(), json!(input));
+        }
+        if let Some(output) = self.output_tokens {
+            map.insert("output_tokens".into(), json!(output));
+        }
+        if let Some(total) = self.total_tokens.or_else(|| {
+            input
+                .zip(self.output_tokens)
+                .map(|(input, output)| input + output)
+        }) {
+            map.insert("total_tokens".into(), json!(total));
+        }
+        if let Some(cached) = self.cached_tokens {
+            map.insert(
+                "input_tokens_details".into(),
+                json!({"cached_tokens": cached}),
+            );
+        }
+        if let Some(reasoning) = self.reasoning_tokens {
+            map.insert(
+                "output_tokens_details".into(),
+                json!({"reasoning_tokens": reasoning}),
+            );
+        }
+        Value::Object(map)
+    }
 }

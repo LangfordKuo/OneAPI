@@ -704,7 +704,7 @@ impl ResponsesDecoder {
     }
 }
 
-fn parse_anthropic_stop(value: &str) -> StopReason {
+pub(crate) fn parse_anthropic_stop(value: &str) -> StopReason {
     match value {
         "end_turn" => StopReason::EndTurn,
         "max_tokens" => StopReason::MaxTokens,
@@ -763,72 +763,6 @@ fn sse_data(value: &Value) -> String {
 
 fn sse_named(name: &str, value: &Value) -> String {
     format!("event: {name}\ndata: {value}\n\n")
-}
-
-fn chat_usage_json(usage: &Usage) -> Value {
-    let mut map = Map::new();
-    let prompt = usage.input_tokens.map(|input| {
-        input + usage.cached_tokens.unwrap_or(0) + usage.cache_creation_tokens.unwrap_or(0)
-    });
-    if let Some(prompt) = prompt {
-        map.insert("prompt_tokens".into(), json!(prompt));
-    }
-    if let Some(output) = usage.output_tokens {
-        map.insert("completion_tokens".into(), json!(output));
-    }
-    if let Some(total) = usage.total_tokens.or_else(|| {
-        prompt
-            .zip(usage.output_tokens)
-            .map(|(input, output)| input + output)
-    }) {
-        map.insert("total_tokens".into(), json!(total));
-    }
-    if let Some(cached) = usage.cached_tokens {
-        map.insert(
-            "prompt_tokens_details".into(),
-            json!({"cached_tokens": cached}),
-        );
-    }
-    if let Some(reasoning) = usage.reasoning_tokens {
-        map.insert(
-            "completion_tokens_details".into(),
-            json!({"reasoning_tokens": reasoning}),
-        );
-    }
-    Value::Object(map)
-}
-
-fn responses_usage_json(usage: &Usage) -> Value {
-    let mut map = Map::new();
-    let input = usage.input_tokens.map(|input| {
-        input + usage.cached_tokens.unwrap_or(0) + usage.cache_creation_tokens.unwrap_or(0)
-    });
-    if let Some(input) = input {
-        map.insert("input_tokens".into(), json!(input));
-    }
-    if let Some(output) = usage.output_tokens {
-        map.insert("output_tokens".into(), json!(output));
-    }
-    if let Some(total) = usage.total_tokens.or_else(|| {
-        input
-            .zip(usage.output_tokens)
-            .map(|(input, output)| input + output)
-    }) {
-        map.insert("total_tokens".into(), json!(total));
-    }
-    if let Some(cached) = usage.cached_tokens {
-        map.insert(
-            "input_tokens_details".into(),
-            json!({"cached_tokens": cached}),
-        );
-    }
-    if let Some(reasoning) = usage.reasoning_tokens {
-        map.insert(
-            "output_tokens_details".into(),
-            json!({"reasoning_tokens": reasoning}),
-        );
-    }
-    Value::Object(map)
 }
 
 fn anthropic_usage_start(usage: &Usage) -> Value {
@@ -1016,7 +950,7 @@ impl ChatEncoder {
                         "created": self.created_at,
                         "model": self.model,
                         "choices": [],
-                        "usage": chat_usage_json(&self.usage),
+                        "usage": self.usage.chat_json(),
                     })));
                 }
                 frames.push("data: [DONE]\n\n".to_string());
@@ -1370,13 +1304,52 @@ impl AnthropicEncoder {
     }
 }
 
-fn anthropic_stop_reason(reason: Option<StopReason>) -> &'static str {
+pub(crate) fn anthropic_stop_reason(reason: Option<StopReason>) -> &'static str {
     match reason {
         Some(StopReason::MaxTokens) => "max_tokens",
         Some(StopReason::ToolUse) => "tool_use",
         Some(StopReason::ContentFilter) => "refusal",
         Some(StopReason::StopSequence) => "stop_sequence",
         _ => "end_turn",
+    }
+}
+
+/// Responses output item for a completed block. Used both for the streaming
+/// `response.output_item.done` event and for the final `output` array so the
+/// two can never disagree.
+fn output_item(block: &EncodedBlock) -> Value {
+    match block.kind {
+        BlockKind::Text => json!({
+            "type": "message",
+            "id": block.item_id,
+            "role": "assistant",
+            "status": "completed",
+            "content": [{
+                "type": "output_text",
+                "text": block.text,
+                "annotations": [],
+            }],
+        }),
+        BlockKind::Reasoning => {
+            let mut item = json!({
+                "type": "reasoning",
+                "id": block.item_id,
+                "summary": [{"type": "summary_text", "text": block.text}],
+                "status": "completed",
+            });
+            if let Some(signature) = &block.signature {
+                item["encrypted_content"] = json!(signature);
+            }
+            item
+        }
+        BlockKind::ToolUse => json!({
+            "type": "function_call",
+            "id": block.item_id,
+            "call_id": block.call_id,
+            "name": block.name,
+            "arguments": block.arguments,
+            "status": "completed",
+        }),
     }
 }
 
@@ -1728,30 +1701,11 @@ impl ResponsesEncoder {
                     &json!({
                         "type": "response.output_item.done",
                         "output_index": block.output_index,
-                        "item": {
-                            "type": "message",
-                            "id": block.item_id,
-                            "role": "assistant",
-                            "status": "completed",
-                            "content": [{
-                                "type": "output_text",
-                                "text": block.text,
-                                "annotations": [],
-                            }],
-                        },
+                        "item": output_item(block),
                     }),
                 ),
             ],
             BlockKind::Reasoning => {
-                let mut item = json!({
-                    "type": "reasoning",
-                    "id": block.item_id,
-                    "summary": [{"type": "summary_text", "text": block.text}],
-                    "status": "completed",
-                });
-                if let Some(signature) = &block.signature {
-                    item["encrypted_content"] = json!(signature);
-                }
                 vec![
                     sse_named(
                         "response.reasoning_summary_text.done",
@@ -1768,7 +1722,7 @@ impl ResponsesEncoder {
                         &json!({
                             "type": "response.output_item.done",
                             "output_index": block.output_index,
-                            "item": item,
+                            "item": output_item(block),
                         }),
                     ),
                 ]
@@ -1788,14 +1742,7 @@ impl ResponsesEncoder {
                     &json!({
                         "type": "response.output_item.done",
                         "output_index": block.output_index,
-                        "item": {
-                            "type": "function_call",
-                            "id": block.item_id,
-                            "call_id": block.call_id,
-                            "name": block.name,
-                            "arguments": block.arguments,
-                            "status": "completed",
-                        },
+                        "item": output_item(block),
                     }),
                 ),
             ],
@@ -1805,42 +1752,7 @@ impl ResponsesEncoder {
     fn output_items(&self) -> Vec<Value> {
         let mut blocks: Vec<&EncodedBlock> = self.blocks.values().collect();
         blocks.sort_by_key(|block| block.output_index);
-        blocks
-            .into_iter()
-            .map(|block| match block.kind {
-                BlockKind::Text => json!({
-                    "type": "message",
-                    "id": block.item_id,
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{
-                        "type": "output_text",
-                        "text": block.text,
-                        "annotations": [],
-                    }],
-                }),
-                BlockKind::Reasoning => {
-                    let mut item = json!({
-                        "type": "reasoning",
-                        "id": block.item_id,
-                        "summary": [{"type": "summary_text", "text": block.text}],
-                        "status": "completed",
-                    });
-                    if let Some(signature) = &block.signature {
-                        item["encrypted_content"] = json!(signature);
-                    }
-                    item
-                }
-                BlockKind::ToolUse => json!({
-                    "type": "function_call",
-                    "id": block.item_id,
-                    "call_id": block.call_id,
-                    "name": block.name,
-                    "arguments": block.arguments,
-                    "status": "completed",
-                }),
-            })
-            .collect()
+        blocks.into_iter().map(output_item).collect()
     }
 
     fn response_object(&self, status: &str, output: Vec<Value>) -> Value {
@@ -1851,7 +1763,7 @@ impl ResponsesEncoder {
         object.insert("status".into(), json!(status));
         object.insert("model".into(), json!(self.model));
         object.insert("output".into(), Value::Array(output));
-        object.insert("usage".into(), responses_usage_json(&self.usage));
+        object.insert("usage".into(), self.usage.responses_json());
         object.insert("store".into(), json!(self.store));
         if status == "incomplete" {
             let reason = match self.stop {
