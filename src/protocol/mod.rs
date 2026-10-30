@@ -89,24 +89,6 @@ impl Protocol {
     }
 }
 
-pub fn convert_request(
-    from: Protocol,
-    to: Protocol,
-    value: &Value,
-) -> Result<Value, ProtocolError> {
-    let request = from.parse_request(value)?;
-    to.encode_request(&request)
-}
-
-pub fn convert_response(
-    from: Protocol,
-    to: Protocol,
-    value: &Value,
-) -> Result<Value, ProtocolError> {
-    let response = from.parse_response(value)?;
-    to.encode_response(&response)
-}
-
 pub(crate) fn get_str<'a>(obj: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     obj.get(key).and_then(Value::as_str)
 }

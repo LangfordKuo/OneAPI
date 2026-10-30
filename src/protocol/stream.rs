@@ -98,7 +98,6 @@ pub struct ChatDecoder {
     tools: HashMap<i64, usize>,
     open: BTreeSet<usize>,
     finish_reason: Option<StopReason>,
-    usage: Usage,
     stopped: bool,
     done: bool,
 }
@@ -134,9 +133,7 @@ impl ChatDecoder {
         }
 
         if let Some(usage) = value.get("usage").and_then(Value::as_object) {
-            let parsed = chat::parse_usage(usage);
-            self.usage.merge(&parsed);
-            events.push(StreamEvent::Usage(parsed));
+            events.push(StreamEvent::Usage(chat::parse_usage(usage)));
         }
 
         let Some(choice) = value
@@ -292,7 +289,6 @@ pub struct AnthropicDecoder {
     next_index: usize,
     blocks: HashMap<usize, (usize, BlockKind)>,
     open: BTreeSet<usize>,
-    usage: Usage,
     stopped: bool,
     done: bool,
 }
@@ -303,7 +299,6 @@ impl AnthropicDecoder {
             next_index: 0,
             blocks: HashMap::new(),
             open: BTreeSet::new(),
-            usage: Usage::default(),
             stopped: false,
             done: false,
         }
@@ -327,9 +322,7 @@ impl AnthropicDecoder {
                         created_at: 0,
                     });
                     if let Some(usage) = message.get("usage").and_then(Value::as_object) {
-                        let parsed = anthropic::parse_usage(usage);
-                        self.usage.merge(&parsed);
-                        events.push(StreamEvent::Usage(parsed));
+                        events.push(StreamEvent::Usage(anthropic::parse_usage(usage)));
                     }
                 }
             }
@@ -423,9 +416,7 @@ impl AnthropicDecoder {
                     }
                 }
                 if let Some(usage) = value.get("usage").and_then(Value::as_object) {
-                    let parsed = anthropic::parse_usage(usage);
-                    self.usage.merge(&parsed);
-                    events.push(StreamEvent::Usage(parsed));
+                    events.push(StreamEvent::Usage(anthropic::parse_usage(usage)));
                 }
             }
             "message_stop" => {
@@ -470,7 +461,6 @@ pub struct ResponsesDecoder {
     blocks: HashMap<(usize, usize), (usize, BlockKind)>,
     output_keys: HashMap<usize, Vec<(usize, usize)>>,
     open: BTreeSet<usize>,
-    usage: Usage,
     stop: Option<StopReason>,
     stopped: bool,
     done: bool,
@@ -614,7 +604,6 @@ impl ResponsesDecoder {
                 if let Some(response) = value.get("response") {
                     self.final_response = Some(response.clone());
                     if let Ok(parsed) = responses::parse_response(response) {
-                        self.usage.merge(&parsed.usage);
                         if !parsed.usage.is_empty() {
                             events.push(StreamEvent::Usage(parsed.usage));
                         }

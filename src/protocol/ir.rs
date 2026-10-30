@@ -17,8 +17,6 @@ pub struct UnifiedRequest {
     pub reasoning: Option<ReasoningConfig>,
     pub response_format: Option<ResponseFormat>,
     pub metadata_user_id: Option<String>,
-    pub previous_response_id: Option<String>,
-    pub store: Option<bool>,
     pub n: Option<u32>,
     pub extras: serde_json::Map<String, Value>,
 }
@@ -31,8 +29,6 @@ pub struct UnifiedMessage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    System,
-    Developer,
     User,
     Assistant,
     Tool,
@@ -324,12 +320,6 @@ pub fn reasoning_text(parts: &[ContentPart]) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
-}
-
-pub fn has_image(parts: &[ContentPart]) -> bool {
-    parts
-        .iter()
-        .any(|part| matches!(part, ContentPart::Image { .. }))
 }
 
 impl Usage {

@@ -166,8 +166,6 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         reasoning,
         response_format,
         metadata_user_id,
-        previous_response_id: None,
-        store: None,
         n: None,
         extras: Map::new(),
     })
@@ -473,10 +471,6 @@ pub fn encode_request(request: &UnifiedRequest) -> Result<Value, ProtocolError> 
 }
 
 fn encode_message(message: &UnifiedMessage) -> Result<(String, Vec<Value>), ProtocolError> {
-    if matches!(message.role, Role::System | Role::Developer) {
-        return Ok(("system".to_string(), Vec::new()));
-    }
-
     let role = if message.role == Role::Assistant {
         "assistant"
     } else {

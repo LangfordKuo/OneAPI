@@ -103,8 +103,6 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         reasoning,
         response_format,
         metadata_user_id: get_string(obj, "user"),
-        previous_response_id: get_string(obj, "previous_response_id"),
-        store: get_bool(obj, "store"),
         n: None,
         extras: Map::new(),
     })
@@ -417,23 +415,6 @@ pub fn encode_request(request: &UnifiedRequest) -> Result<Value, ProtocolError> 
     let mut input = Vec::new();
     for message in &request.messages {
         match message.role {
-            Role::System | Role::Developer => {
-                if message
-                    .content
-                    .iter()
-                    .any(|part| !matches!(part, ContentPart::Text { .. }))
-                {
-                    return Err(ProtocolError::unsupported(
-                        "non-text system content",
-                        "responses",
-                    ));
-                }
-                input.push(json!({
-                    "type": "message",
-                    "role": "developer",
-                    "content": [{"type": "input_text", "text": text_content(&message.content)}],
-                }));
-            }
             Role::User => {
                 input.push(json!({
                     "type": "message",

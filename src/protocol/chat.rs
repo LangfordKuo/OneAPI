@@ -188,8 +188,6 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         reasoning,
         response_format,
         metadata_user_id: get_string(obj, "user"),
-        previous_response_id: None,
-        store: None,
         n: get_u32(obj, "n"),
         extras,
     })
@@ -390,22 +388,6 @@ pub fn encode_request(request: &UnifiedRequest) -> Result<Value, ProtocolError> 
 
     for message in &request.messages {
         match message.role {
-            Role::System | Role::Developer => {
-                if message
-                    .content
-                    .iter()
-                    .any(|part| !matches!(part, ContentPart::Text { .. }))
-                {
-                    return Err(ProtocolError::unsupported(
-                        "non-text system content",
-                        "chat",
-                    ));
-                }
-                messages.push(json!({
-                    "role": "system",
-                    "content": text_content(&message.content),
-                }));
-            }
             Role::User => {
                 messages.push(json!({
                     "role": "user",

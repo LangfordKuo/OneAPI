@@ -10,7 +10,6 @@ mod gateway;
 mod maintenance;
 mod metrics;
 mod models;
-#[allow(dead_code)]
 mod protocol;
 mod recovery;
 mod security;
