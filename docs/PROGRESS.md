@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-30
-- 当前阶段：v0.1.15 已发布（实时刷新、渠道快捷启停与前端 lint 修复）
+- 当前阶段：v0.1.16 已发布（冗余与写法审查：缺陷修复、重复消除与热路径优化）
 - 当前分支：`main`
-- 最近发布：`v0.1.15`
+- 最近发布：`v0.1.16`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -520,6 +520,36 @@
 - `useLiveRefresh` 原先在渲染期写 ref，改为在 `useEffect` 中同步 `keysRef`/`latestRef`，消除 `react-hooks/refs` 报错且保持“只响应服务端信号”的语义。
 - `useNow` 拆成 30 秒与 1 秒两个共享时钟（`useNow` / `useNowSeconds`），仪表盘运行时长改用 `useNowSeconds` 的稳定快照，不再在渲染期调用 `Date.now()`，消除 `react-hooks/purity` 报错并继续每秒递增。
 - `npm run lint` 现在 0 error；剩余 6 条 `react-refresh/only-export-components` 警告来自既有 `badge/button/tabs` 与 `useLiveMetrics` 的常量/hook 导出，不阻塞 CI。
+
+## 冗余与写法审查（2026-10-30，v0.1.16）
+
+全仓按“缺陷 → 结构 → 重复代码”三档审查，逐项提交。
+
+缺陷修复（10 项）：
+
+- 备份：`snapshot` 原先无条件按最新 5 个 `*.db` 轮转，而导出流程写完就删除 `export-*.db`，每导出一次就永久丢失一份真实备份；改为由调用方决定是否轮转。
+- 导入：换库前只有主库文件被重命名为 `pre-import`，随后删除 `-wal`/`-shm`，未 checkpoint 的已提交数据既不在备份里也被删除；现在先用独立短连接执行 `wal_checkpoint(TRUNCATE)`。暂存文件改为按请求唯一命名，并用进程级标记拒绝重叠导入（成功后保留到进程自我替换）。
+- Key 权限：`parse_channel_ids` 先过滤非正数再校验，`allowed_channel_ids: [0]` 会得到空数组并被解释为“不限渠道”，把权限放大而不是报错；现在返回 400 并指出非法 ID。
+- 渠道表单：`Number('')` 为 0，清空“权重”会提交 `weight: 0` 并被后端拒绝；空输入改为回退默认值。
+- 流式故障转移：`commit_deadline` 在循环外只算一次，晚开始的第 2/3 次尝试几乎没有时间抢首帧；改为每次尝试按当前时刻计算。
+- 流式失败：`StreamFailure.retryable` 恒为 true，`if retryable { continue }` 之后约 25 行是死代码；移除字段与死分支，行为不变。
+- 设置：三个数值项没有上界，极端值会在“秒 × 1000”处溢出或被静默回退成默认值；管理端加范围校验，加载端改用 `saturating_mul`。
+- 安装向导写入 `site_name` 后未失效 30 秒缓存，`/api/site` 会继续返回旧站点名。
+- `/api/system` 的 `cooling_channels` 未排除已禁用渠道，与恢复任务、仪表盘口径不一致。
+- 前端：Playground 与备份导出/导入各自 `fetch`，丢掉了统一的 401 跳转；登出 mutation 无 `onError`，失败完全静默。
+
+结构收敛：
+
+- 非流式与流式两套故障转移循环合并判定（`attempt_gate`）、请求体准备（`prepare_attempt_body`/`AttemptBody`）与终止响应（`finish_failover`/`FailoverState`），usage 记录统一为 `AttemptLog`，删除仅差 `stream` 标志的两份实现。
+- 首帧错误、后续流帧错误、透传观测与非流式响应四处上游错误字段提取合并为 `protocol::error_fields`，顺带修正 `frame_error` 的 Chat 分支缺少 `code`/顶层 `message` 回退。
+- 流式透传每帧只解析一次 JSON：`usage_only` 与 `has_content` 并入 `PassthroughObservation`（此前 `include_usage` 注入后 `is_chat_usage_only` 的提前返回从未命中）。
+- 共享实现：`Usage::chat_json`/`responses_json`、Anthropic stop reason 双向映射、`tool_use` 块、Responses output item、密码策略、0600 文件写入、`SettingsMap`、日志筛选白名单、渠道探活请求、Key 渠道存在性查询。
+
+死代码：移除 `protocol` 模块级 `allow(dead_code)`，删除 `convert_request`/`convert_response`、`has_image`、`ProtocolError::InvalidField`、`UnifiedRequest` 的 `store`/`previous_response_id`、三个解码器中只写不读的 usage 累加字段，以及永远不会被构造的 `Role::System`/`Role::Developer` 及其编码分支。
+
+前端性能：日志筛选文本输入改为 300ms 防抖（此前每敲一个字符发一次 `/api/logs`）；实时指标拆成 snapshot/usageSeq/connected 三个 context（日志页不再每秒重渲染）；仪表盘每秒时钟下沉到 `<Uptime>` 叶子组件并对 `DashboardCharts` 做 `memo`；两张占比环形图合并为 `BreakdownPie`。
+
+验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`（协议层重新纳入 dead_code 检查后仍为 0 警告）、`npx tsc --noEmit`、`npm run lint`（0 error，6 条既有 react-refresh 警告）、`npm run build` 通过。真实二进制 + mock 上游端到端：安装向导写入的站点名立即可见；同协议透传、Chat→Anthropic、Chat→Responses 的非流式与流式输出与改动前一致；故障转移终止路径返回 502 且 usage 行 `stream` 标志正确。
 
 ## AOCI 状态
 
