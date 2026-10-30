@@ -15,6 +15,8 @@ import {
   CardTitle,
 } from './components/ui/card';
 import { LiveMetricsProvider } from './hooks/useLiveMetrics';
+import { errorMessage } from './lib/error';
+import { toast } from 'sonner';
 import Login from './pages/Login';
 import Setup from './pages/Setup';
 
@@ -57,6 +59,10 @@ export default function App() {
     mutationFn: () => api.post('/api/auth/logout'),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['me'] });
+    },
+    // Without this a failed logout leaves the user signed in with no feedback.
+    onError: (error) => {
+      toast.error(errorMessage(error));
     },
   });
 

@@ -1,5 +1,3 @@
-use std::{fs::OpenOptions, io::Write};
-
 use axum::{extract::State, Json};
 use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
@@ -84,10 +82,8 @@ pub async fn setup(
     if username.is_empty() {
         return Err(AppError::BadRequest("username is required".to_string()));
     }
-    if input.password.chars().count() < 8 {
-        return Err(AppError::BadRequest(
-            "password must be at least 8 characters".to_string(),
-        ));
+    if let Some(violation) = security::password_violation(&input.password) {
+        return Err(AppError::BadRequest(format!("password {violation}")));
     }
 
     let password_hash = security::hash_password(&input.password).map_err(AppError::Internal)?;
@@ -111,6 +107,9 @@ pub async fn setup(
         .filter(|value| !value.is_empty())
     {
         models::setting::upsert(&state.db, "site_name", site_name).await?;
+        // /api/site is public and the setup page already fetched it, so the
+        // cached name must be dropped or the new one stays hidden for 30s.
+        state.cache.invalidate_site_name();
     }
 
     let (env_written, env_path, message) = match write_env_file(&state.config, username) {
@@ -180,20 +179,8 @@ fn absolute_path(path: &std::path::Path) -> std::path::PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-#[cfg(unix)]
+/// Write the generated `.env` with owner-only permissions, never overwriting
+/// an existing file.
 fn write_new_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(contents)
-}
-
-#[cfg(not(unix))]
-fn write_new_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(contents)
+    crate::security::write_private_file(path, contents)
 }

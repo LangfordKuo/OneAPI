@@ -12,6 +12,34 @@ pub use error::ProtocolError;
 pub use ir::*;
 pub use stream::{StreamDecoder, StreamEncodeOptions, StreamEncoder};
 
+/// Extract the `(error_type, message)` pair from an upstream error payload.
+///
+/// Every place that classifies an upstream error — the first stream frame,
+/// later stream frames, the passthrough observer and the non-stream body — has
+/// to agree, otherwise the same failure is reported with a different type or
+/// message depending on when it arrived.
+///
+/// `code_first` selects whether `code` or `type` wins when an object carries
+/// both; Responses `response.failed` payloads prefer `code`.
+pub(crate) fn error_fields(value: &Value, code_first: bool) -> (Option<String>, Option<String>) {
+    let error = value.get("error").unwrap_or(value);
+    let type_field = || error.get("type").and_then(Value::as_str);
+    let code_field = || value.get("code").and_then(Value::as_str);
+    let error_type = if code_first {
+        code_field().or_else(type_field)
+    } else {
+        type_field().or_else(code_field)
+    };
+    // `error` is sometimes a bare string rather than an object.
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
+        .or_else(|| value.get("message").and_then(Value::as_str));
+
+    (error_type.map(str::to_string), message.map(str::to_string))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Chat,
@@ -59,24 +87,6 @@ impl Protocol {
             Self::Anthropic => anthropic::encode_response(response),
         }
     }
-}
-
-pub fn convert_request(
-    from: Protocol,
-    to: Protocol,
-    value: &Value,
-) -> Result<Value, ProtocolError> {
-    let request = from.parse_request(value)?;
-    to.encode_request(&request)
-}
-
-pub fn convert_response(
-    from: Protocol,
-    to: Protocol,
-    value: &Value,
-) -> Result<Value, ProtocolError> {
-    let response = from.parse_response(value)?;
-    to.encode_response(&response)
 }
 
 pub(crate) fn get_str<'a>(obj: &'a Map<String, Value>, key: &str) -> Option<&'a str> {

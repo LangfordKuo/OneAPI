@@ -7,7 +7,7 @@ use std::{
 use anyhow::{bail, Context};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    SqlitePool,
+    Connection, SqliteConnection, SqlitePool,
 };
 
 use crate::config::Config;
@@ -70,7 +70,17 @@ fn newest_backup(data_dir: &Path) -> Option<PathBuf> {
 
 /// Take a consistent snapshot with `VACUUM INTO`. The file name is prefixed
 /// so automatic and pre-import backups can be told apart from exports.
-pub async fn snapshot(pool: &SqlitePool, data_dir: &Path, prefix: &str) -> anyhow::Result<PathBuf> {
+///
+/// `prune` controls whether the retained backup set is trimmed afterwards.
+/// Exports are downloaded and then deleted, so they must not prune: the freshly
+/// written export file would otherwise occupy one of the retained slots and
+/// evict a real backup every time an operator exports the database.
+pub async fn snapshot(
+    pool: &SqlitePool,
+    data_dir: &Path,
+    prefix: &str,
+    prune: bool,
+) -> anyhow::Result<PathBuf> {
     let dir = backup_dir(data_dir);
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let path = unique_path(&dir, prefix);
@@ -81,7 +91,9 @@ pub async fn snapshot(pool: &SqlitePool, data_dir: &Path, prefix: &str) -> anyho
         .execute(pool)
         .await
         .with_context(|| format!("failed to write database snapshot {}", path.display()))?;
-    prune(&dir, KEEP_BACKUPS);
+    if prune {
+        prune_backups(&dir, KEEP_BACKUPS);
+    }
     Ok(path)
 }
 
@@ -152,6 +164,17 @@ pub async fn prepare_import(config: &Config) -> anyhow::Result<Option<PathBuf>> 
     let dir = backup_dir(&config.data_dir);
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     if config.database_path.exists() {
+        // Fold pending WAL frames into the main file first: only that file is
+        // moved aside as the pre-import backup, and the sidecars are deleted
+        // right after. Without this checkpoint, committed rows still living in
+        // the WAL would disappear from both the backup and the new database.
+        if let Err(error) = checkpoint_wal(&config.database_path).await {
+            tracing::warn!(
+                error = %error,
+                database = %config.database_path.display(),
+                "failed to checkpoint WAL before replacing the database"
+            );
+        }
         let target = unique_path(&dir, "pre-import");
         fs::rename(&config.database_path, &target).with_context(|| {
             format!(
@@ -163,12 +186,30 @@ pub async fn prepare_import(config: &Config) -> anyhow::Result<Option<PathBuf>> 
     remove_sidecars(&config.database_path);
     fs::rename(&import, &config.database_path)
         .with_context(|| format!("failed to install {}", config.database_path.display()))?;
-    prune(&dir, KEEP_BACKUPS);
+    prune_backups(&dir, KEEP_BACKUPS);
     tracing::warn!(
         database = %config.database_path.display(),
         "restored database from an imported file"
     );
     Ok(Some(config.database_path.clone()))
+}
+
+/// Fold the WAL into the database file so that copying that single file is
+/// enough to keep every committed row. Runs before the pool is opened, so it
+/// uses a dedicated short-lived connection.
+async fn checkpoint_wal(database_path: &Path) -> anyhow::Result<()> {
+    let options = SqliteConnectOptions::new()
+        .filename(database_path)
+        .create_if_missing(false);
+    let mut connection = SqliteConnection::connect_with(&options)
+        .await
+        .with_context(|| format!("failed to open {}", database_path.display()))?;
+    let result = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&mut connection)
+        .await;
+    connection.close().await.ok();
+    result.with_context(|| format!("failed to checkpoint {}", database_path.display()))?;
+    Ok(())
 }
 
 fn wal_path(database_path: &Path) -> PathBuf {
@@ -202,7 +243,7 @@ fn unique_path(dir: &Path, prefix: &str) -> PathBuf {
     path
 }
 
-fn prune(dir: &Path, keep: usize) {
+fn prune_backups(dir: &Path, keep: usize) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };

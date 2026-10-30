@@ -1065,22 +1065,17 @@ async fn send_test(
     route: &ResolvedRoute,
     body: Value,
 ) -> anyhow::Result<(StatusCode, String)> {
-    let defaults = state.cache.defaults(&state.db).await?;
-    let client = upstream::build_client(channel, defaults.nonstream_timeout_ms)?;
-    let request = upstream::build_request(
-        &client,
-        &route.config,
-        &state.crypto,
-        &route.upstream_kind,
-        &body,
-        &HeaderMap::new(),
-    )?;
-    let response = request.send().await?;
-    let status = response.status();
-    let text = upstream::read_body_limited(response)
-        .await
-        .unwrap_or_default();
-    Ok((status, text))
+    send_probe(state, channel, |client| {
+        upstream::build_request(
+            client,
+            &route.config,
+            &state.crypto,
+            &route.upstream_kind,
+            &body,
+            &HeaderMap::new(),
+        )
+    })
+    .await
 }
 
 async fn send_models(
@@ -1088,15 +1083,28 @@ async fn send_models(
     channel: &Channel,
     route: &ResolvedRoute,
 ) -> anyhow::Result<(StatusCode, String)> {
+    send_probe(state, channel, |client| {
+        upstream::apply_auth(
+            client.get(upstream::models_url(&route.config)),
+            &route.config,
+            &state.crypto,
+            &route.upstream_kind,
+            &HeaderMap::new(),
+        )
+    })
+    .await
+}
+
+/// Send one probe request with the channel's timeout and report the status plus
+/// a bounded body. Shared by the model test and the model list fetch.
+async fn send_probe(
+    state: &AppState,
+    channel: &Channel,
+    build: impl FnOnce(&reqwest::Client) -> anyhow::Result<reqwest::RequestBuilder>,
+) -> anyhow::Result<(StatusCode, String)> {
     let defaults = state.cache.defaults(&state.db).await?;
     let client = upstream::build_client(channel, defaults.nonstream_timeout_ms)?;
-    let request = upstream::apply_auth(
-        client.get(upstream::models_url(&route.config)),
-        &route.config,
-        &state.crypto,
-        &route.upstream_kind,
-        &HeaderMap::new(),
-    )?;
+    let request = build(&client)?;
     let response = request.send().await?;
     let status = response.status();
     let text = upstream::read_body_limited(response)

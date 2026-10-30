@@ -21,7 +21,10 @@ import { EnabledBadge, ProtocolBadge } from '@/components/common/badges';
 import { ConfirmDialog } from '@/components/common/confirm-dialog';
 import { EmptyState } from '@/components/common/empty-state';
 import { Field } from '@/components/common/field';
-import { KeyValueEditor } from '@/components/common/key-value-editor';
+import {
+  KeyValueEditor,
+  type KeyValueRow,
+} from '@/components/common/key-value-editor';
 import { PageHeader } from '@/components/common/page-header';
 import { TagInput } from '@/components/common/tag-input';
 import { Badge } from '@/components/ui/badge';
@@ -61,11 +64,8 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { useLiveMetrics } from '@/hooks/useLiveMetrics';
+import { errorMessage } from '@/lib/error';
 
-interface MappingRow {
-  key: string;
-  value: string;
-}
 
 interface ProtocolDraft {
   mode: ChannelProtocolMode;
@@ -74,8 +74,8 @@ interface ProtocolDraft {
   apiKey: string;
   authHeader: 'bearer' | 'x-api-key';
   models: string[];
-  modelMapping: MappingRow[];
-  extraHeaders: MappingRow[];
+  modelMapping: KeyValueRow[];
+  extraHeaders: KeyValueRow[];
 }
 
 interface ChannelDraft {
@@ -148,14 +148,14 @@ function emptyDraft(): ChannelDraft {
   };
 }
 
-function rowsFromObject(value: Record<string, string>): MappingRow[] {
+function rowsFromObject(value: Record<string, string>): KeyValueRow[] {
   return Object.entries(value ?? {}).map(([key, itemValue]) => ({
     key,
     value: itemValue,
   }));
 }
 
-function objectFromRows(rows: MappingRow[]): Record<string, string> {
+function objectFromRows(rows: KeyValueRow[]): Record<string, string> {
   return Object.fromEntries(
     rows
       .filter((row) => row.key.trim())
@@ -216,10 +216,7 @@ function normalizeProtocols(
     }
     const target = protocol.target;
     const valid =
-      target !== '' &&
-      target !== kind &&
-      next[target].mode === 'native' &&
-      target !== undefined;
+      target !== '' && target !== kind && next[target].mode === 'native';
     if (!valid) {
       const fallback = nativeKinds.find((item) => item !== kind);
       next[kind] = { ...protocol, target: fallback ?? '' };
@@ -248,6 +245,11 @@ function draftFromChannel(channel: Channel): ChannelDraft {
 }
 
 function toNumber(value: string, fallback: number): number {
+  // `Number('')` is 0, which would turn a cleared weight field into weight 0 and
+  // get rejected by the backend, so an empty input means "use the default".
+  if (!value.trim()) {
+    return fallback;
+  }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
@@ -288,7 +290,7 @@ function existingKey(channel: Channel | null, kind: ChannelKind): string {
   }
   return (
     channel.protocols?.find((item) => item.protocol === kind)?.api_key_masked ??
-    (channel.kinds.includes(kind) ? channel.api_key_masked : '')
+    ((channel.kinds ?? []).includes(kind) ? channel.api_key_masked : '')
   );
 }
 
@@ -459,7 +461,7 @@ export default function Channels() {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
     },
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   const toggleMutation = useMutation({
@@ -470,7 +472,7 @@ export default function Channels() {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
     },
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   const deleteMutation = useMutation({
@@ -481,7 +483,7 @@ export default function Channels() {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
     },
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   function reportTest(result: ChannelTestResult) {
@@ -499,7 +501,7 @@ export default function Channels() {
       api.post<ChannelTestResult>(`/api/channels/${id}/test`),
     onSuccess: reportTest,
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   const probeTestMutation = useMutation({
@@ -507,7 +509,7 @@ export default function Channels() {
       api.post<ChannelTestResult>('/api/channels/test', payload),
     onSuccess: reportTest,
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   const probeFetchMutation = useMutation({
@@ -523,7 +525,7 @@ export default function Channels() {
       setModelDialogOpen(true);
     },
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   function showErrors(nextErrors: Record<string, string>) {
@@ -776,7 +778,10 @@ export default function Channels() {
                               variant="ghost"
                               size="sm"
                               onClick={() => testMutation.mutate(channel.id)}
-                              disabled={testMutation.isPending}
+                              disabled={
+                  testMutation.isPending &&
+                  testMutation.variables === channel.id
+                }
                             >
                               {testMutation.isPending &&
                               testMutation.variables === channel.id ? (

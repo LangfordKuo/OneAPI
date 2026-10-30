@@ -103,8 +103,6 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         reasoning,
         response_format,
         metadata_user_id: get_string(obj, "user"),
-        previous_response_id: get_string(obj, "previous_response_id"),
-        store: get_bool(obj, "store"),
         n: None,
         extras: Map::new(),
     })
@@ -417,23 +415,6 @@ pub fn encode_request(request: &UnifiedRequest) -> Result<Value, ProtocolError> 
     let mut input = Vec::new();
     for message in &request.messages {
         match message.role {
-            Role::System | Role::Developer => {
-                if message
-                    .content
-                    .iter()
-                    .any(|part| !matches!(part, ContentPart::Text { .. }))
-                {
-                    return Err(ProtocolError::unsupported(
-                        "non-text system content",
-                        "responses",
-                    ));
-                }
-                input.push(json!({
-                    "type": "message",
-                    "role": "developer",
-                    "content": [{"type": "input_text", "text": text_content(&message.content)}],
-                }));
-            }
             Role::User => {
                 input.push(json!({
                     "type": "message",
@@ -829,38 +810,6 @@ pub fn encode_response(response: &UnifiedResponse) -> Result<Value, ProtocolErro
         _ => None,
     };
 
-    let mut usage = Map::new();
-    let input_tokens = response.usage.input_tokens.map(|input| {
-        input
-            + response.usage.cached_tokens.unwrap_or(0)
-            + response.usage.cache_creation_tokens.unwrap_or(0)
-    });
-    if let Some(value) = input_tokens {
-        usage.insert("input_tokens".into(), json!(value));
-    }
-    if let Some(value) = response.usage.output_tokens {
-        usage.insert("output_tokens".into(), json!(value));
-    }
-    if let Some(value) = response.usage.total_tokens.or_else(|| {
-        input_tokens
-            .zip(response.usage.output_tokens)
-            .map(|(input, output)| input + output)
-    }) {
-        usage.insert("total_tokens".into(), json!(value));
-    }
-    if let Some(cached) = response.usage.cached_tokens {
-        usage.insert(
-            "input_tokens_details".into(),
-            json!({"cached_tokens": cached}),
-        );
-    }
-    if let Some(reasoning) = response.usage.reasoning_tokens {
-        usage.insert(
-            "output_tokens_details".into(),
-            json!({"reasoning_tokens": reasoning}),
-        );
-    }
-
     let mut obj = Map::new();
     obj.insert("id".into(), json!(response.id));
     obj.insert("object".into(), json!("response"));
@@ -868,7 +817,7 @@ pub fn encode_response(response: &UnifiedResponse) -> Result<Value, ProtocolErro
     obj.insert("status".into(), json!(status));
     obj.insert("model".into(), json!(response.model));
     obj.insert("output".into(), Value::Array(output));
-    obj.insert("usage".into(), Value::Object(usage));
+    obj.insert("usage".into(), response.usage.responses_json());
     if let Some(reason) = incomplete_reason {
         obj.insert("incomplete_details".into(), json!({"reason": reason}));
     }

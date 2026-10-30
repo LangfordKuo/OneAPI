@@ -147,38 +147,37 @@ pub struct LogDetailOutput {
     pub response_body: Option<String>,
 }
 
+/// Normalize a whitelisted log filter. `None` and `all` both mean "no filter".
+fn allowed(
+    value: Option<&str>,
+    field: &str,
+    whitelist: &[&str],
+) -> Result<Option<String>, AppError> {
+    match value {
+        None | Some("all") => Ok(None),
+        Some(value) if whitelist.contains(&value) => Ok(Some(value.to_string())),
+        Some(other) => Err(AppError::BadRequest(format!(
+            "unsupported {field} `{other}`"
+        ))),
+    }
+}
+
 pub async fn list(
     State(state): State<AppState>,
     _session: AdminSession,
     Query(query): Query<LogQuery>,
 ) -> Result<Json<LogListOutput>, AppError> {
-    let status = match query.status.as_deref() {
-        None | Some("all") => None,
-        Some(value @ ("success" | "error")) => Some(value.to_string()),
-        Some(other) => {
-            return Err(AppError::BadRequest(format!(
-                "unsupported status `{other}`"
-            )))
-        }
-    };
-    let protocol = match query.protocol.as_deref() {
-        None | Some("all") => None,
-        Some(value @ ("chat" | "responses" | "anthropic")) => Some(value.to_string()),
-        Some(other) => {
-            return Err(AppError::BadRequest(format!(
-                "unsupported protocol `{other}`"
-            )))
-        }
-    };
-    let source = match query.source.as_deref() {
-        None | Some("all") => None,
-        Some(value @ ("gateway" | "playground")) => Some(value.to_string()),
-        Some(other) => {
-            return Err(AppError::BadRequest(format!(
-                "unsupported source `{other}`"
-            )))
-        }
-    };
+    let status = allowed(query.status.as_deref(), "status", &["success", "error"])?;
+    let protocol = allowed(
+        query.protocol.as_deref(),
+        "protocol",
+        &["chat", "responses", "anthropic"],
+    )?;
+    let source = allowed(
+        query.source.as_deref(),
+        "source",
+        &["gateway", "playground"],
+    )?;
 
     let filters = LogFilters {
         since: query::since(query.range.as_deref())?,

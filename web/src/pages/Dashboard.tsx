@@ -64,6 +64,10 @@ import {
 
 const DashboardCharts = lazy(() => import('@/components/DashboardCharts'));
 
+/** Stable empties: a fresh `[]` literal would defeat the memo on the charts. */
+const NO_POINTS: never[] = [];
+const NO_ITEMS: never[] = [];
+
 const RANGE_OPTIONS = [
   { value: '1h', label: '最近 1 小时' },
   { value: '24h', label: '最近 24 小时' },
@@ -141,12 +145,19 @@ function InfoItem({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
+/** Uptime clock. It owns the per-second subscription so the rest of the page
+ * only re-renders when its queries change. */
+function Uptime({ base, fetchedAt }: { base: number; fetchedAt: number }) {
+  const now = useNowSeconds();
+  const seconds = base + Math.max(0, Math.floor((now - fetchedAt) / 1000));
+  return <>{formatUptime(seconds)}</>;
+}
+
 export default function Dashboard() {
   const [range, setRange] = useState('24h');
   const live = useLiveMetrics();
   const connected = useLiveConnected();
   const refetchInterval = useLivePollingInterval();
-  const now = useNowSeconds();
 
   // Everything below is driven by the live usage signal; the polling interval
   // is only the fallback used while the SSE stream is down.
@@ -200,13 +211,6 @@ export default function Dashboard() {
 
   const summary = summaryQuery.data;
   const errors = errorsQuery.data?.items ?? [];
-  // The shared second clock re-renders this page every second, so uptime is
-  // derived from the last successful fetch without reading the wall clock
-  // during render.
-  const uptimeSeconds = systemQuery.data
-    ? systemQuery.data.uptime_seconds +
-      Math.max(0, Math.floor((now - systemQuery.dataUpdatedAt) / 1000))
-    : null;
 
   return (
     <>
@@ -351,9 +355,9 @@ export default function Dashboard() {
           }
         >
           <DashboardCharts
-            points={timeseriesQuery.data?.points ?? []}
-            models={modelsQuery.data?.items ?? []}
-            channels={channelsQuery.data?.items ?? []}
+            points={timeseriesQuery.data?.points ?? NO_POINTS}
+            models={modelsQuery.data?.items ?? NO_ITEMS}
+            channels={channelsQuery.data?.items ?? NO_ITEMS}
           />
         </Suspense>
       </div>
@@ -434,7 +438,14 @@ export default function Dashboard() {
                 <InfoItem
                   label="运行时长"
                   value={
-                    uptimeSeconds != null ? formatUptime(uptimeSeconds) : '-'
+                    systemQuery.data ? (
+                      <Uptime
+                        base={systemQuery.data.uptime_seconds}
+                        fetchedAt={systemQuery.dataUpdatedAt}
+                      />
+                    ) : (
+                      '-'
+                    )
                   }
                 />
                 <InfoItem

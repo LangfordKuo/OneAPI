@@ -12,8 +12,6 @@ pub enum ProtocolError {
     },
     #[error("field `{field}` cannot be represented in {target}")]
     UnsupportedField { field: String, target: &'static str },
-    #[error("invalid field `{field}`: {message}")]
-    InvalidField { field: String, message: String },
 }
 
 impl ProtocolError {
@@ -35,13 +33,6 @@ impl ProtocolError {
         Self::UnsupportedField {
             field: field.into(),
             target,
-        }
-    }
-
-    pub fn invalid_field(field: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::InvalidField {
-            field: field.into(),
-            message: message.into(),
         }
     }
 }

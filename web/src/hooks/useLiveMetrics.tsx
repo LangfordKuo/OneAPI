@@ -48,7 +48,12 @@ const EMPTY: LiveState = {
 
 const RECONNECT_DELAY_MS = 3000;
 
-const LiveMetricsContext = createContext<LiveState>(EMPTY);
+// One context per slice: a single context object would give every consumer a
+// new value on every one-second sample, re-rendering pages (for example the log
+// table) that only care about the rare usage/connection signals.
+const SnapshotContext = createContext<LiveMetricsSnapshot>(EMPTY.snapshot);
+const UsageSeqContext = createContext<number>(EMPTY.usageSeq);
+const ConnectedContext = createContext<boolean>(EMPTY.connected);
 
 /**
  * Subscribes once to /api/metrics/stream. Unlike EventSource this can observe
@@ -144,23 +149,27 @@ function useLiveStream(): LiveState {
 export function LiveMetricsProvider({ children }: { children: ReactNode }) {
   const state = useLiveStream();
   return (
-    <LiveMetricsContext.Provider value={state}>
-      {children}
-    </LiveMetricsContext.Provider>
+    <UsageSeqContext.Provider value={state.usageSeq}>
+      <ConnectedContext.Provider value={state.connected}>
+        <SnapshotContext.Provider value={state.snapshot}>
+          {children}
+        </SnapshotContext.Provider>
+      </ConnectedContext.Provider>
+    </UsageSeqContext.Provider>
   );
 }
 
 /** Live throughput snapshot, sampled once per second. */
 export function useLiveMetrics(): LiveMetricsSnapshot {
-  return useContext(LiveMetricsContext).snapshot;
+  return useContext(SnapshotContext);
 }
 
 /** Monotonic counter that changes when new usage logs are persisted. */
 export function useLiveUsageSignal(): number {
-  return useContext(LiveMetricsContext).usageSeq;
+  return useContext(UsageSeqContext);
 }
 
 /** Whether the live SSE stream is currently connected. */
 export function useLiveConnected(): boolean {
-  return useContext(LiveMetricsContext).connected;
+  return useContext(ConnectedContext);
 }

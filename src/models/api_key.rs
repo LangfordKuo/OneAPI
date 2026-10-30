@@ -215,16 +215,21 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> sqlx::Result<bool> {
     Ok(result.rows_affected() > 0)
 }
 
-/// Parse a JSON array of channel IDs from the admin request, keeping only
-/// positive values and removing duplicates.
-pub fn parse_channel_ids(value: &[i64]) -> Vec<i64> {
+/// Normalize a JSON array of channel IDs from the admin request, removing
+/// duplicates. Non-positive IDs are rejected rather than dropped: an empty list
+/// means "no channel restriction", so silently filtering a bad ID would widen
+/// the key's scope instead of reporting the mistake.
+pub fn parse_channel_ids(value: &[i64]) -> Result<Vec<i64>, i64> {
     let mut ids = Vec::new();
     for id in value {
-        if *id > 0 && !ids.contains(id) {
+        if *id <= 0 {
+            return Err(*id);
+        }
+        if !ids.contains(id) {
             ids.push(*id);
         }
     }
-    ids
+    Ok(ids)
 }
 
 /// Normalize model restrictions: trim, deduplicate, drop empties. `*` is kept

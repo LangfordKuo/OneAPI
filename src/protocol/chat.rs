@@ -188,8 +188,6 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         reasoning,
         response_format,
         metadata_user_id: get_string(obj, "user"),
-        previous_response_id: None,
-        store: None,
         n: get_u32(obj, "n"),
         extras,
     })
@@ -390,22 +388,6 @@ pub fn encode_request(request: &UnifiedRequest) -> Result<Value, ProtocolError> 
 
     for message in &request.messages {
         match message.role {
-            Role::System | Role::Developer => {
-                if message
-                    .content
-                    .iter()
-                    .any(|part| !matches!(part, ContentPart::Text { .. }))
-                {
-                    return Err(ProtocolError::unsupported(
-                        "non-text system content",
-                        "chat",
-                    ));
-                }
-                messages.push(json!({
-                    "role": "system",
-                    "content": text_content(&message.content),
-                }));
-            }
             Role::User => {
                 messages.push(json!({
                     "role": "user",
@@ -749,40 +731,6 @@ pub fn encode_response(response: &UnifiedResponse) -> Result<Value, ProtocolErro
         })
         .unwrap_or("stop");
 
-    let mut usage = Map::new();
-    let prompt_tokens = response.usage.input_tokens.map(|input| {
-        input
-            + response.usage.cached_tokens.unwrap_or(0)
-            + response.usage.cache_creation_tokens.unwrap_or(0)
-    });
-    if let Some(value) = prompt_tokens {
-        usage.insert("prompt_tokens".into(), json!(value));
-    }
-    if let Some(value) = response.usage.output_tokens {
-        usage.insert("completion_tokens".into(), json!(value));
-    }
-    if let Some(value) = response.usage.total_tokens.or_else(|| {
-        prompt_tokens
-            .zip(response.usage.output_tokens)
-            .map(|(input, output)| input + output)
-    }) {
-        usage.insert("total_tokens".into(), json!(value));
-    }
-    if response.usage.cached_tokens.is_some() || response.usage.reasoning_tokens.is_some() {
-        if let Some(cached) = response.usage.cached_tokens {
-            usage.insert(
-                "prompt_tokens_details".into(),
-                json!({"cached_tokens": cached}),
-            );
-        }
-        if let Some(reasoning) = response.usage.reasoning_tokens {
-            usage.insert(
-                "completion_tokens_details".into(),
-                json!({"reasoning_tokens": reasoning}),
-            );
-        }
-    }
-
     Ok(json!({
         "id": response.id,
         "object": "chat.completion",
@@ -793,6 +741,6 @@ pub fn encode_response(response: &UnifiedResponse) -> Result<Value, ProtocolErro
             "message": Value::Object(message),
             "finish_reason": finish_reason,
         }],
-        "usage": Value::Object(usage),
+        "usage": response.usage.chat_json(),
     }))
 }

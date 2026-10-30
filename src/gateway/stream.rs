@@ -16,7 +16,7 @@ use tokio::time::timeout;
 use crate::{
     models,
     protocol::{
-        anthropic, chat,
+        self, anthropic, chat,
         sse::{SseFrame, SseParser},
         Protocol, StreamDecoder, StreamEncodeOptions, StreamEncoder, StreamEvent, Usage,
     },
@@ -34,15 +34,16 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> +
 pub struct StreamFailure {
     pub error_type: String,
     pub message: String,
-    pub retryable: bool,
 }
 
 impl StreamFailure {
-    fn retryable(error_type: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Every failure raised before the first frame is written is retryable: no
+    /// byte has reached the client yet, so a different channel may still serve
+    /// the request.
+    fn new(error_type: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error_type: error_type.into(),
             message: message.into(),
-            retryable: true,
         }
     }
 }
@@ -101,7 +102,7 @@ pub async fn start(job: StreamJob) -> Result<Response, StreamFailure> {
     match ready_rx.await {
         Ok(Ok(())) => Ok(sse_response(rx)),
         Ok(Err(failure)) => Err(failure),
-        Err(_) => Err(StreamFailure::retryable(
+        Err(_) => Err(StreamFailure::new(
             "upstream_stream_closed",
             "stream task exited before starting",
         )),
@@ -194,7 +195,7 @@ async fn run(
         }
         let now = Instant::now();
         if now >= job.commit_deadline {
-            let _ = ready.send(Err(StreamFailure::retryable(
+            let _ = ready.send(Err(StreamFailure::new(
                 "upstream_stream_timeout",
                 "upstream did not send the first event before the commit deadline",
             )));
@@ -208,7 +209,7 @@ async fn run(
             Ok(Some(Ok(chunk))) => {
                 pending.extend(parser.push(&chunk));
                 if parser.buffered_len() > MAX_SSE_BUFFER {
-                    let _ = ready.send(Err(StreamFailure::retryable(
+                    let _ = ready.send(Err(StreamFailure::new(
                         "upstream_stream_too_large",
                         "upstream stream frame exceeded the size limit",
                     )));
@@ -216,7 +217,7 @@ async fn run(
                 }
             }
             Ok(Some(Err(error))) => {
-                let _ = ready.send(Err(StreamFailure::retryable(
+                let _ = ready.send(Err(StreamFailure::new(
                     "upstream_unreachable",
                     error.to_string(),
                 )));
@@ -228,7 +229,7 @@ async fn run(
             }
             Err(_) => {
                 let committed_late = Instant::now() >= job.commit_deadline;
-                let _ = ready.send(Err(StreamFailure::retryable(
+                let _ = ready.send(Err(StreamFailure::new(
                     "upstream_stream_timeout",
                     if committed_late {
                         "upstream did not send the first event before the commit deadline"
@@ -242,7 +243,7 @@ async fn run(
     };
 
     let Some(first) = first else {
-        let _ = ready.send(Err(StreamFailure::retryable(
+        let _ = ready.send(Err(StreamFailure::new(
             "upstream_stream_empty",
             "upstream returned an empty event stream",
         )));
@@ -251,7 +252,7 @@ async fn run(
 
     if let Some((error_type, message)) = frame_error(job.upstream, &first) {
         let (error_type, message) = bounded_error(error_type, message);
-        let _ = ready.send(Err(StreamFailure::retryable(error_type, message)));
+        let _ = ready.send(Err(StreamFailure::new(error_type, message)));
         return;
     }
 
@@ -663,11 +664,11 @@ async fn process_frame(
             }
         }
 
-        if inbound == Protocol::Chat && !client_wants_usage && is_chat_usage_only(&frame) {
+        if inbound == Protocol::Chat && !client_wants_usage && observation.usage_only {
             return FrameOutcome::Ok;
         }
 
-        let has_content = first_token_at.is_none() && frame_has_content(upstream, &frame);
+        let has_content = first_token_at.is_none() && observation.has_content;
         let bytes = if inbound == Protocol::Responses {
             let rewritten = rewrite_responses_frame(&frame, response_id, Some(store_response));
             rewritten.unwrap_or_else(|| Bytes::from(frame.raw))
@@ -803,6 +804,12 @@ struct PassthroughObservation {
     /// Responses `response.completed` / `response.incomplete`, i.e. the frame
     /// that must be held back until persistence decides `store`.
     terminal: bool,
+    /// First frame that actually carries generated content, used to time the
+    /// first token.
+    has_content: bool,
+    /// Chat usage-only frame: no choices, only a usage block. Dropped when the
+    /// client did not ask for usage.
+    usage_only: bool,
 }
 
 /// Observe a frame on the same-protocol passthrough path.
@@ -812,7 +819,19 @@ struct PassthroughObservation {
 /// decoder is reserved for terminal Responses frames (storage needs the final
 /// object) and for cross-protocol conversion.
 fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObservation {
-    let mut observation = PassthroughObservation::default();
+    // Anthropic and Responses name their delta events, so first-token timing
+    // needs no JSON. Chat decides below, from the delta body.
+    let mut observation = PassthroughObservation {
+        has_content: match protocol {
+            Protocol::Anthropic => frame.event.as_deref() == Some("content_block_delta"),
+            Protocol::Responses => frame
+                .event
+                .as_deref()
+                .is_some_and(|event| event.ends_with(".delta")),
+            Protocol::Chat => false,
+        },
+        ..PassthroughObservation::default()
+    };
 
     if protocol == Protocol::Chat && frame.data.trim() == "[DONE]" {
         return observation;
@@ -836,12 +855,15 @@ fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObser
                 observation.usage = Some(chat::parse_usage(usage));
             }
 
-            if let Some(delta) = value
-                .get("choices")
-                .and_then(Value::as_array)
+            let choices = value.get("choices").and_then(Value::as_array);
+            observation.usage_only =
+                choices.is_some_and(|choices| choices.is_empty()) && value.get("usage").is_some();
+
+            if let Some(delta) = choices
                 .and_then(|choices| choices.first())
                 .and_then(|choice| choice.get("delta"))
             {
+                observation.has_content = delta_has_content(delta);
                 observation.chars += char_count(delta.get("content"));
                 observation.chars += char_count(
                     delta
@@ -925,23 +947,13 @@ fn char_count(value: Option<&Value>) -> u64 {
         .unwrap_or(0)
 }
 
-/// Mirror `error_event`'s field extraction so passthrough and converted
-/// streams report the same error type/message.
+/// Same field extraction as the converted-stream decoder, so passthrough and
+/// converted streams report the same error type/message.
 fn observed_error(value: &Value) -> (String, String) {
-    let error = value.get("error").unwrap_or(value);
+    let (error_type, message) = protocol::error_fields(value, false);
     (
-        error
-            .get("type")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("code").and_then(Value::as_str))
-            .unwrap_or("upstream_error")
-            .to_string(),
-        error
-            .get("message")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("message").and_then(Value::as_str))
-            .unwrap_or("upstream stream error")
-            .to_string(),
+        error_type.unwrap_or_else(|| "upstream_error".to_string()),
+        message.unwrap_or_else(|| "upstream stream error".to_string()),
     )
 }
 
@@ -969,133 +981,49 @@ fn frame_error(protocol: Protocol, frame: &SseFrame) -> Option<(String, String)>
         .or_else(|| value.get("type").and_then(Value::as_str))
         .unwrap_or("");
 
-    match protocol {
-        Protocol::Chat => {
-            let error = value.get("error")?;
-            Some((
-                error
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("upstream_error")
-                    .to_string(),
-                error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("upstream stream error")
-                    .to_string(),
-            ))
-        }
-        Protocol::Anthropic => {
-            if name != "error" {
-                return None;
-            }
-            let error = value.get("error").unwrap_or(&value);
-            Some((
-                error
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("upstream_error")
-                    .to_string(),
-                error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("upstream stream error")
-                    .to_string(),
-            ))
-        }
-        Protocol::Responses => {
-            if name == "error" {
-                return Some((
-                    value
-                        .get("code")
-                        .and_then(Value::as_str)
-                        .unwrap_or("upstream_error")
-                        .to_string(),
-                    value
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("upstream stream error")
-                        .to_string(),
-                ));
-            }
-            if name == "response.failed" {
-                let error = value
-                    .get("response")
-                    .and_then(|response| response.get("error"))?;
-                return Some((
-                    error
-                        .get("code")
-                        .and_then(Value::as_str)
-                        .or_else(|| error.get("type").and_then(Value::as_str))
-                        .unwrap_or("upstream_error")
-                        .to_string(),
-                    error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("upstream stream error")
-                        .to_string(),
-                ));
-            }
-            None
-        }
-    }
-}
-
-fn frame_has_content(protocol: Protocol, frame: &SseFrame) -> bool {
-    match protocol {
-        Protocol::Anthropic => frame.event.as_deref() == Some("content_block_delta"),
-        Protocol::Responses => frame
-            .event
-            .as_deref()
-            .is_some_and(|event| event.ends_with(".delta")),
-        Protocol::Chat => {
-            // Cheap pre-check so most frames are never parsed a second time.
-            if !frame.data.contains("\"delta\"") {
-                return false;
-            }
-            let Ok(value) = serde_json::from_str::<Value>(&frame.data) else {
-                return false;
-            };
-            value
-                .get("choices")
-                .and_then(Value::as_array)
-                .and_then(|choices| choices.first())
-                .and_then(|choice| choice.get("delta"))
-                .is_some_and(|delta| {
-                    delta
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .is_some_and(|text| !text.is_empty())
-                        || delta
-                            .get("reasoning_content")
-                            .and_then(Value::as_str)
-                            .is_some_and(|text| !text.is_empty())
-                        || delta
-                            .get("reasoning")
-                            .and_then(Value::as_str)
-                            .is_some_and(|text| !text.is_empty())
-                        || delta
-                            .get("tool_calls")
-                            .and_then(Value::as_array)
-                            .is_some_and(|calls| !calls.is_empty())
-                })
-        }
-    }
-}
-
-fn is_chat_usage_only(frame: &SseFrame) -> bool {
-    // Only the final usage chunk carries this field; skip parsing the rest.
-    if !frame.data.contains("\"usage\"") {
-        return false;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(&frame.data) else {
-        return false;
+    let fields = |value: &Value, code_first: bool| {
+        let (error_type, message) = protocol::error_fields(value, code_first);
+        (
+            error_type.unwrap_or_else(|| "upstream_error".to_string()),
+            message.unwrap_or_else(|| "upstream stream error".to_string()),
+        )
     };
-    value
-        .get("choices")
-        .and_then(Value::as_array)
-        .is_some_and(|choices| choices.is_empty())
-        && value.get("usage").is_some()
+
+    match protocol {
+        // Chat has no dedicated error event: an `error` key is the signal.
+        Protocol::Chat => {
+            value.get("error")?;
+            Some(fields(&value, false))
+        }
+        Protocol::Anthropic if name == "error" => Some(fields(&value, false)),
+        Protocol::Responses if name == "error" => Some(fields(&value, false)),
+        Protocol::Responses if name == "response.failed" => {
+            let error = value.get("response")?.get("error")?;
+            // These payloads carry the machine-readable `code`; prefer it.
+            Some(fields(error, true))
+        }
+        Protocol::Anthropic | Protocol::Responses => None,
+    }
+}
+
+/// Whether a Chat `delta` object carries generated content.
+fn delta_has_content(delta: &Value) -> bool {
+    delta
+        .get("content")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.is_empty())
+        || delta
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+        || delta
+            .get("reasoning")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+        || delta
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty())
 }
 
 /// Rewrite the `id`/`store` fields of a Responses frame. Returns `None` when

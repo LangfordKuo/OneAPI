@@ -62,7 +62,7 @@ pub async fn connect(config: &Config) -> anyhow::Result<SqlitePool> {
             .iter()
             .any(|migration| !applied.contains(&migration.version));
         if pending {
-            let path = backup::snapshot(&pool, &config.data_dir, "oneapi")
+            let path = backup::snapshot(&pool, &config.data_dir, "oneapi", true)
                 .await
                 .context("failed to back up the database before migrations")?;
             tracing::info!(

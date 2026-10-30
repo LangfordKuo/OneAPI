@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { RotateCcw, Search } from 'lucide-react';
 import { useMemo, useState, type ReactNode } from 'react';
 import { api } from '@/api/client';
@@ -19,6 +19,7 @@ import { CodeBlock } from '@/components/common/code-block';
 import { EmptyState } from '@/components/common/empty-state';
 import { PageHeader } from '@/components/common/page-header';
 import { Pagination } from '@/components/common/pagination';
+import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -151,6 +152,9 @@ export default function Logs() {
   const [knownTotal, setKnownTotal] = useState(0);
   const connected = useLiveConnected();
   const refetchInterval = useLivePollingInterval();
+  // Typing must not fire one /api/logs request per keystroke.
+  const modelTerm = useDebouncedValue(filters.model, 300);
+  const requestIdTerm = useDebouncedValue(filters.requestId, 300);
 
   // New usage rows arrive as soon as the writer commits them; the minimum
   // interval keeps a busy gateway from triggering one list query per request.
@@ -176,9 +180,8 @@ export default function Logs() {
     params.set('range', filters.range);
     params.set('limit', String(pageSize));
     params.set('offset', String((page - 1) * pageSize));
-    if (filters.model.trim()) params.set('model', filters.model.trim());
-    if (filters.requestId.trim())
-      params.set('request_id', filters.requestId.trim());
+    if (modelTerm.trim()) params.set('model', modelTerm.trim());
+    if (requestIdTerm.trim()) params.set('request_id', requestIdTerm.trim());
     if (filters.channelId != null)
       params.set('channel_id', String(filters.channelId));
     if (filters.apiKeyId != null)
@@ -189,12 +192,14 @@ export default function Logs() {
     if (filters.stream !== 'all') params.set('stream', filters.stream);
     params.set('include_total', page === 1 ? 'true' : 'false');
     return `/api/logs?${params.toString()}`;
-  }, [filters, page, pageSize]);
+  }, [filters, modelTerm, requestIdTerm, page, pageSize]);
 
   const logsQuery = useQuery({
     queryKey: ['logs', path],
     queryFn: () => api.get<LogList>(path),
     refetchInterval,
+    // Keep the current rows visible while a new filter value loads.
+    placeholderData: keepPreviousData,
   });
 
   const total = logsQuery.data?.total;

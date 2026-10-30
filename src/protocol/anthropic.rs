@@ -3,8 +3,8 @@ use uuid::Uuid;
 
 use super::{
     budget_for_effort, get_bool, get_f64, get_str, get_string, get_u32, get_u64, text_content,
-    ContentPart, ImageSource, ProtocolError, ReasoningConfig, ResponseFormat, Role, StopReason,
-    ToolChoice, ToolDef, UnifiedMessage, UnifiedRequest, UnifiedResponse, Usage,
+    ContentPart, ImageSource, ProtocolError, ReasoningConfig, ResponseFormat, Role, ToolChoice,
+    ToolDef, UnifiedMessage, UnifiedRequest, UnifiedResponse, Usage,
 };
 
 pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
@@ -166,8 +166,6 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         reasoning,
         response_format,
         metadata_user_id,
-        previous_response_id: None,
-        store: None,
         n: None,
         extras: Map::new(),
     })
@@ -473,10 +471,6 @@ pub fn encode_request(request: &UnifiedRequest) -> Result<Value, ProtocolError> 
 }
 
 fn encode_message(message: &UnifiedMessage) -> Result<(String, Vec<Value>), ProtocolError> {
-    if matches!(message.role, Role::System | Role::Developer) {
-        return Ok(("system".to_string(), Vec::new()));
-    }
-
     let role = if message.role == Role::Assistant {
         "assistant"
     } else {
@@ -493,16 +487,7 @@ fn encode_message(message: &UnifiedMessage) -> Result<(String, Vec<Value>), Prot
                 blocks.push(image_block(source));
             }
             ContentPart::ToolUse { id, name, input } => {
-                blocks.push(json!({
-                    "type": "tool_use",
-                    "id": if id.is_empty() {
-                        format!("toolu_{}", Uuid::new_v4())
-                    } else {
-                        id.clone()
-                    },
-                    "name": name,
-                    "input": input,
-                }));
+                blocks.push(tool_use_block(id, name, input));
             }
             ContentPart::ToolResult {
                 tool_use_id,
@@ -534,6 +519,21 @@ fn encode_message(message: &UnifiedMessage) -> Result<(String, Vec<Value>), Prot
     }
 
     Ok((role.to_string(), blocks))
+}
+
+/// Anthropic `tool_use` content block. Ids are assigned here when the IR does
+/// not carry one, so both encoders emit the same shape.
+fn tool_use_block(id: &str, name: &str, input: &Value) -> Value {
+    json!({
+        "type": "tool_use",
+        "id": if id.is_empty() {
+            format!("toolu_{}", Uuid::new_v4())
+        } else {
+            id.to_string()
+        },
+        "name": name,
+        "input": input,
+    })
 }
 
 fn image_block(source: &ImageSource) -> Value {
@@ -641,14 +641,7 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
         }
     }
 
-    let stop_reason = get_str(obj, "stop_reason").map(|reason| match reason {
-        "end_turn" => StopReason::EndTurn,
-        "max_tokens" => StopReason::MaxTokens,
-        "tool_use" => StopReason::ToolUse,
-        "stop_sequence" => StopReason::StopSequence,
-        "refusal" => StopReason::ContentFilter,
-        _ => StopReason::Other,
-    });
+    let stop_reason = get_str(obj, "stop_reason").map(super::stream::parse_anthropic_stop);
 
     let usage = obj
         .get("usage")
@@ -711,32 +704,13 @@ pub fn encode_response(response: &UnifiedResponse) -> Result<Value, ProtocolErro
                 content.push(json!({"type": "redacted_thinking", "data": data}));
             }
             ContentPart::ToolUse { id, name, input } => {
-                content.push(json!({
-                    "type": "tool_use",
-                    "id": if id.is_empty() {
-                        format!("toolu_{}", Uuid::new_v4())
-                    } else {
-                        id.clone()
-                    },
-                    "name": name,
-                    "input": input,
-                }));
+                content.push(tool_use_block(id, name, input));
             }
             _ => {}
         }
     }
 
-    let stop_reason = response
-        .stop_reason
-        .map(|reason| match reason {
-            StopReason::EndTurn => "end_turn",
-            StopReason::MaxTokens => "max_tokens",
-            StopReason::ToolUse => "tool_use",
-            StopReason::ContentFilter => "refusal",
-            StopReason::StopSequence => "stop_sequence",
-            StopReason::Other => "end_turn",
-        })
-        .unwrap_or("end_turn");
+    let stop_reason = super::stream::anthropic_stop_reason(response.stop_reason);
 
     let mut usage = Map::new();
     if let Some(input) = response.usage.input_tokens {

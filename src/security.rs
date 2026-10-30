@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    io::Write,
+    io::{self, Write},
     path::Path,
     sync::{Arc, Mutex, OnceLock},
 };
@@ -169,30 +169,57 @@ impl Crypto {
 }
 
 fn write_secret_file(path: &Path, key: &[u8]) -> Result<()> {
+    write_private_file(path, key)?;
+    Ok(())
+}
+
+/// Minimum length accepted for every password in this service.
+pub const MIN_PASSWORD_CHARS: usize = 8;
+
+/// Return a policy violation description, or `None` when the password is
+/// acceptable. Kept in one place so the setup wizard, password change, env
+/// bootstrap and reset-password command cannot drift apart.
+pub fn password_violation(password: &str) -> Option<String> {
+    (password.chars().count() < MIN_PASSWORD_CHARS)
+        .then(|| format!("must be at least {MIN_PASSWORD_CHARS} characters"))
+}
+
+/// Create a file with owner-only permissions and write `contents` into it.
+/// Fails if the file already exists, so callers never overwrite an existing
+/// secret (master key, generated `.env`).
+pub fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     #[cfg(unix)]
-    {
+    let mut file = {
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(path)?;
-        file.write_all(key)?;
-    }
+            .open(path)?
+    };
 
     #[cfg(not(unix))]
-    {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        file.write_all(key)?;
-    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
 
+    file.write_all(contents)
+}
+
+/// Restrict an existing file to owner-only permissions (no-op off Unix).
+pub fn restrict_permissions(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

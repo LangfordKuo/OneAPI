@@ -7,7 +7,7 @@ use std::{
 
 use axum::{
     extract::{ConnectInfo, FromRequestParts, State},
-    http::{header, request::Parts, StatusCode},
+    http::{request::Parts, StatusCode},
     Json,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -134,19 +134,14 @@ impl FromRequestParts<AppState> for AdminSession {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let token = parts
-            .headers
-            .get(header::COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|cookies| {
-                cookies.split(';').find_map(|cookie| {
-                    let (name, value) = cookie.trim().split_once('=')?;
-                    (name == SESSION_COOKIE).then_some(value)
-                })
-            })
+        // Parse the header the same way the login/logout handlers write it,
+        // instead of hand-rolling a second cookie parser.
+        let token = CookieJar::from_headers(&parts.headers)
+            .get(SESSION_COOKIE)
+            .map(|cookie| cookie.value().to_string())
             .ok_or(AppError::Unauthorized)?;
 
-        let token_hash = security::sha256_hex(token);
+        let token_hash = security::sha256_hex(&token);
         let admin = models::session::find_admin(&state.db, &token_hash, models::now_ms())
             .await?
             .ok_or(AppError::Unauthorized)?;
@@ -268,10 +263,8 @@ pub async fn change_password(
     }
     state.login_limiter.record_success(&limiter_key);
 
-    if input.new_password.chars().count() < 8 {
-        return Err(AppError::BadRequest(
-            "new password must be at least 8 characters".to_string(),
-        ));
+    if let Some(violation) = security::password_violation(&input.new_password) {
+        return Err(AppError::BadRequest(format!("new password {violation}")));
     }
 
     let password_hash = security::hash_password(&input.new_password).map_err(AppError::Internal)?;
@@ -322,10 +315,8 @@ pub async fn bootstrap(pool: &SqlitePool) -> anyhow::Result<()> {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "admin".to_string());
 
-    if password.chars().count() < 8 {
-        return Err(anyhow::anyhow!(
-            "ONEAPI_ADMIN_PASSWORD must be at least 8 characters"
-        ));
+    if let Some(violation) = security::password_violation(&password) {
+        return Err(anyhow::anyhow!("ONEAPI_ADMIN_PASSWORD {violation}"));
     }
 
     let password_hash = security::hash_password(&password)?;

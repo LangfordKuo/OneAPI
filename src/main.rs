@@ -10,7 +10,6 @@ mod gateway;
 mod maintenance;
 mod metrics;
 mod models;
-#[allow(dead_code)]
 mod protocol;
 mod recovery;
 mod security;
@@ -66,15 +65,13 @@ fn main() -> anyhow::Result<()> {
         .context("failed to build the async runtime")?
         .block_on(async move {
             match command {
-                Command::Serve => serve(Some(data_dir)).await,
-                Command::ResetPassword { password } => {
-                    reset_password(Some(data_dir), password).await
-                }
+                Command::Serve => serve(data_dir).await,
+                Command::ResetPassword { password } => reset_password(data_dir, password).await,
             }
         })
 }
 
-async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
     let config = Config::from_env(data_dir)?;
     telemetry::init(&config.log_level)?;
 
@@ -212,7 +209,7 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received");
 }
 
-async fn reset_password(data_dir: Option<PathBuf>, password: Option<String>) -> anyhow::Result<()> {
+async fn reset_password(data_dir: PathBuf, password: Option<String>) -> anyhow::Result<()> {
     let config = Config::from_env(data_dir)?;
     let db = db::connect(&config).await?;
 
@@ -232,8 +229,8 @@ async fn reset_password(data_dir: Option<PathBuf>, password: Option<String>) -> 
         }
     };
 
-    if password.chars().count() < 8 {
-        anyhow::bail!("password must be at least 8 characters");
+    if let Some(violation) = security::password_violation(&password) {
+        anyhow::bail!("password {violation}");
     }
 
     let password_hash = security::hash_password(&password)?;

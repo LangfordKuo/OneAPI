@@ -8,7 +8,17 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * Perform a request and hand back the raw `Response`, applying the same
+ * credentials, error-message extraction and 401 redirect as `request`.
+ *
+ * Needed by callers that must not parse the body as JSON: SSE streams and
+ * database backups.
+ */
+export async function requestRaw(
+  path: string,
+  init?: RequestInit,
+): Promise<Response> {
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
@@ -39,6 +49,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(response.status, message);
   }
+
+  return response;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await requestRaw(path, init);
 
   if (response.status === 204) {
     return undefined as T;
