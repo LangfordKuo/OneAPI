@@ -1,7 +1,7 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-30
-- 当前阶段：v0.1.16 已发布（冗余与写法审查：缺陷修复、重复消除与热路径优化）
+- 当前阶段：v0.1.16 已发布；备份改为仅服务器端（未发布）
 - 当前分支：`main`
 - 最近发布：`v0.1.16`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
@@ -550,6 +550,18 @@
 前端性能：日志筛选文本输入改为 300ms 防抖（此前每敲一个字符发一次 `/api/logs`）；实时指标拆成 snapshot/usageSeq/connected 三个 context（日志页不再每秒重渲染）；仪表盘每秒时钟下沉到 `<Uptime>` 叶子组件并对 `DashboardCharts` 做 `memo`；两张占比环形图合并为 `BreakdownPie`。
 
 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`（协议层重新纳入 dead_code 检查后仍为 0 警告）、`npx tsc --noEmit`、`npm run lint`（0 error，6 条既有 react-refresh 警告）、`npm run build` 通过。真实二进制 + mock 上游端到端：安装向导写入的站点名立即可见；同协议透传、Chat→Anthropic、Chat→Responses 的非流式与流式输出与改动前一致；故障转移终止路径返回 502 且 usage 行 `stream` 标志正确。
+
+## 备份仅服务器端（2026-10-31，未发布）
+
+背景：导出接口让任何持有管理员会话的人都能把整库下载走；导入接口允许上传构造过的 SQLite 文件，并在重启时替换线上库。两条都是不必要的远程攻击面。
+
+- 删除 `GET /api/backup/export` 与 `POST /api/backup/import` 及其处理函数、`MAX_IMPORT_BYTES` 与导入并发保护。
+- 新增 `POST /api/backup/snapshot`：在 `data/backups` 生成一致快照，只返回文件名、大小与提示，不返回内容；新增 `GET /api/backup/list`：只读列出保留的备份（名称、大小、修改时间）。
+- 移除启动时换入 `<db>.import` 的隐式入口，同步删除 `validate` / `prepare_import` / `checkpoint_wal` / sidecar 处理与 `import_path`；仓库内不再存在任何从外部文件加载数据库的代码路径。
+- 快照文件创建后收紧为 0600，避免同机其他用户读取整库副本。
+- 设置页「数据库备份」改为“立即备份到服务器”+ 备份列表；恢复方式改为停机替换数据库文件并清理 `-wal`/`-shm`，界面与文档同步说明。
+
+验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`npx tsc --noEmit`、`npm run lint`、`npm run build` 通过；端到端确认 `/api/backup/export` 与 `/api/backup/import` 返回 404，`/api/backup/snapshot` 生成文件且不返回内容，`/api/backup/list` 能列出该文件，快照权限为 0600。
 
 ## AOCI 状态
 

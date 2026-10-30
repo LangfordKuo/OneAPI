@@ -220,3 +220,21 @@ export interface UpdateApplyResult {
   asset_name: string;
   message: string;
 }
+
+export interface BackupFile {
+  name: string;
+  bytes: number;
+  /** Unix milliseconds. */
+  modified_at: number;
+}
+
+export interface BackupListOutput {
+  items: BackupFile[];
+}
+
+export interface BackupSnapshotResult {
+  ok: boolean;
+  file: string;
+  bytes: number;
+  message: string;
+}
