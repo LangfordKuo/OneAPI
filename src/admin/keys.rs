@@ -114,7 +114,11 @@ async fn validate_restrictions(
     token_limit: Option<i64>,
     daily_token_limit: Option<i64>,
 ) -> Result<(Vec<i64>, Vec<String>, Option<i64>, Option<i64>), AppError> {
-    let channel_ids = api_key::parse_channel_ids(&channel_ids);
+    let channel_ids = api_key::parse_channel_ids(&channel_ids).map_err(|invalid| {
+        AppError::BadRequest(format!(
+            "channel id {invalid} is invalid; use positive channel IDs or an empty list"
+        ))
+    })?;
     if !channel_ids.is_empty() {
         let existing: HashSet<i64> = models::channel::list(&state.db)
             .await?
