@@ -102,6 +102,64 @@ function PieLegend({
   );
 }
 
+interface PieItem {
+  name: string;
+  value: number;
+}
+
+/** One donut card for a model/channel breakdown. */
+function BreakdownPie({
+  title,
+  empty,
+  items,
+}: {
+  title: string;
+  empty: string;
+  items: PieItem[];
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {items.length === 0 ? (
+          <EmptyState title={empty} />
+        ) : (
+          <>
+            <ChartContainer
+              config={pieConfig}
+              className="mx-auto aspect-auto h-[240px] w-full"
+            >
+              <PieChart>
+                <ChartTooltip content={<ChartTooltipContent hideLabel />} />
+                <Pie
+                  data={items}
+                  dataKey="value"
+                  nameKey="name"
+                  innerRadius={58}
+                  outerRadius={90}
+                  paddingAngle={2}
+                  strokeWidth={0}
+                  isAnimationActive={false}
+                >
+                  {items.map((entry, index) => (
+                    <Cell
+                      key={entry.name}
+                      fill={PALETTE[index % PALETTE.length]}
+                    />
+                  ))}
+                </Pie>
+              </PieChart>
+            </ChartContainer>
+            <PieLegend items={items} />
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function DashboardCharts({ points, models, channels }: Props) {
   const requestData = points.map((point) => ({
     time: timeLabel(point.timestamp),
@@ -237,85 +295,12 @@ function DashboardCharts({ points, models, channels }: Props) {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>模型占比</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {modelData.length === 0 ? (
-            <EmptyState title="当前范围没有模型数据" />
-          ) : (
-            <>
-              <ChartContainer
-                config={pieConfig}
-                className="mx-auto aspect-auto h-[240px] w-full"
-              >
-                <PieChart>
-                  <ChartTooltip content={<ChartTooltipContent hideLabel />} />
-                  <Pie
-                    data={modelData}
-                    dataKey="value"
-                    nameKey="name"
-                    innerRadius={58}
-                    outerRadius={90}
-                    paddingAngle={2}
-                    strokeWidth={0}
-                    isAnimationActive={false}
-                  >
-                    {modelData.map((entry, index) => (
-                      <Cell
-                        key={entry.name}
-                        fill={PALETTE[index % PALETTE.length]}
-                      />
-                    ))}
-                  </Pie>
-                </PieChart>
-              </ChartContainer>
-              <PieLegend items={modelData} />
-            </>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>渠道占比</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {channelData.length === 0 ? (
-            <EmptyState title="当前范围没有渠道数据" />
-          ) : (
-            <>
-              <ChartContainer
-                config={pieConfig}
-                className="mx-auto aspect-auto h-[240px] w-full"
-              >
-                <PieChart>
-                  <ChartTooltip content={<ChartTooltipContent hideLabel />} />
-                  <Pie
-                    data={channelData}
-                    dataKey="value"
-                    nameKey="name"
-                    innerRadius={58}
-                    outerRadius={90}
-                    paddingAngle={2}
-                    strokeWidth={0}
-                    isAnimationActive={false}
-                  >
-                    {channelData.map((entry, index) => (
-                      <Cell
-                        key={entry.name}
-                        fill={PALETTE[index % PALETTE.length]}
-                      />
-                    ))}
-                  </Pie>
-                </PieChart>
-              </ChartContainer>
-              <PieLegend items={channelData} />
-            </>
-          )}
-        </CardContent>
-      </Card>
+      <BreakdownPie title="模型占比" empty="当前范围没有模型数据" items={modelData} />
+      <BreakdownPie
+        title="渠道占比"
+        empty="当前范围没有渠道数据"
+        items={channelData}
+      />
     </div>
   );
 }
