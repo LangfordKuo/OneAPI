@@ -4,13 +4,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{bail, Context};
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    Connection, SqliteConnection, SqlitePool,
-};
-
-use crate::config::Config;
+use anyhow::Context;
+use sqlx::SqlitePool;
 
 pub const BACKUP_DIR: &str = "backups";
 /// Keep the newest backups so a long-lived personal deployment cannot fill
@@ -19,12 +14,6 @@ pub const KEEP_BACKUPS: usize = 5;
 
 pub fn backup_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(BACKUP_DIR)
-}
-
-pub fn import_path(database_path: &Path) -> PathBuf {
-    let mut value = database_path.as_os_str().to_os_string();
-    value.push(".import");
-    PathBuf::from(value)
 }
 
 /// (main database bytes, WAL bytes).
@@ -49,6 +38,48 @@ pub fn last_backup_at(data_dir: &Path) -> Option<i64> {
     })
 }
 
+/// A retained backup file on the server.
+#[derive(Debug, serde::Serialize)]
+pub struct BackupFile {
+    pub name: String,
+    pub bytes: u64,
+    /// Modification time in Unix milliseconds.
+    pub modified_at: i64,
+}
+
+/// Retained backups, newest first. Unreadable entries are skipped rather than
+/// failing the whole listing.
+pub fn list(data_dir: &Path) -> Vec<BackupFile> {
+    let Ok(entries) = fs::read_dir(backup_dir(data_dir)) else {
+        return Vec::new();
+    };
+
+    let mut files: Vec<BackupFile> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "db")
+        })
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            Some(BackupFile {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                bytes: metadata.len(),
+                modified_at: metadata
+                    .modified()
+                    .ok()?
+                    .duration_since(UNIX_EPOCH)
+                    .ok()?
+                    .as_millis() as i64,
+            })
+        })
+        .collect();
+    files.sort_by_key(|file| std::cmp::Reverse(file.modified_at));
+    files
+}
+
 fn newest_backup(data_dir: &Path) -> Option<PathBuf> {
     let mut entries: Vec<(SystemTime, PathBuf)> = fs::read_dir(backup_dir(data_dir))
         .ok()?
@@ -68,13 +99,14 @@ fn newest_backup(data_dir: &Path) -> Option<PathBuf> {
     entries.into_iter().next().map(|(_, path)| path)
 }
 
-/// Take a consistent snapshot with `VACUUM INTO`. The file name is prefixed
-/// so automatic and pre-import backups can be told apart from exports.
+/// Take a consistent snapshot with `VACUUM INTO`. The file name is prefixed so
+/// automatic, manual and startup backups can be told apart.
+///
+/// Snapshots are written to `<data_dir>/backups` and never leave the server;
+/// there is no download endpoint, so a compromised admin session cannot pull the
+/// database out through the API.
 ///
 /// `prune` controls whether the retained backup set is trimmed afterwards.
-/// Exports are downloaded and then deleted, so they must not prune: the freshly
-/// written export file would otherwise occupy one of the retained slots and
-/// evict a real backup every time an operator exports the database.
 pub async fn snapshot(
     pool: &SqlitePool,
     data_dir: &Path,
@@ -91,145 +123,21 @@ pub async fn snapshot(
         .execute(pool)
         .await
         .with_context(|| format!("failed to write database snapshot {}", path.display()))?;
+    // A snapshot is a full copy of the database; keep it unreadable to other
+    // local users instead of relying on the process umask.
+    if let Err(error) = crate::security::restrict_permissions(&path) {
+        tracing::warn!(file = %path.display(), %error, "failed to restrict backup permissions");
+    }
     if prune {
         prune_backups(&dir, KEEP_BACKUPS);
     }
     Ok(path)
 }
 
-/// Validate a candidate database before swapping it into place.
-pub async fn validate(path: &Path) -> anyhow::Result<()> {
-    if !path.is_file() {
-        bail!("database file does not exist");
-    }
-    if fs::metadata(path)?.len() == 0 {
-        bail!("database file is empty");
-    }
-    let options = SqliteConnectOptions::new()
-        .filename(path)
-        .read_only(true)
-        .create_if_missing(false);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await
-        .context("failed to open the database file")?;
-
-    let rows: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
-        .fetch_all(&pool)
-        .await
-        .context("failed to run quick_check")?;
-    if !rows.iter().all(|row| row == "ok") {
-        bail!("database integrity check failed");
-    }
-
-    let admin_tables: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'admin'",
-    )
-    .fetch_one(&pool)
-    .await
-    .context("failed to inspect the database schema")?;
-    if admin_tables == 0 {
-        bail!("file is not a OneAPI database");
-    }
-    Ok(())
-}
-
-/// Swap `<database>.import` into place before the pool is opened. Returns the
-/// path that was restored, or `None` when there is nothing to do.
-pub async fn prepare_import(config: &Config) -> anyhow::Result<Option<PathBuf>> {
-    let import = import_path(&config.database_path);
-    if !import.exists() {
-        return Ok(None);
-    }
-    if config.database_url.is_some() {
-        let _ = fs::remove_file(&import);
-        tracing::warn!("imported database ignored because ONEAPI_DATABASE_URL is set");
-        return Ok(None);
-    }
-
-    if let Err(error) = validate(&import).await {
-        let dir = backup_dir(&config.data_dir);
-        fs::create_dir_all(&dir).ok();
-        let target = unique_path(&dir, "invalid-import");
-        let _ = fs::rename(&import, &target);
-        tracing::error!(
-            error = %error,
-            file = %target.display(),
-            "imported database is invalid; keeping the current database"
-        );
-        return Ok(None);
-    }
-
-    let dir = backup_dir(&config.data_dir);
-    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    if config.database_path.exists() {
-        // Fold pending WAL frames into the main file first: only that file is
-        // moved aside as the pre-import backup, and the sidecars are deleted
-        // right after. Without this checkpoint, committed rows still living in
-        // the WAL would disappear from both the backup and the new database.
-        if let Err(error) = checkpoint_wal(&config.database_path).await {
-            tracing::warn!(
-                error = %error,
-                database = %config.database_path.display(),
-                "failed to checkpoint WAL before replacing the database"
-            );
-        }
-        let target = unique_path(&dir, "pre-import");
-        fs::rename(&config.database_path, &target).with_context(|| {
-            format!(
-                "failed to move the current database to {}",
-                target.display()
-            )
-        })?;
-    }
-    remove_sidecars(&config.database_path);
-    fs::rename(&import, &config.database_path)
-        .with_context(|| format!("failed to install {}", config.database_path.display()))?;
-    prune_backups(&dir, KEEP_BACKUPS);
-    tracing::warn!(
-        database = %config.database_path.display(),
-        "restored database from an imported file"
-    );
-    Ok(Some(config.database_path.clone()))
-}
-
-/// Fold the WAL into the database file so that copying that single file is
-/// enough to keep every committed row. Runs before the pool is opened, so it
-/// uses a dedicated short-lived connection.
-async fn checkpoint_wal(database_path: &Path) -> anyhow::Result<()> {
-    let options = SqliteConnectOptions::new()
-        .filename(database_path)
-        .create_if_missing(false);
-    let mut connection = SqliteConnection::connect_with(&options)
-        .await
-        .with_context(|| format!("failed to open {}", database_path.display()))?;
-    let result = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-        .execute(&mut connection)
-        .await;
-    connection.close().await.ok();
-    result.with_context(|| format!("failed to checkpoint {}", database_path.display()))?;
-    Ok(())
-}
-
 fn wal_path(database_path: &Path) -> PathBuf {
     let mut value = database_path.as_os_str().to_os_string();
     value.push("-wal");
     PathBuf::from(value)
-}
-
-fn sidecar_paths(database_path: &Path) -> [PathBuf; 2] {
-    let mut wal = database_path.as_os_str().to_os_string();
-    wal.push("-wal");
-    let mut shm = database_path.as_os_str().to_os_string();
-    shm.push("-shm");
-    [PathBuf::from(wal), PathBuf::from(shm)]
-}
-
-fn remove_sidecars(database_path: &Path) {
-    for path in sidecar_paths(database_path) {
-        let _ = fs::remove_file(path);
-    }
 }
 
 fn unique_path(dir: &Path, prefix: &str) -> PathBuf {

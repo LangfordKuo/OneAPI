@@ -9,12 +9,6 @@ use sqlx::{
 use crate::{backup, config::Config};
 
 pub async fn connect(config: &Config) -> anyhow::Result<SqlitePool> {
-    // A restored file is swapped in before the pool opens so the import never
-    // races with live connections or leaves an old WAL behind.
-    if let Some(path) = backup::prepare_import(config).await? {
-        tracing::info!(database = %path.display(), "using restored database");
-    }
-
     let mut options = match &config.database_url {
         Some(url) => SqliteConnectOptions::from_str(url)
             .context("ONEAPI_DATABASE_URL is not a valid SQLite URL")?,
