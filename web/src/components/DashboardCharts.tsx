@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import dayjs from 'dayjs';
 import {
   Area,
@@ -101,7 +102,7 @@ function PieLegend({
   );
 }
 
-export default function DashboardCharts({ points, models, channels }: Props) {
+function DashboardCharts({ points, models, channels }: Props) {
   const requestData = points.map((point) => ({
     time: timeLabel(point.timestamp),
     requests: point.requests,
@@ -318,3 +319,7 @@ export default function DashboardCharts({ points, models, channels }: Props) {
     </div>
   );
 }
+
+// Memoized: the dashboard re-renders every second for the live rate cards, but
+// the chart inputs only change when a query returns new data.
+export default memo(DashboardCharts);
