@@ -248,6 +248,11 @@ function draftFromChannel(channel: Channel): ChannelDraft {
 }
 
 function toNumber(value: string, fallback: number): number {
+  // `Number('')` is 0, which would turn a cleared weight field into weight 0 and
+  // get rejected by the backend, so an empty input means "use the default".
+  if (!value.trim()) {
+    return fallback;
+  }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
