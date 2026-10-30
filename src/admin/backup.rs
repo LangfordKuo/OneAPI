@@ -1,4 +1,8 @@
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use axum::{
     body::{Body, Bytes},
@@ -9,13 +13,45 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use crate::{backup, error::AppError, state::AppState};
+use crate::{backup, error::AppError, models, state::AppState};
 
 use super::auth::AdminSession;
 
 /// A personal database can grow large, but keep the upload bounded so a
 /// mistaken request cannot exhaust memory.
 pub const MAX_IMPORT_BYTES: usize = 256 * 1024 * 1024;
+
+/// Only one import may be staged and scheduled at a time: they share the same
+/// `<db>.import` target and the same restart trigger, so a second concurrent
+/// request would validate and rename a file the first one is still writing.
+static IMPORT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+struct ImportGuard;
+
+impl ImportGuard {
+    fn acquire() -> Option<Self> {
+        IMPORT_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for ImportGuard {
+    fn drop(&mut self) {
+        IMPORT_IN_PROGRESS.store(false, Ordering::Release);
+    }
+}
+
+/// Unique staging path so a retried or overlapping upload can never observe a
+/// partially written file from another request.
+fn staging_path(database_path: &Path) -> PathBuf {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut value = database_path.as_os_str().to_os_string();
+    value.push(format!(".tmp-{}-{sequence}", models::now_ms()));
+    PathBuf::from(value)
+}
 
 pub async fn export(
     State(state): State<AppState>,
@@ -67,10 +103,12 @@ pub async fn import(
         ));
     }
 
+    let import_guard = ImportGuard::acquire().ok_or_else(|| {
+        AppError::BadRequest("another database import is already in progress".to_string())
+    })?;
+
     let target = backup::import_path(&state.config.database_path);
-    let mut staging = target.as_os_str().to_os_string();
-    staging.push(".tmp");
-    let staging = std::path::PathBuf::from(staging);
+    let staging = staging_path(&state.config.database_path);
 
     tokio::fs::write(&staging, &body)
         .await
@@ -124,6 +162,11 @@ pub async fn import(
             .store(true, std::sync::atomic::Ordering::SeqCst);
         updates.shutdown.notify_one();
     });
+
+    // A restart is already scheduled: another import started during the 500ms
+    // delay would overwrite `.import` and be the file that actually gets
+    // swapped in, so keep refusing until the process replaces itself.
+    std::mem::forget(import_guard);
 
     Ok(Json(json!({
         "ok": true,
