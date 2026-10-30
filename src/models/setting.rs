@@ -49,14 +49,16 @@ impl GatewayDefaults {
             default_max_tokens: u32::try_from(integer("default_max_tokens", 4096))
                 .unwrap_or(4096)
                 .max(1),
+            // Saturating arithmetic: a stored value outside the validated range
+            // (hand-edited row, older build) must not overflow.
             nonstream_timeout_ms: u64::try_from(integer("nonstream_timeout_seconds", 600))
                 .unwrap_or(600)
                 .max(1)
-                * 1000,
+                .saturating_mul(1000),
             stream_idle_timeout_ms: u64::try_from(integer("stream_idle_timeout_seconds", 120))
                 .unwrap_or(120)
                 .max(1)
-                * 1000,
+                .saturating_mul(1000),
             store_request_bodies: boolean("store_request_bodies", false),
         })
     }

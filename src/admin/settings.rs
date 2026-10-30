@@ -7,6 +7,22 @@ use crate::{client_ip, error::AppError, models::setting, state::AppState};
 
 use super::auth::AdminSession;
 
+/// Upper bounds for numeric gateway settings. Without them a typo such as
+/// `9999999999999999` is accepted, and `GatewayDefaults::load` later either
+/// overflows when converting seconds to milliseconds or silently falls back to
+/// the built-in default.
+const MAX_DEFAULT_MAX_TOKENS: i64 = 1_000_000;
+const MAX_TIMEOUT_SECONDS: i64 = 86_400;
+
+fn check_range(field: &str, value: i64, min: i64, max: i64) -> Result<(), AppError> {
+    if !(min..=max).contains(&value) {
+        return Err(AppError::BadRequest(format!(
+            "{field} must be between {min} and {max}"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 pub struct SettingsOutput {
     pub site_name: String,
@@ -126,29 +142,17 @@ pub async fn update(
     }
 
     if let Some(value) = input.default_max_tokens {
-        if value <= 0 {
-            return Err(AppError::BadRequest(
-                "default_max_tokens must be positive".to_string(),
-            ));
-        }
+        check_range("default_max_tokens", value, 1, MAX_DEFAULT_MAX_TOKENS)?;
         updates.push(("default_max_tokens", value.to_string()));
     }
 
     if let Some(value) = input.nonstream_timeout_seconds {
-        if value <= 0 {
-            return Err(AppError::BadRequest(
-                "nonstream_timeout_seconds must be positive".to_string(),
-            ));
-        }
+        check_range("nonstream_timeout_seconds", value, 1, MAX_TIMEOUT_SECONDS)?;
         updates.push(("nonstream_timeout_seconds", value.to_string()));
     }
 
     if let Some(value) = input.stream_idle_timeout_seconds {
-        if value <= 0 {
-            return Err(AppError::BadRequest(
-                "stream_idle_timeout_seconds must be positive".to_string(),
-            ));
-        }
+        check_range("stream_idle_timeout_seconds", value, 1, MAX_TIMEOUT_SECONDS)?;
         updates.push(("stream_idle_timeout_seconds", value.to_string()));
     }
 
