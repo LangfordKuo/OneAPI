@@ -1151,40 +1151,14 @@ async fn proxy_stream(
                 return Ok(response);
             }
             Err(failure) => {
-                let retryable = failure.retryable;
                 state
                     .mark_channel_failure(channel.id, &failure.message)
                     .await;
                 last_error_type = failure.error_type.clone();
                 last_message = failure.message.clone();
 
-                if retryable {
-                    continue;
-                }
-
-                record_stream_attempt(
-                    state,
-                    request_id,
-                    &identity,
-                    model,
-                    Some(channel.id),
-                    Some(&candidate.upstream_model),
-                    inbound,
-                    upstream,
-                    StatusCode::BAD_GATEWAY,
-                    attempts,
-                    started,
-                    Some((failure.error_type.as_str(), failure.message.as_str())),
-                    Usage::default(),
-                )
-                .await;
-
-                return Ok(error::client_error(
-                    inbound,
-                    StatusCode::BAD_GATEWAY,
-                    failure.message,
-                    &failure.error_type,
-                ));
+                // Nothing was written downstream yet, so try the next channel.
+                continue;
             }
         }
     }

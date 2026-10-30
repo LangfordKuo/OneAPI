@@ -34,15 +34,16 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> +
 pub struct StreamFailure {
     pub error_type: String,
     pub message: String,
-    pub retryable: bool,
 }
 
 impl StreamFailure {
-    fn retryable(error_type: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Every failure raised before the first frame is written is retryable: no
+    /// byte has reached the client yet, so a different channel may still serve
+    /// the request.
+    fn new(error_type: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error_type: error_type.into(),
             message: message.into(),
-            retryable: true,
         }
     }
 }
@@ -101,7 +102,7 @@ pub async fn start(job: StreamJob) -> Result<Response, StreamFailure> {
     match ready_rx.await {
         Ok(Ok(())) => Ok(sse_response(rx)),
         Ok(Err(failure)) => Err(failure),
-        Err(_) => Err(StreamFailure::retryable(
+        Err(_) => Err(StreamFailure::new(
             "upstream_stream_closed",
             "stream task exited before starting",
         )),
@@ -194,7 +195,7 @@ async fn run(
         }
         let now = Instant::now();
         if now >= job.commit_deadline {
-            let _ = ready.send(Err(StreamFailure::retryable(
+            let _ = ready.send(Err(StreamFailure::new(
                 "upstream_stream_timeout",
                 "upstream did not send the first event before the commit deadline",
             )));
@@ -208,7 +209,7 @@ async fn run(
             Ok(Some(Ok(chunk))) => {
                 pending.extend(parser.push(&chunk));
                 if parser.buffered_len() > MAX_SSE_BUFFER {
-                    let _ = ready.send(Err(StreamFailure::retryable(
+                    let _ = ready.send(Err(StreamFailure::new(
                         "upstream_stream_too_large",
                         "upstream stream frame exceeded the size limit",
                     )));
@@ -216,7 +217,7 @@ async fn run(
                 }
             }
             Ok(Some(Err(error))) => {
-                let _ = ready.send(Err(StreamFailure::retryable(
+                let _ = ready.send(Err(StreamFailure::new(
                     "upstream_unreachable",
                     error.to_string(),
                 )));
@@ -228,7 +229,7 @@ async fn run(
             }
             Err(_) => {
                 let committed_late = Instant::now() >= job.commit_deadline;
-                let _ = ready.send(Err(StreamFailure::retryable(
+                let _ = ready.send(Err(StreamFailure::new(
                     "upstream_stream_timeout",
                     if committed_late {
                         "upstream did not send the first event before the commit deadline"
@@ -242,7 +243,7 @@ async fn run(
     };
 
     let Some(first) = first else {
-        let _ = ready.send(Err(StreamFailure::retryable(
+        let _ = ready.send(Err(StreamFailure::new(
             "upstream_stream_empty",
             "upstream returned an empty event stream",
         )));
@@ -251,7 +252,7 @@ async fn run(
 
     if let Some((error_type, message)) = frame_error(job.upstream, &first) {
         let (error_type, message) = bounded_error(error_type, message);
-        let _ = ready.send(Err(StreamFailure::retryable(error_type, message)));
+        let _ = ready.send(Err(StreamFailure::new(error_type, message)));
         return;
     }
 
