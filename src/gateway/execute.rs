@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crate::{
     error::AppError,
     models::{self, api_key::ApiKey, channel::Channel, now_ms},
-    protocol::{Protocol, UnifiedRequest, Usage},
+    protocol::{self, Protocol, UnifiedRequest, Usage},
     state::{AppState, ProbeAttempt},
     upstream,
 };
@@ -1416,20 +1416,13 @@ pub(crate) fn penalizes_channel(status: StatusCode) -> bool {
 
 pub(crate) fn upstream_error_info(value: Option<&Value>, body: &str) -> (String, String) {
     if let Some(value) = value {
-        let error = value.get("error");
-        let message = error
-            .and_then(|error| error.get("message"))
-            .and_then(Value::as_str)
-            .or_else(|| error.and_then(Value::as_str))
-            .or_else(|| value.get("message").and_then(Value::as_str))
-            .unwrap_or("upstream request failed");
-        let error_type = error
-            .and_then(|error| error.get("type"))
-            .and_then(Value::as_str)
-            .unwrap_or("upstream_error");
+        let (error_type, message) = protocol::error_fields(value, false);
         return (
-            error::truncate_message(error_type, 128),
-            error::truncate_message(message, 1024),
+            error::truncate_message(error_type.as_deref().unwrap_or("upstream_error"), 128),
+            error::truncate_message(
+                message.as_deref().unwrap_or("upstream request failed"),
+                1024,
+            ),
         );
     }
 

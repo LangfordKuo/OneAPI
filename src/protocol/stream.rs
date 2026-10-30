@@ -39,20 +39,10 @@ fn string_of(value: &Value, key: &str) -> Option<String> {
 }
 
 fn error_event(value: &Value) -> StreamEvent {
-    let error = value.get("error").unwrap_or(value);
+    let (error_type, message) = super::error_fields(value, false);
     StreamEvent::Error {
-        error_type: error
-            .get("type")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("code").and_then(Value::as_str))
-            .unwrap_or("upstream_error")
-            .to_string(),
-        message: error
-            .get("message")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("message").and_then(Value::as_str))
-            .unwrap_or("upstream stream error")
-            .to_string(),
+        error_type: error_type.unwrap_or_else(|| "upstream_error".to_string()),
+        message: message.unwrap_or_else(|| "upstream stream error".to_string()),
     }
 }
 

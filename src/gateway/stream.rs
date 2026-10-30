@@ -16,7 +16,7 @@ use tokio::time::timeout;
 use crate::{
     models,
     protocol::{
-        anthropic, chat,
+        self, anthropic, chat,
         sse::{SseFrame, SseParser},
         Protocol, StreamDecoder, StreamEncodeOptions, StreamEncoder, StreamEvent, Usage,
     },
@@ -926,23 +926,13 @@ fn char_count(value: Option<&Value>) -> u64 {
         .unwrap_or(0)
 }
 
-/// Mirror `error_event`'s field extraction so passthrough and converted
-/// streams report the same error type/message.
+/// Same field extraction as the converted-stream decoder, so passthrough and
+/// converted streams report the same error type/message.
 fn observed_error(value: &Value) -> (String, String) {
-    let error = value.get("error").unwrap_or(value);
+    let (error_type, message) = protocol::error_fields(value, false);
     (
-        error
-            .get("type")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("code").and_then(Value::as_str))
-            .unwrap_or("upstream_error")
-            .to_string(),
-        error
-            .get("message")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("message").and_then(Value::as_str))
-            .unwrap_or("upstream stream error")
-            .to_string(),
+        error_type.unwrap_or_else(|| "upstream_error".to_string()),
+        message.unwrap_or_else(|| "upstream stream error".to_string()),
     )
 }
 
@@ -970,75 +960,28 @@ fn frame_error(protocol: Protocol, frame: &SseFrame) -> Option<(String, String)>
         .or_else(|| value.get("type").and_then(Value::as_str))
         .unwrap_or("");
 
+    let fields = |value: &Value, code_first: bool| {
+        let (error_type, message) = protocol::error_fields(value, code_first);
+        (
+            error_type.unwrap_or_else(|| "upstream_error".to_string()),
+            message.unwrap_or_else(|| "upstream stream error".to_string()),
+        )
+    };
+
     match protocol {
+        // Chat has no dedicated error event: an `error` key is the signal.
         Protocol::Chat => {
-            let error = value.get("error")?;
-            Some((
-                error
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("upstream_error")
-                    .to_string(),
-                error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("upstream stream error")
-                    .to_string(),
-            ))
+            value.get("error")?;
+            Some(fields(&value, false))
         }
-        Protocol::Anthropic => {
-            if name != "error" {
-                return None;
-            }
-            let error = value.get("error").unwrap_or(&value);
-            Some((
-                error
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("upstream_error")
-                    .to_string(),
-                error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("upstream stream error")
-                    .to_string(),
-            ))
+        Protocol::Anthropic if name == "error" => Some(fields(&value, false)),
+        Protocol::Responses if name == "error" => Some(fields(&value, false)),
+        Protocol::Responses if name == "response.failed" => {
+            let error = value.get("response")?.get("error")?;
+            // These payloads carry the machine-readable `code`; prefer it.
+            Some(fields(error, true))
         }
-        Protocol::Responses => {
-            if name == "error" {
-                return Some((
-                    value
-                        .get("code")
-                        .and_then(Value::as_str)
-                        .unwrap_or("upstream_error")
-                        .to_string(),
-                    value
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("upstream stream error")
-                        .to_string(),
-                ));
-            }
-            if name == "response.failed" {
-                let error = value
-                    .get("response")
-                    .and_then(|response| response.get("error"))?;
-                return Some((
-                    error
-                        .get("code")
-                        .and_then(Value::as_str)
-                        .or_else(|| error.get("type").and_then(Value::as_str))
-                        .unwrap_or("upstream_error")
-                        .to_string(),
-                    error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("upstream stream error")
-                        .to_string(),
-                ));
-            }
-            None
-        }
+        Protocol::Anthropic | Protocol::Responses => None,
     }
 }
 
