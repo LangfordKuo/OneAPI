@@ -664,11 +664,11 @@ async fn process_frame(
             }
         }
 
-        if inbound == Protocol::Chat && !client_wants_usage && is_chat_usage_only(&frame) {
+        if inbound == Protocol::Chat && !client_wants_usage && observation.usage_only {
             return FrameOutcome::Ok;
         }
 
-        let has_content = first_token_at.is_none() && frame_has_content(upstream, &frame);
+        let has_content = first_token_at.is_none() && observation.has_content;
         let bytes = if inbound == Protocol::Responses {
             let rewritten = rewrite_responses_frame(&frame, response_id, Some(store_response));
             rewritten.unwrap_or_else(|| Bytes::from(frame.raw))
@@ -804,6 +804,12 @@ struct PassthroughObservation {
     /// Responses `response.completed` / `response.incomplete`, i.e. the frame
     /// that must be held back until persistence decides `store`.
     terminal: bool,
+    /// First frame that actually carries generated content, used to time the
+    /// first token.
+    has_content: bool,
+    /// Chat usage-only frame: no choices, only a usage block. Dropped when the
+    /// client did not ask for usage.
+    usage_only: bool,
 }
 
 /// Observe a frame on the same-protocol passthrough path.
@@ -813,7 +819,19 @@ struct PassthroughObservation {
 /// decoder is reserved for terminal Responses frames (storage needs the final
 /// object) and for cross-protocol conversion.
 fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObservation {
-    let mut observation = PassthroughObservation::default();
+    // Anthropic and Responses name their delta events, so first-token timing
+    // needs no JSON. Chat decides below, from the delta body.
+    let mut observation = PassthroughObservation {
+        has_content: match protocol {
+            Protocol::Anthropic => frame.event.as_deref() == Some("content_block_delta"),
+            Protocol::Responses => frame
+                .event
+                .as_deref()
+                .is_some_and(|event| event.ends_with(".delta")),
+            Protocol::Chat => false,
+        },
+        ..PassthroughObservation::default()
+    };
 
     if protocol == Protocol::Chat && frame.data.trim() == "[DONE]" {
         return observation;
@@ -837,12 +855,15 @@ fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObser
                 observation.usage = Some(chat::parse_usage(usage));
             }
 
-            if let Some(delta) = value
-                .get("choices")
-                .and_then(Value::as_array)
+            let choices = value.get("choices").and_then(Value::as_array);
+            observation.usage_only =
+                choices.is_some_and(|choices| choices.is_empty()) && value.get("usage").is_some();
+
+            if let Some(delta) = choices
                 .and_then(|choices| choices.first())
                 .and_then(|choice| choice.get("delta"))
             {
+                observation.has_content = delta_has_content(delta);
                 observation.chars += char_count(delta.get("content"));
                 observation.chars += char_count(
                     delta
@@ -985,61 +1006,24 @@ fn frame_error(protocol: Protocol, frame: &SseFrame) -> Option<(String, String)>
     }
 }
 
-fn frame_has_content(protocol: Protocol, frame: &SseFrame) -> bool {
-    match protocol {
-        Protocol::Anthropic => frame.event.as_deref() == Some("content_block_delta"),
-        Protocol::Responses => frame
-            .event
-            .as_deref()
-            .is_some_and(|event| event.ends_with(".delta")),
-        Protocol::Chat => {
-            // Cheap pre-check so most frames are never parsed a second time.
-            if !frame.data.contains("\"delta\"") {
-                return false;
-            }
-            let Ok(value) = serde_json::from_str::<Value>(&frame.data) else {
-                return false;
-            };
-            value
-                .get("choices")
-                .and_then(Value::as_array)
-                .and_then(|choices| choices.first())
-                .and_then(|choice| choice.get("delta"))
-                .is_some_and(|delta| {
-                    delta
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .is_some_and(|text| !text.is_empty())
-                        || delta
-                            .get("reasoning_content")
-                            .and_then(Value::as_str)
-                            .is_some_and(|text| !text.is_empty())
-                        || delta
-                            .get("reasoning")
-                            .and_then(Value::as_str)
-                            .is_some_and(|text| !text.is_empty())
-                        || delta
-                            .get("tool_calls")
-                            .and_then(Value::as_array)
-                            .is_some_and(|calls| !calls.is_empty())
-                })
-        }
-    }
-}
-
-fn is_chat_usage_only(frame: &SseFrame) -> bool {
-    // Only the final usage chunk carries this field; skip parsing the rest.
-    if !frame.data.contains("\"usage\"") {
-        return false;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(&frame.data) else {
-        return false;
-    };
-    value
-        .get("choices")
-        .and_then(Value::as_array)
-        .is_some_and(|choices| choices.is_empty())
-        && value.get("usage").is_some()
+/// Whether a Chat `delta` object carries generated content.
+fn delta_has_content(delta: &Value) -> bool {
+    delta
+        .get("content")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.is_empty())
+        || delta
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+        || delta
+            .get("reasoning")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+        || delta
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty())
 }
 
 /// Rewrite the `id`/`store` fields of a Responses frame. Returns `None` when
