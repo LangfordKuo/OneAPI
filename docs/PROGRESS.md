@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-30
-- 当前阶段：v0.1.16 已发布；备份改为仅服务器端（未发布）
+- 当前阶段：v0.1.17 已发布（备份改为仅服务器端）
 - 当前分支：`main`
-- 最近发布：`v0.1.16`
+- 最近发布：`v0.1.17`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -551,7 +551,7 @@
 
 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`（协议层重新纳入 dead_code 检查后仍为 0 警告）、`npx tsc --noEmit`、`npm run lint`（0 error，6 条既有 react-refresh 警告）、`npm run build` 通过。真实二进制 + mock 上游端到端：安装向导写入的站点名立即可见；同协议透传、Chat→Anthropic、Chat→Responses 的非流式与流式输出与改动前一致；故障转移终止路径返回 502 且 usage 行 `stream` 标志正确。
 
-## 备份仅服务器端（2026-10-31，未发布）
+## 备份仅服务器端（2026-10-31，v0.1.17）
 
 背景：导出接口让任何持有管理员会话的人都能把整库下载走；导入接口允许上传构造过的 SQLite 文件，并在重启时替换线上库。两条都是不必要的远程攻击面。
 
