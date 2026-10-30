@@ -1,7 +1,7 @@
 # OneAPI 实施计划
 
-- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度，v0.1.7 渠道按协议内分页并修复 Token 图表轴，v0.1.8 API Key 支持渠道/模型/Token 限额，v0.1.9 完成审查优化批次 1–5，v0.1.10 完成流式 Responses `store` 一致性、渠道健康缓存覆盖、大响应字节级缓冲与在线更新信任边界，v0.1.11 完成两轮复审修复、归档计划文档并清理工程债；v0.1.12 实现同模型渠道无缝故障转移与冷却期主动恢复；v0.1.13 增加轻量备份/恢复、故障转移预算、运行状态信息与每 Key 每日额度；v0.1.14 修复跨协议推理输出并移除全部测试代码
-- 最后更新：2026-10-29
+- 状态：M0–M7 已实现；审查计划阶段 A–D 与 E3 随 v0.1.2 发布，v0.1.3 修复日志筛选，v0.1.4 新增客户端 IP 请求头，v0.1.5 新增日志 tok/s 与渠道多协议，v0.1.6 重写前端并新增网站域名与 1 秒实时速度，v0.1.7 渠道按协议内分页并修复 Token 图表轴，v0.1.8 API Key 支持渠道/模型/Token 限额，v0.1.9 完成审查优化批次 1–5，v0.1.10 完成流式 Responses `store` 一致性、渠道健康缓存覆盖、大响应字节级缓冲与在线更新信任边界，v0.1.11 完成两轮复审修复、归档计划文档并清理工程债；v0.1.12 实现同模型渠道无缝故障转移与冷却期主动恢复；v0.1.13 增加轻量备份/恢复、故障转移预算、运行状态信息与每 Key 每日额度；v0.1.14 修复跨协议推理输出并移除全部测试代码；v0.1.15 实现日志与仪表盘实时刷新、渠道列表快捷启停并修复前端 lint
+- 最后更新：2026-10-30
 - 关联文档：`docs/PROGRESS.md`
 - 适用仓库：`/root/OneAPI`
 
@@ -158,7 +158,7 @@ StreamEvent { Start | BlockStart{index,kind} | TextDelta | ReasoningDelta |
 ```
 POST /api/auth/login|logout   GET /api/auth/me   PUT /api/auth/password
 GET /api/setup/status   POST /api/setup   # 首次运行安装向导（无会话）
-GET /api/metrics/stream   # 实时 tok/s SSE（管理员会话，最近 1 秒实测值）
+GET /api/metrics/stream   # 实时 tok/s SSE（管理员会话，最近 1 秒实测值，附带 usage_total 写入计数）
 GET /api/update/check   POST /api/update/apply   # 在线更新
 GET|POST /api/channels        GET|PUT|DELETE /api/channels/:id
 POST /api/channels/test       POST /api/channels/fetch-models   # 支持未保存配置
@@ -257,6 +257,8 @@ GET /healthz  /readyz
 - 2026-10-29：个人使用与轻量运维增强（v0.1.13）：启动时执行 `PRAGMA quick_check`，有未应用迁移时先 `VACUUM INTO` 快照到 `data/backups`（保留最近 5 份）；设置页新增数据库导出/导入，导入先校验再在重启时换库并自动保留当前库；`/api/system` 增加 DB/WAL 大小、最近备份、写队列、冷却渠道与 24 小时故障转移次数；故障转移增加 3 渠道/60 秒预算与重复请求错误提前停止；`api_keys` 新增按 UTC 自然日的 `daily_token_limit`，超限返回 429 且次日自动恢复（迁移 `0008_api_key_daily_limit.sql`，并为 `usage_logs.created_at` 增加索引）。
 - 2026-10-29：跨协议推理输出修复（v0.1.14）：Anthropic 编码器不再丢弃推理，流式输出 `thinking`/`thinking_delta`，非流式在无签名时也输出 thinking block；流式 IR 增加 `ReasoningSignature`，保留 Anthropic 上游的 `signature_delta` 并写入 Responses 的 `encrypted_content`；Anthropic 编码器在新块开始前关闭旧块。修复 Anthropic 客户端使用 Chat 上游时“无推理输出且首字延迟高”的问题，覆盖 Playground 与普通 API。
 - 2026-10-29：移除测试代码（v0.1.14）：删除全部 `#[cfg(test)]` 模块、`src/admin/tests.rs` 与 test-only helper；移除 dev-dependencies `tempfile`/`tower`/`wiremock`；CI 与 Makefile 不再执行测试。`#[cfg(test)]` 原本不会进入 release 二进制，本次主要减少源码与开发依赖面。
+- 2026-10-30：日志与仪表盘全量实时化：用量写入提交后递增进程内 `usage_total`，`/api/metrics/stream` 在原有每秒快照中附带该计数（旧前端忽略未知字段，协议保持兼容）；仪表盘摘要/时序/模型与渠道占比/最近错误/系统信息以及日志列表在计数变化时按 1.5–3 秒节流刷新，SSE 断开时退化为 5 秒轮询，后台标签页暂停刷新并在恢复可见时补一次。仪表盘「总 Tokens」与日志 Tokens 列改用 K/M/B 紧凑格式（`formatTokens`），Token 图表轴与提示同步；图表关闭重绘动画，避免实时刷新时闪烁。
+- 2026-10-30：渠道列表快捷启停与前端 lint 修复（v0.1.15）：新增 `PUT /api/channels/{id}/enabled` 与 `channel::set_enabled`，只更新 `channels.enabled`/`updated_at` 并失效渠道缓存，列表可直接启用/停用渠道而不重传协议配置与密钥；同版本修复 `react-hooks` 报错——`useLiveRefresh` 的 ref 同步移入 effect，`useNow` 拆为 30 秒/1 秒共享时钟并新增 `useNowSeconds`，仪表盘运行时长不再在渲染期调用 `Date.now()`。
 - 2026-10-27：完成 M5 流式；新增 `protocol/sse.rs`、`protocol/stream.rs`、`gateway/stream.rs`。流式空闲超时默认 120s，渠道 `timeout_ms` 配置后以其作为逐 chunk 超时；首个 SSE event 若为 error 仍可在提交前切换渠道。
 - 2026-10-27：完成 M6 前端与配套后台接口；新增 `/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`，Playground 复用网关执行链并以 `source=playground`、`api_key_id=NULL` 记录。请求体记录开关与保留期清理留待 M7。
 - 2026-10-27：M7 CI/CD 落地：新增 GitHub Actions CI 与 Tag 发布，构建 Linux/Windows/macOS × amd64/arm64 六个平台产物；Linux 使用 musl 静态链接以去除 glibc 版本依赖；Actions 使用 Node 24 版本并固定 runner；构建任务上传原始二进制，Release 任务统一打包一次；Docker 使用预编译 Linux 产物组装并推送 GHCR 多架构镜像。

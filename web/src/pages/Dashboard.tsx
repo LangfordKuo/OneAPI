@@ -28,9 +28,15 @@ import {
   formatBytes,
   formatDateTime,
   formatNumber,
+  formatTokens,
   formatUptime,
 } from '@/lib/format';
-import { useLiveMetrics } from '@/hooks/useLiveMetrics';
+import { useLiveConnected, useLiveMetrics } from '@/hooks/useLiveMetrics';
+import {
+  useLivePollingInterval,
+  useLiveRefresh,
+} from '@/hooks/useLiveRefresh';
+import { useNowSeconds } from '@/hooks/useNow';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -84,15 +90,26 @@ interface StatCardProps {
   value: string;
   icon: ComponentType<{ className?: string }>;
   danger?: boolean;
+  /** Full value shown on hover when `value` is compacted for narrow screens. */
+  tooltip?: string;
 }
 
-function StatCard({ title, value, icon: Icon, danger }: StatCardProps) {
+function StatCard({
+  title,
+  value,
+  icon: Icon,
+  danger,
+  tooltip,
+}: StatCardProps) {
   return (
     <Card>
       <CardContent className="flex items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
           <p className="truncate text-xs text-muted-foreground">{title}</p>
-          <p className="truncate text-2xl font-semibold tabular-nums">
+          <p
+            className="truncate text-2xl font-semibold tabular-nums"
+            title={tooltip}
+          >
             {value}
           </p>
         </div>
@@ -127,25 +144,42 @@ function InfoItem({ label, value }: { label: string; value: ReactNode }) {
 export default function Dashboard() {
   const [range, setRange] = useState('24h');
   const live = useLiveMetrics();
+  const connected = useLiveConnected();
+  const refetchInterval = useLivePollingInterval();
+  const now = useNowSeconds();
+
+  // Everything below is driven by the live usage signal; the polling interval
+  // is only the fallback used while the SSE stream is down.
+  useLiveRefresh([
+    ['system'],
+    ['dashboard-summary'],
+    ['dashboard-timeseries'],
+    ['dashboard-models'],
+    ['dashboard-channels'],
+    ['dashboard-errors'],
+  ]);
 
   const systemQuery = useQuery({
     queryKey: ['system'],
     queryFn: () => api.get<SystemInfo>('/api/system'),
-    refetchInterval: 30_000,
+    refetchInterval,
   });
   const summaryQuery = useQuery({
     queryKey: ['dashboard-summary', range],
     queryFn: () =>
       api.get<DashboardSummary>(`/api/dashboard/summary?range=${range}`),
+    refetchInterval,
   });
   const timeseriesQuery = useQuery({
     queryKey: ['dashboard-timeseries', range],
     queryFn: () => api.get<Timeseries>(`/api/dashboard/timeseries?range=${range}`),
+    refetchInterval,
   });
   const modelsQuery = useQuery({
     queryKey: ['dashboard-models', range],
     queryFn: () =>
       api.get<Breakdown>(`/api/dashboard/breakdown?range=${range}&dimension=model`),
+    refetchInterval,
   });
   const channelsQuery = useQuery({
     queryKey: ['dashboard-channels', range],
@@ -153,6 +187,7 @@ export default function Dashboard() {
       api.get<Breakdown>(
         `/api/dashboard/breakdown?range=${range}&dimension=channel`,
       ),
+    refetchInterval,
   });
   const errorsQuery = useQuery({
     queryKey: ['dashboard-errors', range],
@@ -160,10 +195,18 @@ export default function Dashboard() {
       api.get<LogList>(
         `/api/logs?range=${range}&status=error&limit=5&offset=0`,
       ),
+    refetchInterval,
   });
 
   const summary = summaryQuery.data;
   const errors = errorsQuery.data?.items ?? [];
+  // The shared second clock re-renders this page every second, so uptime is
+  // derived from the last successful fetch without reading the wall clock
+  // during render.
+  const uptimeSeconds = systemQuery.data
+    ? systemQuery.data.uptime_seconds +
+      Math.max(0, Math.floor((now - systemQuery.dataUpdatedAt) / 1000))
+    : null;
 
   return (
     <>
@@ -222,16 +265,35 @@ export default function Dashboard() {
               </p>
             </div>
           </div>
-          <Badge
-            variant="outline"
-            className={
-              live.global_tok_s > 0
-                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-                : 'text-muted-foreground'
-            }
-          >
-            最近 1 秒实测
-          </Badge>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge
+              variant="outline"
+              className={
+                connected
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                  : 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+              }
+            >
+              <span
+                className={
+                  connected
+                    ? 'mr-1.5 size-1.5 animate-pulse rounded-full bg-current'
+                    : 'mr-1.5 size-1.5 rounded-full bg-current'
+                }
+              />
+              {connected ? '实时更新中' : '连接中断，轮询中'}
+            </Badge>
+            <Badge
+              variant="outline"
+              className={
+                live.global_tok_s > 0
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                  : 'text-muted-foreground'
+              }
+            >
+              最近 1 秒实测
+            </Badge>
+          </div>
         </CardContent>
       </Card>
 
@@ -256,7 +318,8 @@ export default function Dashboard() {
         />
         <StatCard
           title="总 Tokens"
-          value={summary ? formatNumber(summary.total_tokens) : '—'}
+          value={summary ? formatTokens(summary.total_tokens) : '—'}
+          tooltip={summary ? formatNumber(summary.total_tokens) : undefined}
           icon={Cpu}
         />
         <StatCard
@@ -371,9 +434,7 @@ export default function Dashboard() {
                 <InfoItem
                   label="运行时长"
                   value={
-                    systemQuery.data
-                      ? formatUptime(systemQuery.data.uptime_seconds)
-                      : '-'
+                    uptimeSeconds != null ? formatUptime(uptimeSeconds) : '-'
                   }
                 />
                 <InfoItem

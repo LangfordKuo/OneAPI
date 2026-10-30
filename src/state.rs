@@ -12,6 +12,7 @@ use tokio::sync::Notify;
 use crate::{
     admin::LoginLimiter,
     config::Config,
+    events::EventBus,
     gateway::usage::UsageWriter,
     metrics::LiveMetrics,
     models::{
@@ -345,6 +346,7 @@ pub struct AppState {
     pub db: SqlitePool,
     pub crypto: Arc<Crypto>,
     pub live: Arc<LiveMetrics>,
+    pub events: Arc<EventBus>,
     pub updates: Arc<UpdateState>,
     pub login_limiter: Arc<LoginLimiter>,
     pub clients: Arc<ClientCache>,

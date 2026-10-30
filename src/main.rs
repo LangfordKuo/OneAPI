@@ -5,6 +5,7 @@ mod client_ip;
 mod config;
 mod db;
 mod error;
+mod events;
 mod gateway;
 mod maintenance;
 mod metrics;
@@ -81,12 +82,17 @@ async fn serve(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let crypto = Arc::new(security::Crypto::load_or_create(&config.data_dir)?);
     admin::bootstrap(&db).await?;
 
-    let usage_writer = Arc::new(gateway::usage::UsageWriter::start(db.clone()));
+    let events = Arc::new(events::EventBus::default());
+    let usage_writer = Arc::new(gateway::usage::UsageWriter::start(
+        db.clone(),
+        events.clone(),
+    ));
     let state = AppState {
         config: Arc::new(config.clone()),
         db,
         crypto,
         live: Arc::new(metrics::LiveMetrics::default()),
+        events,
         updates: std::sync::Arc::new(crate::state::UpdateState::default()),
         login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
         clients: Arc::new(upstream::ClientCache::default()),

@@ -10,7 +10,7 @@ use serde_json::Value;
 use sqlx::{Executor, Sqlite, SqlitePool};
 use tokio::sync::mpsc;
 
-use crate::{models, protocol::Usage, state::AppState};
+use crate::{events::EventBus, models, protocol::Usage, state::AppState};
 
 pub struct UsageRecord<'a> {
     pub request_id: &'a str,
@@ -146,10 +146,10 @@ impl UsageWriter {
     const QUEUE_CAPACITY: usize = 1_024;
     const BATCH_SIZE: usize = 100;
 
-    pub fn start(pool: SqlitePool) -> Self {
+    pub fn start(pool: SqlitePool, events: Arc<EventBus>) -> Self {
         let (tx, rx) = mpsc::channel(Self::QUEUE_CAPACITY);
         let stats = Arc::new(UsageWriterStats::default());
-        let handle = tokio::spawn(write_loop(pool, rx, Arc::clone(&stats)));
+        let handle = tokio::spawn(write_loop(pool, rx, Arc::clone(&stats), events));
         Self {
             tx: Mutex::new(Some(tx)),
             handle: Mutex::new(Some(handle)),
@@ -249,6 +249,8 @@ pub async fn record(state: &AppState, record: &UsageRecord<'_>) {
             request_id = record.request_id,
             "failed to write usage log"
         );
+    } else {
+        state.events.usage_written(1);
     }
 }
 
@@ -346,6 +348,7 @@ async fn write_loop(
     pool: SqlitePool,
     mut rx: mpsc::Receiver<WriteJob>,
     stats: Arc<UsageWriterStats>,
+    events: Arc<EventBus>,
 ) {
     while let Some(first) = rx.recv().await {
         let mut batch = vec![first];
@@ -356,7 +359,7 @@ async fn write_loop(
             }
         }
 
-        if let Err(error) = write_batch(&pool, &batch).await {
+        if let Err(error) = write_batch(&pool, &batch, &events).await {
             stats
                 .failed_writes
                 .fetch_add(batch.len() as u64, Ordering::Relaxed);
@@ -369,12 +372,14 @@ async fn write_loop(
     }
 }
 
-async fn write_batch(pool: &SqlitePool, batch: &[WriteJob]) -> sqlx::Result<()> {
+async fn write_batch(pool: &SqlitePool, batch: &[WriteJob], events: &EventBus) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
     let mut key_usage: HashMap<i64, i64> = HashMap::new();
+    let mut usage_rows = 0usize;
     for job in batch {
         match job {
             WriteJob::Usage(record) => {
+                usage_rows += 1;
                 insert_one(&mut *tx, record).await?;
                 if let Some(api_key_id) = record.api_key_id {
                     *key_usage.entry(api_key_id).or_default() += total_tokens(&record.usage);
@@ -397,7 +402,14 @@ async fn write_batch(pool: &SqlitePool, batch: &[WriteJob]) -> sqlx::Result<()> 
     for (api_key_id, tokens) in key_usage {
         models::api_key::add_usage(&mut *tx, api_key_id, tokens, now).await?;
     }
-    tx.commit().await
+    tx.commit().await?;
+
+    // Notify admin pages only after the rows are durable, so a refetch never
+    // races ahead of the write it is meant to show.
+    if usage_rows > 0 {
+        events.usage_written(usage_rows);
+    }
+    Ok(())
 }
 
 fn total_tokens(usage: &Usage) -> i64 {
