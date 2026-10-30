@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, Plus, Send, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { api } from '@/api/client';
+import { api, requestRaw } from '@/api/client';
 import { readSse } from '@/api/sse';
 import type { ModelsOutput, ProtocolName } from '@/api/types';
 import { CodeBlock } from '@/components/common/code-block';
@@ -35,6 +35,7 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { formatLatency } from '@/lib/format';
 import { cn } from '@/lib/utils';
+import { errorMessage } from '@/lib/error';
 
 interface MessageDraft {
   id: number;
@@ -529,28 +530,14 @@ export default function Playground() {
     const publish = () => setResult({ ...acc, tools: [...acc.tools] });
 
     try {
-      const response = await fetch('/api/playground', {
+      // requestRaw keeps credentials, error extraction and 401 handling in one
+      // place while leaving the body unread for the SSE loop below.
+      const response = await requestRaw('/api/playground', {
         method: 'POST',
-        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(buildRequest()),
         signal: controller.signal,
       });
-
-      if (!response.ok) {
-        let message = `HTTP ${response.status}`;
-        try {
-          const body = (await response.json()) as {
-            error?: { message?: string };
-          };
-          message = body.error?.message ?? message;
-        } catch {
-          // Keep the status text.
-        }
-        acc.error = message;
-        publish();
-        return;
-      }
 
       acc.channel = response.headers.get('x-oneapi-channel');
       acc.upstreamModel = response.headers.get('x-oneapi-upstream-model');
@@ -587,7 +574,7 @@ export default function Playground() {
     } catch (error) {
       // Aborts are expected when a newer run starts or the page unmounts.
       if (!controller.signal.aborted) {
-        acc.error = error instanceof Error ? error.message : String(error);
+        acc.error = errorMessage(error);
         publish();
       }
     } finally {

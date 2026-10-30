@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download, Loader2, RefreshCw, ShieldCheck, Upload } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { api, ApiError } from '@/api/client';
+import { api, ApiError, requestRaw } from '@/api/client';
 import type {
   Settings,
   UpdateApplyResult,
@@ -31,6 +31,7 @@ import {
 } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
+import { errorMessage } from '@/lib/error';
 
 interface SettingsDraft {
   site_name: string;
@@ -50,14 +51,28 @@ const UPDATE_SOURCE_OPTIONS = [
   { value: 'ghproxy', label: '国内加速（gh-proxy.com）' },
 ];
 
+/// Numeric defaults. Used both to seed an empty draft and as the fallback when
+/// a field is cleared, so the two can never disagree.
+const NUMERIC_DEFAULTS = {
+  default_max_tokens: 4096,
+  nonstream_timeout_seconds: 600,
+  stream_idle_timeout_seconds: 120,
+  usage_log_retention_days: 30,
+  response_retention_days: 7,
+} as const;
+
 const EMPTY_DRAFT: SettingsDraft = {
   site_name: '',
   site_domain: '',
-  default_max_tokens: '4096',
-  nonstream_timeout_seconds: '600',
-  stream_idle_timeout_seconds: '120',
-  usage_log_retention_days: '30',
-  response_retention_days: '7',
+  default_max_tokens: String(NUMERIC_DEFAULTS.default_max_tokens),
+  nonstream_timeout_seconds: String(
+    NUMERIC_DEFAULTS.nonstream_timeout_seconds,
+  ),
+  stream_idle_timeout_seconds: String(
+    NUMERIC_DEFAULTS.stream_idle_timeout_seconds,
+  ),
+  usage_log_retention_days: String(NUMERIC_DEFAULTS.usage_log_retention_days),
+  response_retention_days: String(NUMERIC_DEFAULTS.response_retention_days),
   store_request_bodies: false,
   update_source: 'github',
   client_ip_header: '',
@@ -90,20 +105,26 @@ function toSettings(draft: SettingsDraft): Settings {
   return {
     site_name: draft.site_name.trim(),
     site_domain: draft.site_domain.trim(),
-    default_max_tokens: toInt(draft.default_max_tokens, 4096),
+    default_max_tokens: toInt(
+      draft.default_max_tokens,
+      NUMERIC_DEFAULTS.default_max_tokens,
+    ),
     nonstream_timeout_seconds: toInt(
       draft.nonstream_timeout_seconds,
-      600,
+      NUMERIC_DEFAULTS.nonstream_timeout_seconds,
     ),
     stream_idle_timeout_seconds: toInt(
       draft.stream_idle_timeout_seconds,
-      120,
+      NUMERIC_DEFAULTS.stream_idle_timeout_seconds,
     ),
     usage_log_retention_days: toInt(
       draft.usage_log_retention_days,
-      30,
+      NUMERIC_DEFAULTS.usage_log_retention_days,
     ),
-    response_retention_days: toInt(draft.response_retention_days, 7),
+    response_retention_days: toInt(
+      draft.response_retention_days,
+      NUMERIC_DEFAULTS.response_retention_days,
+    ),
     store_request_bodies: draft.store_request_bodies,
     update_source: draft.update_source,
     client_ip_header: draft.client_ip_header.trim(),
@@ -151,7 +172,7 @@ export default function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ['site'] });
     },
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   const checkUpdateMutation = useMutation({
@@ -161,7 +182,7 @@ export default function SettingsPage() {
       setUpdateMessage(null);
     },
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   const applyUpdateMutation = useMutation({
@@ -171,7 +192,7 @@ export default function SettingsPage() {
       window.setTimeout(() => window.location.assign('/'), 3000);
     },
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   const passwordMutation = useMutation({
@@ -192,7 +213,7 @@ export default function SettingsPage() {
         toast.error('当前密码不正确');
         return;
       }
-      toast.error(error instanceof Error ? error.message : String(error));
+      toast.error(errorMessage(error));
     },
   });
 
@@ -230,21 +251,7 @@ export default function SettingsPage() {
   async function downloadBackup() {
     setBackupBusy(true);
     try {
-      const response = await fetch('/api/backup/export', {
-        credentials: 'include',
-      });
-      if (!response.ok) {
-        let message = `导出失败（${response.status}）`;
-        try {
-          const value = (await response.json()) as {
-            error?: { message?: string };
-          };
-          message = value.error?.message ?? message;
-        } catch {
-          // Keep the status-based message for non-JSON responses.
-        }
-        throw new Error(message);
-      }
+      const response = await requestRaw('/api/backup/export');
       const blob = await response.blob();
       const disposition = response.headers.get('content-disposition') ?? '';
       const filename =
@@ -259,7 +266,7 @@ export default function SettingsPage() {
       URL.revokeObjectURL(url);
       toast.success('备份已下载');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
+      toast.error(errorMessage(error));
     } finally {
       setBackupBusy(false);
     }
@@ -271,26 +278,19 @@ export default function SettingsPage() {
     }
     setBackupBusy(true);
     try {
-      const response = await fetch('/api/backup/import', {
+      const response = await requestRaw('/api/backup/import', {
         method: 'POST',
-        credentials: 'include',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: backupFile,
       });
       const value = (await response.json().catch(() => null)) as {
-        error?: { message?: string };
         message?: string;
       } | null;
-      if (!response.ok) {
-        throw new Error(
-          value?.error?.message ?? `导入失败（${response.status}）`,
-        );
-      }
       toast.success(value?.message ?? '导入成功，服务即将重启');
       setBackupConfirmOpen(false);
       setBackupFile(null);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
+      toast.error(errorMessage(error));
     } finally {
       setBackupBusy(false);
     }

@@ -41,6 +41,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { formatCompactNumber, formatDateTime } from '@/lib/format';
+import { errorMessage } from '@/lib/error';
 
 interface KeyDraft {
   name: string;
@@ -82,8 +83,25 @@ function draftFromKey(key: ApiKey, channels: Channel[]): KeyDraft {
   };
 }
 
-function formatTime(value: number | null) {
-  return value ? formatDateTime(value, 'YYYY-MM-DD HH:mm') : '-';
+/** Parse an optional token limit for the request payload. */
+function limitOf(raw: string): number | null {
+  return raw.trim() ? Number(raw.trim()) : null;
+}
+
+/** Optional positive-integer limit; an empty field means "no limit". */
+function validateTokenLimit(
+  raw: string,
+  field: 'tokenLimit' | 'dailyTokenLimit',
+  errors: Record<string, string>,
+) {
+  const value = raw.trim();
+  if (!value) {
+    return;
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    errors[field] = '请输入正整数，或留空表示不限制';
+  }
 }
 
 function restrictionSummary(key: ApiKey): string {
@@ -132,7 +150,7 @@ export default function Keys() {
       queryClient.invalidateQueries({ queryKey: ['keys'] });
     },
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   const toggleMutation = useMutation({
@@ -142,7 +160,7 @@ export default function Keys() {
       queryClient.invalidateQueries({ queryKey: ['keys'] });
     },
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   const deleteMutation = useMutation({
@@ -153,7 +171,7 @@ export default function Keys() {
       queryClient.invalidateQueries({ queryKey: ['keys'] });
     },
     onError: (error) =>
-      toast.error(error instanceof Error ? error.message : String(error)),
+      toast.error(errorMessage(error)),
   });
 
   function update(patch: Partial<KeyDraft>) {
@@ -194,20 +212,8 @@ export default function Keys() {
     if (!draft.name.trim()) {
       nextErrors.name = '请输入名称';
     }
-    const limit = draft.tokenLimit.trim();
-    if (limit) {
-      const parsed = Number(limit);
-      if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-        nextErrors.tokenLimit = '请输入正整数，或留空表示不限制';
-      }
-    }
-    const dailyLimit = draft.dailyTokenLimit.trim();
-    if (dailyLimit) {
-      const parsed = Number(dailyLimit);
-      if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-        nextErrors.dailyTokenLimit = '请输入正整数，或留空表示不限制';
-      }
-    }
+    validateTokenLimit(draft.tokenLimit, 'tokenLimit', nextErrors);
+    validateTokenLimit(draft.dailyTokenLimit, 'dailyTokenLimit', nextErrors);
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) {
       return;
@@ -228,8 +234,8 @@ export default function Keys() {
         enabled: draft.enabled,
         allowed_channel_ids: channelIds,
         allowed_models: draft.models,
-        token_limit: limit ? Number(limit) : null,
-        daily_token_limit: dailyLimit ? Number(dailyLimit) : null,
+        token_limit: limitOf(draft.tokenLimit),
+        daily_token_limit: limitOf(draft.dailyTokenLimit),
       },
     });
   }
@@ -368,13 +374,13 @@ export default function Keys() {
                           </div>
                         </TableCell>
                         <TableCell className="hidden text-xs text-muted-foreground md:table-cell">
-                          {formatTime(key.expires_at)}
+                          {formatDateTime(key.expires_at, 'YYYY-MM-DD HH:mm')}
                         </TableCell>
                         <TableCell className="hidden text-xs text-muted-foreground lg:table-cell">
-                          {formatTime(key.last_used_at)}
+                          {formatDateTime(key.last_used_at, 'YYYY-MM-DD HH:mm')}
                         </TableCell>
                         <TableCell className="hidden text-xs text-muted-foreground lg:table-cell">
-                          {formatTime(key.created_at)}
+                          {formatDateTime(key.created_at, 'YYYY-MM-DD HH:mm')}
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center justify-end gap-2">
