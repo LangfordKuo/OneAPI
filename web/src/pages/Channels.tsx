@@ -462,6 +462,17 @@ export default function Channels() {
       toast.error(error instanceof Error ? error.message : String(error)),
   });
 
+  const toggleMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) =>
+      api.put<Channel>(`/api/channels/${id}/enabled`, { enabled }),
+    onSuccess: (channel) => {
+      toast.success(channel.enabled ? '渠道已启用' : '渠道已停用');
+      queryClient.invalidateQueries({ queryKey: ['channels'] });
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : String(error)),
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (id: number) => api.delete(`/api/channels/${id}`),
     onSuccess: () => {
@@ -744,7 +755,23 @@ export default function Channels() {
                           </Badge>
                         </TableCell>
                         <TableCell>
-                          <div className="flex justify-end gap-1">
+                          <div className="flex items-center justify-end gap-1">
+                            <Switch
+                              checked={channel.enabled}
+                              disabled={
+                                toggleMutation.isPending &&
+                                toggleMutation.variables?.id === channel.id
+                              }
+                              aria-label={
+                                channel.enabled ? '停用渠道' : '启用渠道'
+                              }
+                              onCheckedChange={(checked) =>
+                                toggleMutation.mutate({
+                                  id: channel.id,
+                                  enabled: checked,
+                                })
+                              }
+                            />
                             <Button
                               variant="ghost"
                               size="sm"

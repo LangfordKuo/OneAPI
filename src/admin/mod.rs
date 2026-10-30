@@ -43,6 +43,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
             post(channels::probe_fetch_models),
         )
         .route("/api/channels/{id}/test", post(channels::test))
+        .route("/api/channels/{id}/enabled", put(channels::set_enabled))
         .route(
             "/api/channels/{id}/fetch-models",
             post(channels::fetch_models),

@@ -1,9 +1,9 @@
 # OneAPI 进度
 
-- 最后更新：2026-10-29
-- 当前阶段：v0.1.14 已发布（跨协议推理修复与测试代码清理）
+- 最后更新：2026-10-30
+- 当前阶段：v0.1.15 已发布（实时刷新、渠道快捷启停与前端 lint 修复）
 - 当前分支：`main`
-- 最近发布：`v0.1.14`
+- 最近发布：`v0.1.15`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -209,6 +209,14 @@
 - 设置页渠道表单改为多选协议，并显示当前可选的转换目标；自定义请求头与模型映射仍由整个渠道共享。
 - `count_tokens` 只在渠道原生支持 Anthropic 时转发，否则保持原有字符估算。
 - 验证：新增 4 个协议选择单元测试、2 个网关集成测试（原生匹配不转换、缺失协议走 fallback）与 1 个渠道 CRUD 测试；108 个测试通过。
+
+## v0.1.15 发布记录
+
+- 版本号从 `0.1.14` 升至 `0.1.15`。
+- 日志与仪表盘实时化：新增 `src/events.rs` 进程内 `usage_total` 计数，`/api/metrics/stream` 每秒快照附带该值；前端新增 `useLiveRefresh`，仪表盘与日志列表随用量写入按 1.5–3 秒节流刷新，SSE 断开退化为 5 秒轮询，后台标签页暂停并在恢复可见时补刷；仪表盘运行时长每秒递增，总 Tokens 与日志 Tokens 改用 K/M/B 紧凑格式，图表关闭重绘动画。
+- 渠道列表快捷启停：新增 `PUT /api/channels/{id}/enabled` 与 `channel::set_enabled`，列表操作列可直接启用/停用渠道，只写 `enabled`/`updated_at` 并失效渠道缓存，不重传协议配置与密钥。
+- 前端 lint 修复：`useLiveRefresh` 的 ref 同步移入 effect；`useNow` 拆为 30 秒/1 秒两档共享时钟并新增 `useNowSeconds`；仪表盘运行时长不再在渲染期调用 `Date.now()`。`npm run lint` 为 0 error。
+- 验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`npx tsc --noEmit`、`npm run build` 通过；真实二进制 + curl 验证渠道启停即时生效（停用后 `/v1/models` 不再返回该渠道模型，未知 id 返回 404）。
 
 ## v0.1.14 发布记录
 
@@ -486,6 +494,32 @@
 - 移除 dev-dependencies `tempfile`、`tower`、`wiremock`；CI 去掉 `cargo test` 步骤，Makefile 去掉 `test` 目标。
 - 验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo build` 通过；`cargo test --locked` 可执行但为 0 个测试。
 - 说明：`#[cfg(test)]` 代码原本不会编译进 release 二进制；本次清理主要减少源码与开发依赖面。后续行为验证使用仓库外的临时冒烟脚本。
+
+## 日志与仪表盘实时化（2026-10-30）
+
+- 后端新增 `src/events.rs`：进程内 `usage_total` 单调计数，用量写队列每批提交后累加，同步兜底写入同样计数。
+- `/api/metrics/stream` 每秒快照新增 `usage_total` 字段，保持原有数据结构与每秒节奏；旧客户端会忽略未知字段，无需同步升级。
+- 前端新增 `useLiveRefresh`：仪表盘（请求数/成功率/错误数/总 Tokens/延迟/时序/模型与渠道占比/最近错误/系统信息）与日志列表随计数变化刷新；仪表盘节流 3 秒、日志列表 1.5 秒；SSE 断开时回退为 5 秒轮询；后台标签页暂停刷新，恢复可见时补一次。
+- 仪表盘「运行时长」按上次成功响应推算并随每秒渲染递增；仪表盘与日志页显示「实时更新中 / 连接中断，轮询中」状态。
+- 新增 `formatTokens`：1234 → 1.2K、1234567 → 1.2M、1234567890 → 1.2B；用于「总 Tokens」、日志 Tokens 列、Token 图表轴与提示，移动端不再被截断。
+- 图表关闭重绘动画，避免实时数据到达时闪烁。
+
+验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（0 测试）、`npm run build` 通过；真实二进制 + mock 上游 + Playwright 实测：SSE `usage_total` 随两次请求 0→1→2；仪表盘请求数 3→4、总 Tokens 1.2M→2.5M 无刷新更新；日志列表 4→5 行无刷新更新；390px 移动端总 Tokens 元素 `scrollWidth == clientWidth`，无截断。
+
+## 渠道列表快捷开关（2026-10-30）
+
+- 渠道列表「操作」列新增开关，可直接启用/停用渠道，无需打开编辑抽屉；交互与 Key 列表一致，同一行请求进行中时该开关禁用。
+- 新增 `PUT /api/channels/{id}/enabled`（body `{ "enabled": bool }`）：只更新 `channels.enabled` 与 `updated_at`，不要求重传三个协议的配置和密钥，避免快捷开关覆盖编辑中的表单状态。
+- 模型层新增 `channel::set_enabled`；成功后失效渠道运行时缓存，路由选择立即生效（停用渠道不再参与路由）。
+- 编辑抽屉中的「启用渠道」开关保持原样，保存时仍随完整表单一起提交。
+
+验证：`cargo check`、`cargo clippy --all-targets -- -D warnings`、`npx tsc --noEmit`、`npm run build` 通过；真实二进制 + curl 实测启停即时生效（停用后 `/v1/models` 不再返回该渠道模型，重新启用后恢复，未知 id 返回 404）。
+
+## 实时刷新 lint 修复（2026-10-30）
+
+- `useLiveRefresh` 原先在渲染期写 ref，改为在 `useEffect` 中同步 `keysRef`/`latestRef`，消除 `react-hooks/refs` 报错且保持“只响应服务端信号”的语义。
+- `useNow` 拆成 30 秒与 1 秒两个共享时钟（`useNow` / `useNowSeconds`），仪表盘运行时长改用 `useNowSeconds` 的稳定快照，不再在渲染期调用 `Date.now()`，消除 `react-hooks/purity` 报错并继续每秒递增。
+- `npm run lint` 现在 0 error；剩余 6 条 `react-refresh/only-export-components` 警告来自既有 `badge/button/tabs` 与 `useLiveMetrics` 的常量/hook 导出，不阻塞 CI。
 
 ## AOCI 状态
 

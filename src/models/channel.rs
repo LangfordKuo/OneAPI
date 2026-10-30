@@ -490,6 +490,18 @@ pub async fn update(
     Ok(result.rows_affected() > 0)
 }
 
+/// Flip only the routing switch. The edit form rewrites the whole row, but the
+/// list switch must not require every protocol config to be submitted again.
+pub async fn set_enabled(pool: &SqlitePool, id: i64, enabled: i64, now: i64) -> sqlx::Result<bool> {
+    let result = sqlx::query("UPDATE channels SET enabled = ?, updated_at = ? WHERE id = ?")
+        .bind(enabled)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub async fn delete(pool: &SqlitePool, id: i64) -> sqlx::Result<bool> {
     let result = sqlx::query("DELETE FROM channels WHERE id = ?")
         .bind(id)

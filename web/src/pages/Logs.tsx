@@ -20,6 +20,7 @@ import { EmptyState } from '@/components/common/empty-state';
 import { PageHeader } from '@/components/common/page-header';
 import { Pagination } from '@/components/common/pagination';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -49,8 +50,14 @@ import {
   formatDateTime,
   formatLatency,
   formatNumber,
+  formatTokens,
   formatTokensPerSecond,
 } from '@/lib/format';
+import { useLiveConnected } from '@/hooks/useLiveMetrics';
+import {
+  useLivePollingInterval,
+  useLiveRefresh,
+} from '@/hooks/useLiveRefresh';
 
 const RANGE_OPTIONS = [
   { value: '1h', label: '最近 1 小时' },
@@ -142,6 +149,12 @@ export default function Logs() {
   // The COUNT(*) scan is skipped for pages after the first; keep the total
   // from the first page so pagination stays stable while browsing.
   const [knownTotal, setKnownTotal] = useState(0);
+  const connected = useLiveConnected();
+  const refetchInterval = useLivePollingInterval();
+
+  // New usage rows arrive as soon as the writer commits them; the minimum
+  // interval keeps a busy gateway from triggering one list query per request.
+  useLiveRefresh([['logs']], 1500);
 
   function update<K extends keyof Filters>(key: K, value: Filters[K]) {
     setFilters((previous) => ({ ...previous, [key]: value }));
@@ -181,6 +194,7 @@ export default function Logs() {
   const logsQuery = useQuery({
     queryKey: ['logs', path],
     queryFn: () => api.get<LogList>(path),
+    refetchInterval,
   });
 
   const total = logsQuery.data?.total;
@@ -198,6 +212,25 @@ export default function Logs() {
       <PageHeader
         title="日志"
         description="查看每次请求的协议转换、路由结果、Token 用量与耗时。"
+        actions={
+          <Badge
+            variant="outline"
+            className={
+              connected
+                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                : 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+            }
+          >
+            <span
+              className={
+                connected
+                  ? 'mr-1.5 size-1.5 animate-pulse rounded-full bg-current'
+                  : 'mr-1.5 size-1.5 rounded-full bg-current'
+              }
+            />
+            {connected ? '实时更新中' : '连接中断，轮询中'}
+          </Badge>
+        }
       />
 
       <Card className="mb-4">
@@ -490,7 +523,7 @@ export default function Logs() {
                             entry.completion_tokens,
                           )}`}
                         >
-                          {formatNumber(entry.total_tokens)}
+                          {formatTokens(entry.total_tokens)}
                         </TableCell>
                         <TableCell
                           className="whitespace-nowrap text-xs tabular-nums"

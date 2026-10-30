@@ -35,6 +35,27 @@ function trimTrailingZero(value: number): string {
   return value.toFixed(1).replace(/\.0$/, '');
 }
 
+/**
+ * Compact token count for narrow layouts: 1234 -> 1.2K, 1234567 -> 1.2M,
+ * 1234567890 -> 1.2B. Counts below 1000 stay exact.
+ */
+export function formatTokens(value: number | null | undefined): string {
+  if (value == null) {
+    return '-';
+  }
+  const abs = Math.abs(value);
+  if (abs < 1_000) {
+    return String(Math.trunc(value));
+  }
+  const [divisor, suffix] =
+    abs >= 1_000_000_000
+      ? [1_000_000_000, 'B']
+      : abs >= 1_000_000
+        ? [1_000_000, 'M']
+        : [1_000, 'K'];
+  return `${trimTrailingZero(value / divisor)}${suffix}`;
+}
+
 export function formatLatency(value: number | null | undefined): string {
   return value == null ? '-' : `${value} ms`;
 }

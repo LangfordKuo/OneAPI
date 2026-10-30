@@ -818,6 +818,31 @@ pub async fn update(
     Ok(Json(output(channel, state.crypto.as_ref())))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ChannelEnabledInput {
+    pub enabled: bool,
+}
+
+/// Quick routing switch used by the channel list. Unlike `update`, this does not
+/// take the protocol configs, so toggling never rewrites keys or routes.
+pub async fn set_enabled(
+    State(state): State<AppState>,
+    _session: AdminSession,
+    Path(id): Path<i64>,
+    Json(input): Json<ChannelEnabledInput>,
+) -> Result<Json<ChannelOutput>, AppError> {
+    let enabled = if input.enabled { 1 } else { 0 };
+    if !models::channel::set_enabled(&state.db, id, enabled, models::now_ms()).await? {
+        return Err(AppError::NotFound("channel not found".to_string()));
+    }
+    state.cache.invalidate_channels();
+
+    let channel = models::channel::get(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("channel not found".to_string()))?;
+    Ok(Json(output(channel, state.crypto.as_ref())))
+}
+
 pub async fn delete(
     State(state): State<AppState>,
     _session: AdminSession,

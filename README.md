@@ -52,7 +52,7 @@ docker compose up -d --build
 从 [Releases](https://github.com/LangfordKuo/OneAPI/releases) 下载对应平台的压缩包并解压：
 
 ```bash
-tar xzf oneapi-v0.1.14-linux-amd64.tar.gz
+tar xzf oneapi-v0.1.15-linux-amd64.tar.gz
 ONEAPI_DATA_DIR=./data ./oneapi serve
 ```
 

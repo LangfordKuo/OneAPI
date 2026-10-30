@@ -13,7 +13,7 @@ import {
 } from 'recharts';
 import type { BreakdownItem, TimeseriesPoint } from '@/api/types';
 import { EmptyState } from '@/components/common/empty-state';
-import { formatCompactNumber, formatNumber } from '@/lib/format';
+import { formatTokens } from '@/lib/format';
 import {
   Card,
   CardContent,
@@ -163,6 +163,7 @@ export default function DashboardCharts({ points, models, channels }: Props) {
                   fillOpacity={0.18}
                   stroke="var(--color-requests)"
                   strokeWidth={2}
+                  isAnimationActive={false}
                 />
                 <Area
                   dataKey="errors"
@@ -171,6 +172,7 @@ export default function DashboardCharts({ points, models, channels }: Props) {
                   fillOpacity={0.14}
                   stroke="var(--color-errors)"
                   strokeWidth={2}
+                  isAnimationActive={false}
                 />
               </AreaChart>
             </ChartContainer>
@@ -207,7 +209,7 @@ export default function DashboardCharts({ points, models, channels }: Props) {
                   axisLine={false}
                   width={56}
                   allowDecimals={false}
-                  tickFormatter={formatCompactNumber}
+                  tickFormatter={formatTokens}
                 />
                 <ChartTooltip
                   cursor={{ fill: 'var(--muted)' }}
@@ -216,7 +218,7 @@ export default function DashboardCharts({ points, models, channels }: Props) {
                       indicator="dashed"
                       formatter={(value) =>
                         typeof value === 'number'
-                          ? formatNumber(value)
+                          ? formatTokens(value)
                           : String(value)
                       }
                     />
@@ -226,6 +228,7 @@ export default function DashboardCharts({ points, models, channels }: Props) {
                   dataKey="tokens"
                   fill="var(--color-tokens)"
                   radius={[4, 4, 0, 0]}
+                  isAnimationActive={false}
                 />
               </BarChart>
             </ChartContainer>
@@ -256,6 +259,7 @@ export default function DashboardCharts({ points, models, channels }: Props) {
                     outerRadius={90}
                     paddingAngle={2}
                     strokeWidth={0}
+                    isAnimationActive={false}
                   >
                     {modelData.map((entry, index) => (
                       <Cell
@@ -295,6 +299,7 @@ export default function DashboardCharts({ points, models, channels }: Props) {
                     outerRadius={90}
                     paddingAngle={2}
                     strokeWidth={0}
+                    isAnimationActive={false}
                   >
                     {channelData.map((entry, index) => (
                       <Cell
