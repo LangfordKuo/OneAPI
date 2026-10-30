@@ -16,7 +16,6 @@ mod update;
 pub use auth::{bootstrap, AdminSession, LoginLimiter};
 
 use axum::{
-    extract::DefaultBodyLimit,
     middleware,
     routing::{get, post, put},
     Router,
@@ -63,10 +62,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/metrics/stream", get(metrics::stream))
         .route("/api/update/check", get(update::check))
         .route("/api/update/apply", post(update::apply))
-        .route("/api/backup/export", get(backup::export))
-        .route(
-            "/api/backup/import",
-            post(backup::import).layer(DefaultBodyLimit::max(backup::MAX_IMPORT_BYTES)),
-        )
+        .route("/api/backup/snapshot", post(backup::snapshot))
+        .route("/api/backup/list", get(backup::list))
         .layer(middleware::from_fn_with_state(state, csrf::guard))
 }

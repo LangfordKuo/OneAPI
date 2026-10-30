@@ -1,15 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Download, Loader2, RefreshCw, ShieldCheck, Upload } from 'lucide-react';
+import { Archive, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { api, ApiError, requestRaw } from '@/api/client';
+import { api, ApiError } from '@/api/client';
 import type {
+  BackupListOutput,
+  BackupSnapshotResult,
   Settings,
   UpdateApplyResult,
   UpdateInfo,
 } from '@/api/types';
 import { CodeBlock } from '@/components/common/code-block';
-import { ConfirmDialog } from '@/components/common/confirm-dialog';
 import { Field } from '@/components/common/field';
 import { PageHeader } from '@/components/common/page-header';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -32,6 +33,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { errorMessage } from '@/lib/error';
+import { formatBytes, formatDateTime } from '@/lib/format';
 
 interface SettingsDraft {
   site_name: string;
@@ -146,13 +148,25 @@ export default function SettingsPage() {
   const [passwordErrors, setPasswordErrors] = useState<
     Record<string, string>
   >({});
-  const [backupFile, setBackupFile] = useState<File | null>(null);
-  const [backupConfirmOpen, setBackupConfirmOpen] = useState(false);
-  const [backupBusy, setBackupBusy] = useState(false);
 
   const settingsQuery = useQuery({
     queryKey: ['settings'],
     queryFn: () => api.get<Settings>('/api/settings'),
+  });
+
+  const backupsQuery = useQuery({
+    queryKey: ['backups'],
+    queryFn: () => api.get<BackupListOutput>('/api/backup/list'),
+  });
+
+  const snapshotMutation = useMutation({
+    mutationFn: () => api.post<BackupSnapshotResult>('/api/backup/snapshot'),
+    onSuccess: (data) => {
+      toast.success(`${data.message}：${data.file}`);
+      void queryClient.invalidateQueries({ queryKey: ['backups'] });
+      void queryClient.invalidateQueries({ queryKey: ['system'] });
+    },
+    onError: (error) => toast.error(errorMessage(error)),
   });
 
   const draft =
@@ -246,54 +260,6 @@ export default function SettingsPage() {
       return;
     }
     passwordMutation.mutate({ current: currentPassword, next: newPassword });
-  }
-
-  async function downloadBackup() {
-    setBackupBusy(true);
-    try {
-      const response = await requestRaw('/api/backup/export');
-      const blob = await response.blob();
-      const disposition = response.headers.get('content-disposition') ?? '';
-      const filename =
-        disposition.match(/filename="([^"]+)"/)?.[1] ?? 'oneapi-backup.db';
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      toast.success('备份已下载');
-    } catch (error) {
-      toast.error(errorMessage(error));
-    } finally {
-      setBackupBusy(false);
-    }
-  }
-
-  async function importBackup() {
-    if (!backupFile) {
-      return;
-    }
-    setBackupBusy(true);
-    try {
-      const response = await requestRaw('/api/backup/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: backupFile,
-      });
-      const value = (await response.json().catch(() => null)) as {
-        message?: string;
-      } | null;
-      toast.success(value?.message ?? '导入成功，服务即将重启');
-      setBackupConfirmOpen(false);
-      setBackupFile(null);
-    } catch (error) {
-      toast.error(errorMessage(error));
-    } finally {
-      setBackupBusy(false);
-    }
   }
 
   return (
@@ -704,53 +670,55 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            导出会下载一个一致的 SQLite 快照；导入会先校验文件，成功后自动重启并替换当前数据库。导入前当前数据库会保留在
-            data/backups 目录。
+            备份只在服务器端生成，保存在 data/backups
+            目录，保留最近 5 份；不提供下载或上传，避免整库被导出或被上传文件替换。
+            需要恢复时请在服务器上停止服务，用目标备份覆盖数据库文件并删除对应的
+            -wal/-shm。
           </p>
-          <div>
+          <div className="flex flex-wrap items-center gap-3">
             <Button
               variant="outline"
-              onClick={downloadBackup}
-              disabled={backupBusy}
+              onClick={() => snapshotMutation.mutate()}
+              disabled={snapshotMutation.isPending}
             >
-              {backupBusy ? <Loader2 className="animate-spin" /> : <Download />}
-              导出备份
+              {snapshotMutation.isPending ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Archive />
+              )}
+              立即备份到服务器
             </Button>
-          </div>
-          <div className="space-y-2">
-            <Field
-              label="恢复数据库"
-              htmlFor="backup-import"
-              hint="选择之前导出的 .db 文件；上传后会先校验，再自动重启。"
-            >
-              <Input
-                id="backup-import"
-                type="file"
-                accept=".db,application/vnd.sqlite3"
-                onChange={(event) =>
-                  setBackupFile(event.target.files?.[0] ?? null)
-                }
-              />
-            </Field>
             <Button
-              variant="destructive"
-              disabled={!backupFile || backupBusy}
-              onClick={() => setBackupConfirmOpen(true)}
+              variant="ghost"
+              onClick={() => void backupsQuery.refetch()}
+              disabled={backupsQuery.isFetching}
             >
-              <Upload />
-              导入并重启
+              {backupsQuery.isFetching ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <RefreshCw />
+              )}
+              刷新
             </Button>
           </div>
-          <ConfirmDialog
-            open={backupConfirmOpen}
-            onOpenChange={setBackupConfirmOpen}
-            title="用备份替换当前数据库？"
-            description="当前数据库会先自动备份到 data/backups，然后服务重启并加载上传的文件。重启期间请求会短暂失败。"
-            confirmLabel="导入并重启"
-            loading={backupBusy}
-            destructive
-            onConfirm={importBackup}
-          />
+          {backupsQuery.data?.items.length ? (
+            <ul className="divide-y rounded-md border">
+              {backupsQuery.data.items.map((file) => (
+                <li
+                  key={file.name}
+                  className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm"
+                >
+                  <span className="truncate font-mono text-xs">{file.name}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {formatBytes(file.bytes)} ·{' '}
+                    {formatDateTime(file.modified_at, 'YYYY-MM-DD HH:mm')}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-muted-foreground">暂无备份文件。</p>
+          )}
         </CardContent>
       </Card>
     </>
