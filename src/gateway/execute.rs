@@ -890,7 +890,6 @@ async fn proxy_stream(
     let mut probe_deferred = false;
 
     let last_candidate = candidates.len().saturating_sub(1);
-    let commit_deadline = (Instant::now() + STREAM_COMMIT_BUDGET).min(deadline);
     'candidates: for (index, candidate) in candidates.into_iter().enumerate() {
         if Instant::now() >= deadline {
             last_error_type = "upstream_timeout".to_string();
@@ -1113,6 +1112,11 @@ async fn proxy_stream(
         let clear_failure_state = probe.is_some()
             || channel.has_failure_state()
             || state.cache.channel_has_failure_override(channel.id);
+
+        // Per-attempt budget: a retry that starts late still gets the full
+        // window to receive its first frame, bounded only by the request
+        // deadline shared by all attempts.
+        let commit_deadline = (Instant::now() + STREAM_COMMIT_BUDGET).min(deadline);
 
         let job = StreamJob {
             state: state.clone(),
