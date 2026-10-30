@@ -111,6 +111,9 @@ pub async fn setup(
         .filter(|value| !value.is_empty())
     {
         models::setting::upsert(&state.db, "site_name", site_name).await?;
+        // /api/site is public and the setup page already fetched it, so the
+        // cached name must be dropped or the new one stays hidden for 30s.
+        state.cache.invalidate_site_name();
     }
 
     let (env_written, env_path, message) = match write_env_file(&state.config, username) {
