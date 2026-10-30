@@ -162,24 +162,27 @@ pub async fn proxy_with_identity(
 
     let started = Instant::now();
     let deadline = started + REQUEST_TOTAL_BUDGET;
-    let mut ctx = RequestContext {
+    let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let log = AttemptLog {
         request_id: &request_id,
         api_key_id: identity.api_key_id,
         source: identity.source,
         client_model: &model,
         inbound,
+        stream: streaming,
         started,
-        attempts: 0,
     };
+    let mut attempts = 0u32;
 
     if !identity.allows_model(&model) {
         let message = "model is not allowed for this API key";
-        ctx.record(
+        log.record(
             state,
             None,
             None,
             inbound,
             StatusCode::FORBIDDEN,
+            attempts,
             Some(("permission_error", message)),
             Usage::default(),
         )
@@ -192,7 +195,6 @@ pub async fn proxy_with_identity(
         ));
     }
 
-    let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let client_wants_usage = body
         .get("stream_options")
         .and_then(|value| value.get("include_usage"))
@@ -225,12 +227,13 @@ pub async fn proxy_with_identity(
             body = match responses_state::expand_previous(state, api_key_id, body).await {
                 Ok(value) => value,
                 Err(ExpandError::Invalid(message)) => {
-                    ctx.record(
+                    log.record(
                         state,
                         None,
                         None,
                         inbound,
                         StatusCode::BAD_REQUEST,
+                        attempts,
                         Some(("invalid_request_error", message.as_str())),
                         Usage::default(),
                     )
@@ -263,12 +266,13 @@ pub async fn proxy_with_identity(
             .is_some()
         {
             let message = "previous_response_id is not supported in the playground";
-            ctx.record(
+            log.record(
                 state,
                 None,
                 None,
                 inbound,
                 StatusCode::BAD_REQUEST,
+                attempts,
                 Some(("invalid_request_error", message)),
                 Usage::default(),
             )
@@ -326,12 +330,13 @@ pub async fn proxy_with_identity(
                 "no channel available for this model",
             )
         };
-        ctx.record(
+        log.record(
             state,
             None,
             None,
             inbound,
             status,
+            attempts,
             Some((error_type, message)),
             Usage::default(),
         )
@@ -385,19 +390,9 @@ pub async fn proxy_with_identity(
 
     let last_candidate = candidates.len().saturating_sub(1);
     for (index, candidate) in candidates.into_iter().enumerate() {
-        if Instant::now() >= deadline {
-            last_error_type = "upstream_timeout".to_string();
-            last_message = "request deadline exceeded".to_string();
-            break;
-        }
-        if ctx.attempts >= MAX_FAILOVER_ATTEMPTS {
-            last_error_type = "upstream_error".to_string();
-            last_message = "failover attempt limit reached".to_string();
-            break;
-        }
-        if ctx.attempts > 0 && started.elapsed() >= FAILOVER_BUDGET {
-            last_error_type = "upstream_timeout".to_string();
-            last_message = "failover time budget exceeded".to_string();
+        if let Some((error_type, message)) = attempt_gate(attempts, started, deadline) {
+            last_error_type = error_type.to_string();
+            last_message = message.to_string();
             break;
         }
         let probe_lease = match state.probes.acquire(candidate.channel(), now_ms()) {
@@ -408,80 +403,59 @@ pub async fn proxy_with_identity(
                 continue;
             }
         };
-        ctx.attempts += 1;
+        attempts += 1;
         let channel = candidate.channel();
         let upstream = protocol_for_kind(&candidate.upstream_kind);
         last_channel = Some(channel.id);
         last_upstream_model = Some(candidate.upstream_model.clone());
         last_upstream = upstream;
 
-        let request_body = if upstream == inbound {
-            // The last attempt can consume the request body; earlier attempts
-            // need a copy only because a later candidate may run.
-            let mut value = if index == last_candidate {
-                std::mem::take(&mut body)
-            } else {
-                body.clone()
-            };
-            if let Some(object) = value.as_object_mut() {
-                object.insert("model".into(), json!(candidate.upstream_model));
-            }
-            value
-        } else {
-            if unified_request.is_none() {
-                unified_request = Some(match inbound.parse_request(&body) {
-                    Ok(ir) => ir,
-                    Err(error) => {
-                        let message = error.to_string();
-                        ctx.record(
-                            state,
-                            Some(channel.id),
-                            Some(&candidate.upstream_model),
-                            upstream,
-                            StatusCode::BAD_REQUEST,
-                            Some(("invalid_request_error", message.as_str())),
-                            Usage::default(),
-                        )
-                        .await;
-                        return Ok(error::client_error(
-                            inbound,
-                            StatusCode::BAD_REQUEST,
-                            message,
-                            "invalid_request_error",
-                        ));
-                    }
-                });
-            }
-            let mut ir = if index == last_candidate {
-                unified_request.take().expect("parsed above")
-            } else {
-                unified_request.clone().expect("parsed above")
-            };
-            if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
-                ir.max_tokens = Some(defaults.default_max_tokens);
-            }
-            ir.model = candidate.upstream_model.clone();
-            match upstream.encode_request(&ir) {
-                Ok(value) => value,
-                Err(error) => {
-                    // The request is valid for the inbound protocol; it is
-                    // this target protocol that cannot represent it. Another
-                    // channel may use a different upstream protocol.
-                    let message = error.to_string();
-                    if client_error.is_none() {
-                        client_error = Some(ClientFailure::new(
-                            StatusCode::BAD_REQUEST,
-                            "invalid_request_error".to_string(),
-                            message.clone(),
-                            channel.id,
-                            &candidate.upstream_model,
-                            upstream,
-                        ));
-                    }
-                    last_error_type = "invalid_request_error".to_string();
-                    last_message = message;
-                    continue;
+        let request_body = match prepare_attempt_body(
+            inbound,
+            upstream,
+            &mut body,
+            &candidate,
+            index == last_candidate,
+            &mut unified_request,
+            defaults.default_max_tokens,
+        ) {
+            AttemptBody::Ready(value) => value,
+            AttemptBody::ConversionRejected(message) => {
+                // The request is valid for the inbound protocol; it is this
+                // target protocol that cannot represent it. Another channel may
+                // use a different upstream protocol.
+                if client_error.is_none() {
+                    client_error = Some(ClientFailure::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error".to_string(),
+                        message.clone(),
+                        channel.id,
+                        &candidate.upstream_model,
+                        upstream,
+                    ));
                 }
+                last_error_type = "invalid_request_error".to_string();
+                last_message = message;
+                continue;
+            }
+            AttemptBody::InvalidRequest(message) => {
+                log.record(
+                    state,
+                    Some(channel.id),
+                    Some(&candidate.upstream_model),
+                    upstream,
+                    StatusCode::BAD_REQUEST,
+                    attempts,
+                    Some(("invalid_request_error", message.as_str())),
+                    Usage::default(),
+                )
+                .await;
+                return Ok(error::client_error(
+                    inbound,
+                    StatusCode::BAD_REQUEST,
+                    message,
+                    "invalid_request_error",
+                ));
             }
         };
 
@@ -710,12 +684,13 @@ pub async fn proxy_with_identity(
                 .mark_channel_success_if_needed(channel.id, may_have_failure)
                 .await;
 
-            ctx.record(
+            log.record(
                 state,
                 Some(channel.id),
                 Some(&candidate.upstream_model),
                 upstream,
                 status,
+                attempts,
                 None,
                 usage,
             )
@@ -772,90 +747,22 @@ pub async fn proxy_with_identity(
         last_message = message;
     }
 
-    if ctx.attempts == 0 && probe_deferred {
-        let message = "upstream channels are recovering; retry shortly";
-        ctx.record(
-            state,
-            None,
-            None,
-            inbound,
-            StatusCode::SERVICE_UNAVAILABLE,
-            Some(("channel_recovering", message)),
-            Usage::default(),
-        )
-        .await;
-        store_request_detail(
-            state,
-            &request_id,
-            identity.api_key_id,
-            detail_request.as_deref(),
-            &error::client_error_value(inbound, message, "channel_recovering").to_string(),
-        )
-        .await;
-        return Ok(error::client_error(
-            inbound,
-            StatusCode::SERVICE_UNAVAILABLE,
-            message,
-            "channel_recovering",
-        ));
-    }
-
-    // Every channel was tried. If one of them rejected the payload itself,
-    // surface that status instead of hiding a client mistake behind a 502.
-    if let Some(failure) = client_error {
-        ctx.record(
-            state,
-            Some(failure.channel_id),
-            Some(&failure.upstream_model),
-            failure.upstream,
-            failure.status,
-            Some((failure.error_type.as_str(), failure.message.as_str())),
-            Usage::default(),
-        )
-        .await;
-        store_request_detail(
-            state,
-            &request_id,
-            identity.api_key_id,
-            detail_request.as_deref(),
-            &error::client_error_value(inbound, &failure.message, &failure.error_type).to_string(),
-        )
-        .await;
-        return Ok(error::client_error(
-            inbound,
-            failure.status,
-            failure.message,
-            &failure.error_type,
-        ));
-    }
-
-    ctx.record(
+    finish_failover(
         state,
-        last_channel,
-        last_upstream_model.as_deref(),
-        last_upstream,
-        StatusCode::BAD_GATEWAY,
-        Some((last_error_type.as_str(), last_message.as_str())),
-        Usage::default(),
-    )
-    .await;
-
-    let message = format!("all upstream channels failed: {last_message}");
-    store_request_detail(
-        state,
-        &request_id,
-        identity.api_key_id,
+        &log,
+        attempts,
         detail_request.as_deref(),
-        &error::client_error_value(inbound, &message, &last_error_type).to_string(),
+        FailoverState {
+            last_channel,
+            last_upstream_model,
+            last_upstream,
+            last_error_type,
+            last_message,
+            client_error,
+            probe_deferred,
+        },
     )
-    .await;
-
-    Ok(error::client_error(
-        inbound,
-        StatusCode::BAD_GATEWAY,
-        message,
-        &last_error_type,
-    ))
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -879,6 +786,15 @@ async fn proxy_stream(
     headers: &HeaderMap,
     defaults: models::setting::GatewayDefaults,
 ) -> Result<Response, AppError> {
+    let log = AttemptLog {
+        request_id,
+        api_key_id: identity.api_key_id,
+        source: identity.source,
+        client_model: model,
+        inbound,
+        stream: true,
+        started,
+    };
     let mut attempts = 0u32;
     let mut last_channel: Option<i64> = None;
     let mut last_upstream_model: Option<String> = None;
@@ -891,19 +807,9 @@ async fn proxy_stream(
 
     let last_candidate = candidates.len().saturating_sub(1);
     'candidates: for (index, candidate) in candidates.into_iter().enumerate() {
-        if Instant::now() >= deadline {
-            last_error_type = "upstream_timeout".to_string();
-            last_message = "request deadline exceeded".to_string();
-            break;
-        }
-        if attempts >= MAX_FAILOVER_ATTEMPTS {
-            last_error_type = "upstream_error".to_string();
-            last_message = "failover attempt limit reached".to_string();
-            break;
-        }
-        if attempts > 0 && started.elapsed() >= FAILOVER_BUDGET {
-            last_error_type = "upstream_timeout".to_string();
-            last_message = "failover time budget exceeded".to_string();
+        if let Some((error_type, message)) = attempt_gate(attempts, started, deadline) {
+            last_error_type = error_type.to_string();
+            last_message = message.to_string();
             break;
         }
         let probe = match state.probes.acquire(candidate.channel(), now_ms()) {
@@ -921,74 +827,52 @@ async fn proxy_stream(
         last_upstream_model = Some(candidate.upstream_model.clone());
         last_upstream = upstream;
 
-        let mut request_body = if upstream == inbound {
-            let mut value = if index == last_candidate {
-                std::mem::take(&mut body)
-            } else {
-                body.clone()
-            };
-            if let Some(object) = value.as_object_mut() {
-                object.insert("model".into(), json!(candidate.upstream_model));
-            }
-            value
-        } else {
-            if unified_request.is_none() {
-                unified_request = Some(match inbound.parse_request(&body) {
-                    Ok(ir) => ir,
-                    Err(error) => {
-                        let message = error.to_string();
-                        record_stream_attempt(
-                            state,
-                            request_id,
-                            &identity,
-                            model,
-                            Some(channel.id),
-                            Some(&candidate.upstream_model),
-                            inbound,
-                            upstream,
-                            StatusCode::BAD_REQUEST,
-                            attempts,
-                            started,
-                            Some(("invalid_request_error", message.as_str())),
-                            Usage::default(),
-                        )
-                        .await;
-                        return Ok(error::client_error(
-                            inbound,
-                            StatusCode::BAD_REQUEST,
-                            message,
-                            "invalid_request_error",
-                        ));
-                    }
-                });
-            }
-            let mut ir = if index == last_candidate {
-                unified_request.take().expect("parsed above")
-            } else {
-                unified_request.clone().expect("parsed above")
-            };
-            if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
-                ir.max_tokens = Some(defaults.default_max_tokens);
-            }
-            ir.model = candidate.upstream_model.clone();
-            match upstream.encode_request(&ir) {
-                Ok(value) => value,
-                Err(error) => {
-                    let message = error.to_string();
-                    if client_error.is_none() {
-                        client_error = Some(ClientFailure::new(
-                            StatusCode::BAD_REQUEST,
-                            "invalid_request_error".to_string(),
-                            message.clone(),
-                            channel.id,
-                            &candidate.upstream_model,
-                            upstream,
-                        ));
-                    }
-                    last_error_type = "invalid_request_error".to_string();
-                    last_message = message;
-                    continue 'candidates;
+        let mut request_body = match prepare_attempt_body(
+            inbound,
+            upstream,
+            &mut body,
+            &candidate,
+            index == last_candidate,
+            &mut unified_request,
+            defaults.default_max_tokens,
+        ) {
+            AttemptBody::Ready(value) => value,
+            AttemptBody::ConversionRejected(message) => {
+                // The request is valid for the inbound protocol; it is this
+                // target protocol that cannot represent it. Another channel may
+                // use a different upstream protocol.
+                if client_error.is_none() {
+                    client_error = Some(ClientFailure::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error".to_string(),
+                        message.clone(),
+                        channel.id,
+                        &candidate.upstream_model,
+                        upstream,
+                    ));
                 }
+                last_error_type = "invalid_request_error".to_string();
+                last_message = message;
+                continue;
+            }
+            AttemptBody::InvalidRequest(message) => {
+                log.record(
+                    state,
+                    Some(channel.id),
+                    Some(&candidate.upstream_model),
+                    upstream,
+                    StatusCode::BAD_REQUEST,
+                    attempts,
+                    Some(("invalid_request_error", message.as_str())),
+                    Usage::default(),
+                )
+                .await;
+                return Ok(error::client_error(
+                    inbound,
+                    StatusCode::BAD_REQUEST,
+                    message,
+                    "invalid_request_error",
+                ));
             }
         };
 
@@ -1163,158 +1047,37 @@ async fn proxy_stream(
         }
     }
 
-    if attempts == 0 && probe_deferred {
-        let message = "upstream channels are recovering; retry shortly";
-        record_stream_attempt(
-            state,
-            request_id,
-            &identity,
-            model,
-            None,
-            None,
-            inbound,
-            inbound,
-            StatusCode::SERVICE_UNAVAILABLE,
-            attempts,
-            started,
-            Some(("channel_recovering", message)),
-            Usage::default(),
-        )
-        .await;
-        store_request_detail(
-            state,
-            request_id,
-            identity.api_key_id,
-            detail_request.as_deref(),
-            &error::client_error_value(inbound, message, "channel_recovering").to_string(),
-        )
-        .await;
-        return Ok(error::client_error(
-            inbound,
-            StatusCode::SERVICE_UNAVAILABLE,
-            message,
-            "channel_recovering",
-        ));
-    }
-
-    if let Some(failure) = client_error {
-        record_stream_attempt(
-            state,
-            request_id,
-            &identity,
-            model,
-            Some(failure.channel_id),
-            Some(&failure.upstream_model),
-            inbound,
-            failure.upstream,
-            failure.status,
-            attempts,
-            started,
-            Some((failure.error_type.as_str(), failure.message.as_str())),
-            Usage::default(),
-        )
-        .await;
-        store_request_detail(
-            state,
-            request_id,
-            identity.api_key_id,
-            detail_request.as_deref(),
-            &error::client_error_value(inbound, &failure.message, &failure.error_type).to_string(),
-        )
-        .await;
-        return Ok(error::client_error(
-            inbound,
-            failure.status,
-            failure.message,
-            &failure.error_type,
-        ));
-    }
-
-    record_stream_attempt(
+    finish_failover(
         state,
-        request_id,
-        &identity,
-        model,
-        last_channel,
-        last_upstream_model.as_deref(),
-        inbound,
-        last_upstream,
-        StatusCode::BAD_GATEWAY,
+        &log,
         attempts,
-        started,
-        Some((last_error_type.as_str(), last_message.as_str())),
-        Usage::default(),
-    )
-    .await;
-
-    let message = format!("all upstream channels failed: {last_message}");
-    store_request_detail(
-        state,
-        request_id,
-        identity.api_key_id,
         detail_request.as_deref(),
-        &error::client_error_value(inbound, &message, &last_error_type).to_string(),
+        FailoverState {
+            last_channel,
+            last_upstream_model,
+            last_upstream,
+            last_error_type,
+            last_message,
+            client_error,
+            probe_deferred,
+        },
     )
-    .await;
-
-    Ok(error::client_error(
-        inbound,
-        StatusCode::BAD_GATEWAY,
-        message,
-        &last_error_type,
-    ))
+    .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn record_stream_attempt(
-    state: &AppState,
-    request_id: &str,
-    identity: &ProxyIdentity,
-    model: &str,
-    channel_id: Option<i64>,
-    upstream_model: Option<&str>,
-    inbound: Protocol,
-    upstream: Protocol,
-    status: StatusCode,
-    attempts: u32,
-    started: Instant,
-    error: Option<(&str, &str)>,
-    tokens: Usage,
-) {
-    let record = UsageRecord {
-        request_id,
-        source: identity.source,
-        api_key_id: identity.api_key_id,
-        channel_id,
-        model,
-        upstream_model,
-        inbound_protocol: inbound.as_str(),
-        upstream_protocol: upstream.as_str(),
-        stream: true,
-        status_code: status.as_u16(),
-        attempts,
-        error_type: error.map(|(error_type, _)| error_type),
-        error_message: error.map(|(_, message)| message),
-        usage: &tokens,
-        latency_ms: started.elapsed().as_millis() as i64,
-        first_token_ms: None,
-        created_at: now_ms(),
-    };
-
-    usage::record(state, &record).await;
-}
-
-struct RequestContext<'a> {
+/// One usage row for a single attempt, shared by the non-stream and stream
+/// failover loops. The only difference between the two is the `stream` flag.
+struct AttemptLog<'a> {
     request_id: &'a str,
     api_key_id: Option<i64>,
     source: &'a str,
     client_model: &'a str,
     inbound: Protocol,
+    stream: bool,
     started: Instant,
-    attempts: u32,
 }
 
-impl RequestContext<'_> {
+impl AttemptLog<'_> {
     #[allow(clippy::too_many_arguments)]
     async fn record(
         &self,
@@ -1323,6 +1086,7 @@ impl RequestContext<'_> {
         upstream_model: Option<&str>,
         upstream: Protocol,
         status: StatusCode,
+        attempts: u32,
         error: Option<(&str, &str)>,
         usage: Usage,
     ) {
@@ -1335,9 +1099,9 @@ impl RequestContext<'_> {
             upstream_model,
             inbound_protocol: self.inbound.as_str(),
             upstream_protocol: upstream.as_str(),
-            stream: false,
+            stream: self.stream,
             status_code: status.as_u16(),
-            attempts: self.attempts,
+            attempts,
             error_type: error.map(|(error_type, _)| error_type),
             error_message: error.map(|(_, message)| message),
             usage: &usage,
@@ -1347,6 +1111,200 @@ impl RequestContext<'_> {
         };
 
         usage::record(state, &record).await;
+    }
+}
+
+/// Everything the two failover loops accumulate and then hand to
+/// [`finish_failover`] when no attempt produced a usable payload.
+struct FailoverState {
+    last_channel: Option<i64>,
+    last_upstream_model: Option<String>,
+    last_upstream: Protocol,
+    last_error_type: String,
+    last_message: String,
+    client_error: Option<ClientFailure>,
+    probe_deferred: bool,
+}
+
+/// Turn a fully exhausted failover attempt into the client response.
+///
+/// Shared by the non-stream and stream paths so both report the same status,
+/// error shape and usage row: all channels cooling -> 503, a payload the
+/// upstream rejected -> that upstream's status, otherwise 502.
+async fn finish_failover(
+    state: &AppState,
+    log: &AttemptLog<'_>,
+    attempts: u32,
+    detail_request: Option<&str>,
+    failover: FailoverState,
+) -> Result<Response, AppError> {
+    let inbound = log.inbound;
+
+    if attempts == 0 && failover.probe_deferred {
+        let message = "upstream channels are recovering; retry shortly";
+        log.record(
+            state,
+            None,
+            None,
+            inbound,
+            StatusCode::SERVICE_UNAVAILABLE,
+            attempts,
+            Some(("channel_recovering", message)),
+            Usage::default(),
+        )
+        .await;
+        store_request_detail(
+            state,
+            log.request_id,
+            log.api_key_id,
+            detail_request,
+            &error::client_error_value(inbound, message, "channel_recovering").to_string(),
+        )
+        .await;
+        return Ok(error::client_error(
+            inbound,
+            StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            "channel_recovering",
+        ));
+    }
+
+    // Every channel was tried. If one of them rejected the payload itself,
+    // surface that status instead of hiding a client mistake behind a 502.
+    if let Some(failure) = failover.client_error {
+        log.record(
+            state,
+            Some(failure.channel_id),
+            Some(&failure.upstream_model),
+            failure.upstream,
+            failure.status,
+            attempts,
+            Some((failure.error_type.as_str(), failure.message.as_str())),
+            Usage::default(),
+        )
+        .await;
+        store_request_detail(
+            state,
+            log.request_id,
+            log.api_key_id,
+            detail_request,
+            &error::client_error_value(inbound, &failure.message, &failure.error_type).to_string(),
+        )
+        .await;
+        return Ok(error::client_error(
+            inbound,
+            failure.status,
+            failure.message,
+            &failure.error_type,
+        ));
+    }
+
+    log.record(
+        state,
+        failover.last_channel,
+        failover.last_upstream_model.as_deref(),
+        failover.last_upstream,
+        StatusCode::BAD_GATEWAY,
+        attempts,
+        Some((
+            failover.last_error_type.as_str(),
+            failover.last_message.as_str(),
+        )),
+        Usage::default(),
+    )
+    .await;
+
+    let message = format!("all upstream channels failed: {}", failover.last_message);
+    store_request_detail(
+        state,
+        log.request_id,
+        log.api_key_id,
+        detail_request,
+        &error::client_error_value(inbound, &message, &failover.last_error_type).to_string(),
+    )
+    .await;
+
+    Ok(error::client_error(
+        inbound,
+        StatusCode::BAD_GATEWAY,
+        message,
+        &failover.last_error_type,
+    ))
+}
+
+/// Per-iteration limits shared by both failover loops. A `Some` value means the
+/// loop must stop instead of starting another attempt.
+fn attempt_gate(
+    attempts: u32,
+    started: Instant,
+    deadline: Instant,
+) -> Option<(&'static str, &'static str)> {
+    if Instant::now() >= deadline {
+        return Some(("upstream_timeout", "request deadline exceeded"));
+    }
+    if attempts >= MAX_FAILOVER_ATTEMPTS {
+        return Some(("upstream_error", "failover attempt limit reached"));
+    }
+    if attempts > 0 && started.elapsed() >= FAILOVER_BUDGET {
+        return Some(("upstream_timeout", "failover time budget exceeded"));
+    }
+    None
+}
+
+/// Result of building one attempt's upstream body.
+enum AttemptBody {
+    Ready(Value),
+    /// The inbound payload is valid but this target protocol cannot express it.
+    /// Another channel may speak a different protocol, so keep failing over
+    /// without cooling the channel down.
+    ConversionRejected(String),
+    /// The inbound payload itself is invalid: no channel can accept it.
+    InvalidRequest(String),
+}
+
+/// Build the upstream body for one attempt, either by forwarding the inbound
+/// JSON (same protocol) or by converting it through the IR.
+fn prepare_attempt_body(
+    inbound: Protocol,
+    upstream: Protocol,
+    body: &mut Value,
+    candidate: &select::Candidate,
+    last_candidate: bool,
+    unified_request: &mut Option<UnifiedRequest>,
+    default_max_tokens: u32,
+) -> AttemptBody {
+    if upstream == inbound {
+        // The last attempt can consume the request body; earlier attempts need
+        // a copy only because a later candidate may run.
+        let mut value = if last_candidate {
+            std::mem::take(body)
+        } else {
+            body.clone()
+        };
+        if let Some(object) = value.as_object_mut() {
+            object.insert("model".into(), json!(candidate.upstream_model));
+        }
+        return AttemptBody::Ready(value);
+    }
+
+    if unified_request.is_none() {
+        *unified_request = Some(match inbound.parse_request(body) {
+            Ok(ir) => ir,
+            Err(error) => return AttemptBody::InvalidRequest(error.to_string()),
+        });
+    }
+    let mut ir = if last_candidate {
+        unified_request.take().expect("parsed above")
+    } else {
+        unified_request.clone().expect("parsed above")
+    };
+    if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
+        ir.max_tokens = Some(default_max_tokens);
+    }
+    ir.model = candidate.upstream_model.clone();
+    match upstream.encode_request(&ir) {
+        Ok(value) => AttemptBody::Ready(value),
+        Err(error) => AttemptBody::ConversionRejected(error.to_string()),
     }
 }
 
