@@ -27,7 +27,7 @@ pub async fn export(
         ));
     }
 
-    let path = backup::snapshot(&state.db, &state.config.data_dir, "export")
+    let path = backup::snapshot(&state.db, &state.config.data_dir, "export", false)
         .await
         .map_err(AppError::Internal)?;
     let bytes = tokio::fs::read(&path)
@@ -92,7 +92,7 @@ pub async fn import(
     // Take a consistent copy of the live database before replacing it. The
     // startup swap also keeps its own copy, but this one includes the current
     // WAL and is created while the pool is still open.
-    let pre_import = backup::snapshot(&state.db, &state.config.data_dir, "pre-import")
+    let pre_import = backup::snapshot(&state.db, &state.config.data_dir, "pre-import", true)
         .await
         .map_err(AppError::Internal)?;
     tracing::warn!(
