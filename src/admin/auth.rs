@@ -268,10 +268,8 @@ pub async fn change_password(
     }
     state.login_limiter.record_success(&limiter_key);
 
-    if input.new_password.chars().count() < 8 {
-        return Err(AppError::BadRequest(
-            "new password must be at least 8 characters".to_string(),
-        ));
+    if let Some(violation) = security::password_violation(&input.new_password) {
+        return Err(AppError::BadRequest(format!("new password {violation}")));
     }
 
     let password_hash = security::hash_password(&input.new_password).map_err(AppError::Internal)?;
@@ -322,10 +320,8 @@ pub async fn bootstrap(pool: &SqlitePool) -> anyhow::Result<()> {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "admin".to_string());
 
-    if password.chars().count() < 8 {
-        return Err(anyhow::anyhow!(
-            "ONEAPI_ADMIN_PASSWORD must be at least 8 characters"
-        ));
+    if let Some(violation) = security::password_violation(&password) {
+        return Err(anyhow::anyhow!("ONEAPI_ADMIN_PASSWORD {violation}"));
     }
 
     let password_hash = security::hash_password(&password)?;

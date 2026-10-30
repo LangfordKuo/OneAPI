@@ -231,8 +231,8 @@ async fn reset_password(data_dir: Option<PathBuf>, password: Option<String>) -> 
         }
     };
 
-    if password.chars().count() < 8 {
-        anyhow::bail!("password must be at least 8 characters");
+    if let Some(violation) = security::password_violation(&password) {
+        anyhow::bail!("password {violation}");
     }
 
     let password_hash = security::hash_password(&password)?;

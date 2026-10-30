@@ -114,11 +114,7 @@ pub async fn import(
         .await
         .map_err(anyhow::Error::from)
         .map_err(AppError::Internal)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600));
-    }
+    let _ = crate::security::restrict_permissions(&staging);
 
     if let Err(error) = backup::validate(&staging).await {
         let _ = tokio::fs::remove_file(&staging).await;
