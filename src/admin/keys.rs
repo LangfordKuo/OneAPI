@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -120,11 +118,7 @@ async fn validate_restrictions(
         ))
     })?;
     if !channel_ids.is_empty() {
-        let existing: HashSet<i64> = models::channel::list(&state.db)
-            .await?
-            .into_iter()
-            .map(|channel| channel.id)
-            .collect();
+        let existing = models::channel::existing_ids(&state.db, &channel_ids).await?;
         if let Some(missing) = channel_ids.iter().find(|id| !existing.contains(id)) {
             return Err(AppError::BadRequest(format!(
                 "channel {missing} does not exist"
@@ -219,11 +213,16 @@ pub async fn update(
         .await?
         .ok_or_else(|| AppError::NotFound("key not found".to_string()))?;
 
-    let name = input
-        .name
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| existing.name.clone());
+    let name = match input.name {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(AppError::BadRequest("name cannot be empty".to_string()));
+            }
+            trimmed.to_string()
+        }
+        None => existing.name.clone(),
+    };
     let enabled = input
         .enabled
         .map(|value| if value { 1 } else { 0 })

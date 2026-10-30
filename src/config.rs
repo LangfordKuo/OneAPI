@@ -22,11 +22,9 @@ impl Config {
     /// Read configuration from the process environment and `.env` files.
     /// Callers must have run [`load_env_before_startup`] first; this function
     /// never mutates the environment itself.
-    pub fn from_env(data_dir: Option<PathBuf>) -> Result<Self> {
-        let data_dir = data_dir
-            .or_else(|| env::var_os("ONEAPI_DATA_DIR").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("./data"));
-
+    /// `data_dir` is already resolved by [`load_env_before_startup`]; resolving
+    /// it twice would leave a second, unreachable fallback in the code.
+    pub fn from_env(data_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("failed to create data directory {}", data_dir.display()))?;
 

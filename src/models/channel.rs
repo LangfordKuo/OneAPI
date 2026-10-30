@@ -1,7 +1,7 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct Channel {
@@ -408,6 +408,24 @@ fn catalog_models_from(channel: &Channel, configs: &[ProtocolConfig]) -> Catalog
         models: models.into_iter().collect(),
         has_wildcard,
     }
+}
+
+/// Return the subset of `ids` that exist, without loading whole channel rows.
+pub async fn existing_ids(pool: &SqlitePool, ids: &[i64]) -> sqlx::Result<HashSet<i64>> {
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut builder: QueryBuilder<Sqlite> =
+        QueryBuilder::new("SELECT id FROM channels WHERE id IN (");
+    let mut separated = builder.separated(", ");
+    for id in ids {
+        separated.push_bind(*id);
+    }
+    separated.push_unseparated(")");
+
+    let found: Vec<i64> = builder.build_query_scalar().fetch_all(pool).await?;
+    Ok(found.into_iter().collect())
 }
 
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<Channel>> {

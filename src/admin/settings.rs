@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
@@ -39,39 +37,29 @@ pub struct SettingsOutput {
 
 impl SettingsOutput {
     fn from_rows(rows: Vec<(String, String)>) -> Self {
-        let map: HashMap<String, String> = rows.into_iter().collect();
-        let integer = |key: &str, default: i64| {
-            map.get(key)
-                .and_then(|value| value.parse::<i64>().ok())
-                .unwrap_or(default)
-        };
-        let boolean = |key: &str, default: bool| {
-            map.get(key)
-                .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
-                .unwrap_or(default)
-        };
+        let map = setting::SettingsMap::new(rows);
 
         Self {
-            site_name: map
-                .get("site_name")
-                .cloned()
-                .unwrap_or_else(|| "OneAPI".to_string()),
+            site_name: map.string("site_name").unwrap_or("OneAPI").to_string(),
             site_domain: map
-                .get("site_domain")
-                .and_then(|value| normalize_authority(value))
+                .string("site_domain")
+                .and_then(normalize_authority)
                 .unwrap_or_default(),
-            default_max_tokens: integer("default_max_tokens", 4096),
-            nonstream_timeout_seconds: integer("nonstream_timeout_seconds", 600),
-            stream_idle_timeout_seconds: integer("stream_idle_timeout_seconds", 120),
-            usage_log_retention_days: integer("usage_log_retention_days", 30),
-            response_retention_days: integer("response_retention_days", 7),
-            store_request_bodies: boolean("store_request_bodies", false),
+            default_max_tokens: map.integer("default_max_tokens", 4096),
+            nonstream_timeout_seconds: map.integer("nonstream_timeout_seconds", 600),
+            stream_idle_timeout_seconds: map.integer("stream_idle_timeout_seconds", 120),
+            usage_log_retention_days: map.integer("usage_log_retention_days", 30),
+            response_retention_days: map.integer("response_retention_days", 7),
+            store_request_bodies: map.boolean("store_request_bodies", false),
             update_source: map
-                .get("update_source")
-                .filter(|value| value.as_str() == "github" || value.as_str() == "ghproxy")
-                .cloned()
-                .unwrap_or_else(|| "github".to_string()),
-            client_ip_header: map.get(client_ip::SETTING_KEY).cloned().unwrap_or_default(),
+                .string("update_source")
+                .filter(|value| *value == "github" || *value == "ghproxy")
+                .unwrap_or("github")
+                .to_string(),
+            client_ip_header: map
+                .string(client_ip::SETTING_KEY)
+                .unwrap_or_default()
+                .to_string(),
         }
     }
 }
