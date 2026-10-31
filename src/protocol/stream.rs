@@ -1798,3 +1798,111 @@ impl ResponsesEncoder {
         Value::Object(object)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::sse::SseFrame;
+
+    fn frame(event: Option<&str>, data: &str) -> SseFrame {
+        SseFrame {
+            event: event.map(str::to_string),
+            data: data.to_string(),
+            raw: Vec::new(),
+        }
+    }
+
+    fn has_error_event(events: &[StreamEvent]) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Error { .. }))
+    }
+
+    #[tokio::test]
+    async fn chat_done_marks_the_stream_terminal() {
+        let mut decoder = StreamDecoder::new(Protocol::Chat);
+
+        let events = decoder.decode(&frame(None, "[DONE]")).expect("decode");
+
+        assert!(
+            events.iter().any(|event| matches!(event, StreamEvent::Done)),
+            "the done sentinel must close the stream"
+        );
+        assert!(
+            decoder.saw_terminal(),
+            "[DONE] is the only terminal marker for a chat stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_null_error_is_not_a_stream_error() {
+        let mut decoder = StreamDecoder::new(Protocol::Chat);
+
+        let events = decoder.decode(&frame(None, r#"{"error":null}"#)).expect("decode");
+
+        assert!(
+            !has_error_event(&events),
+            "`error: null` is a successful frame, got: {events:?}"
+        );
+        assert!(
+            !decoder.saw_terminal(),
+            "an ordinary frame must not mark the stream terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_failed_without_error_field_still_emits_an_error() {
+        let mut decoder = StreamDecoder::new(Protocol::Responses);
+
+        let events = decoder
+            .decode(&frame(
+                Some("response.failed"),
+                r#"{"type":"response.failed","response":{"id":"resp_fail","status":"failed"}}"#,
+            ))
+            .expect("decode");
+
+        let error = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::Error {
+                    error_type,
+                    message,
+                } => Some((error_type.as_str(), message.as_str())),
+                _ => None,
+            })
+            .expect("response.failed must synthesize an error event");
+        assert_eq!(error.0, "upstream_error");
+        assert_eq!(error.1, "upstream response failed");
+        assert!(
+            decoder.saw_terminal(),
+            "response.failed is a terminal event even without a nested error"
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_completed_is_terminal_but_in_progress_is_not() {
+        let mut completed = StreamDecoder::new(Protocol::Responses);
+        completed
+            .decode(&frame(
+                Some("response.completed"),
+                r#"{"type":"response.completed","response":{"id":"resp_ok","status":"completed","output":[]}}"#,
+            ))
+            .expect("decode completed");
+        assert!(
+            completed.saw_terminal(),
+            "response.completed must mark the stream terminal"
+        );
+
+        let mut in_progress = StreamDecoder::new(Protocol::Responses);
+        in_progress
+            .decode(&frame(
+                Some("response.in_progress"),
+                r#"{"type":"response.in_progress","response":{"id":"resp_pending","status":"in_progress"}}"#,
+            ))
+            .expect("decode in progress");
+        assert!(
+            !in_progress.saw_terminal(),
+            "response.in_progress must not mark the stream terminal"
+        );
+    }
+}

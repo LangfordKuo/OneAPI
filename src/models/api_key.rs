@@ -450,3 +450,132 @@ where
     }
     models
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{insert_key, pool};
+
+    const DAY: i64 = 20_000;
+
+    fn now_ms() -> i64 {
+        DAY * 86_400_000
+    }
+
+    #[tokio::test]
+    async fn reservations_enforce_lifetime_limit_and_release() {
+        let pool = pool().await;
+        let id = insert_key(&pool, "lifetime", Some(100), None).await;
+        sqlx::query("UPDATE api_keys SET token_usage = 90 WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("seed token usage");
+
+        assert_eq!(
+            reserve(&pool, id, 20, DAY, now_ms()).await.expect("reserve"),
+            ReserveOutcome::TokenLimit,
+            "90 used + 20 reserved would exceed the 100 token limit"
+        );
+
+        assert_eq!(
+            reserve(&pool, id, 10, DAY, now_ms()).await.expect("reserve"),
+            ReserveOutcome::Reserved,
+            "the reservation that exactly fills the limit must succeed"
+        );
+        assert_eq!(
+            get(&pool, id).await.expect("get").expect("row").reserved_tokens,
+            10
+        );
+
+        assert_eq!(
+            reserve(&pool, id, 1, DAY, now_ms()).await.expect("reserve"),
+            ReserveOutcome::TokenLimit,
+            "the existing reservation must count against the limit"
+        );
+
+        release_reservation(&pool, id, 10, DAY)
+            .await
+            .expect("release reservation");
+        assert_eq!(
+            get(&pool, id).await.expect("get").expect("row").reserved_tokens,
+            0,
+            "releasing the held tokens must clear the reservation"
+        );
+    }
+
+    #[tokio::test]
+    async fn reservations_enforce_daily_limit() {
+        let pool = pool().await;
+        let id = insert_key(&pool, "daily", None, Some(50)).await;
+        sqlx::query(
+            "UPDATE api_keys SET daily_usage_day = ?, daily_token_usage = 30 WHERE id = ?",
+        )
+        .bind(DAY)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect("seed daily usage");
+
+        assert_eq!(
+            reserve(&pool, id, 30, DAY, now_ms()).await.expect("reserve"),
+            ReserveOutcome::DailyLimit,
+            "30 used + 30 reserved would exceed the 50 token daily limit"
+        );
+
+        assert_eq!(
+            reserve(&pool, id, 20, DAY, now_ms()).await.expect("reserve"),
+            ReserveOutcome::Reserved,
+            "the reservation that exactly fills the daily limit must succeed"
+        );
+        let row = get(&pool, id).await.expect("get").expect("row");
+        assert_eq!(row.reserved_daily_tokens, 20);
+        assert_eq!(row.reserved_day, DAY);
+    }
+
+    #[tokio::test]
+    async fn stale_reservations_only_clear_rows_older_than_cutoff() {
+        let pool = pool().await;
+        let stale = insert_key(&pool, "stale", None, None).await;
+        let fresh = insert_key(&pool, "fresh", None, None).await;
+        for (id, reserved_at) in [(stale, 1_000), (fresh, 5_000)] {
+            sqlx::query(
+                "UPDATE api_keys SET reserved_tokens = 7, reserved_daily_tokens = 7,
+                    reserved_day = ?, reserved_at = ? WHERE id = ?",
+            )
+            .bind(DAY)
+            .bind(reserved_at)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("seed reservation");
+        }
+
+        let cleared = clear_stale_reservations(&pool, 3_000)
+            .await
+            .expect("clear stale reservations");
+
+        assert_eq!(cleared, 1, "only the row older than the cutoff is stale");
+        let stale_row = get(&pool, stale).await.expect("get").expect("row");
+        assert_eq!(stale_row.reserved_tokens, 0);
+        assert_eq!(stale_row.reserved_daily_tokens, 0);
+        let stale_at: Option<i64> =
+            sqlx::query_scalar("SELECT reserved_at FROM api_keys WHERE id = ?")
+                .bind(stale)
+                .fetch_one(&pool)
+                .await
+                .expect("read stale reserved_at");
+        assert_eq!(stale_at, None);
+
+        let fresh_row = get(&pool, fresh).await.expect("get").expect("row");
+        assert_eq!(fresh_row.reserved_tokens, 7, "fresh reservation must survive");
+        assert_eq!(fresh_row.reserved_daily_tokens, 7);
+        let fresh_at: Option<i64> =
+            sqlx::query_scalar("SELECT reserved_at FROM api_keys WHERE id = ?")
+                .bind(fresh)
+                .fetch_one(&pool)
+                .await
+                .expect("read fresh reserved_at");
+        assert_eq!(fresh_at, Some(5_000));
+    }
+}

@@ -15,6 +15,8 @@ mod recovery;
 mod security;
 mod state;
 mod telemetry;
+#[cfg(test)]
+mod test_support;
 mod update;
 mod upstream;
 mod web;

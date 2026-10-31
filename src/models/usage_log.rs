@@ -233,3 +233,139 @@ pub async fn detail_bodies(
     .fetch_optional(pool)
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{insert_key, pool};
+
+    async fn insert_usage(
+        pool: &SqlitePool,
+        request_id: &str,
+        api_key_id: Option<i64>,
+        detail_api_key_id: Option<i64>,
+        model: &str,
+    ) -> i64 {
+        let result = sqlx::query(
+            "INSERT INTO usage_logs
+             (request_id, source, api_key_id, detail_api_key_id, model, inbound_protocol,
+              upstream_protocol, status_code, latency_ms, created_at)
+             VALUES (?, 'gateway', ?, ?, ?, 'chat', 'chat', 200, 5, 1)",
+        )
+        .bind(request_id)
+        .bind(api_key_id)
+        .bind(detail_api_key_id)
+        .bind(model)
+        .execute(pool)
+        .await
+        .expect("insert usage log");
+        result.last_insert_rowid()
+    }
+
+    async fn insert_detail(
+        pool: &SqlitePool,
+        request_id: &str,
+        api_key_id: i64,
+        request_body: &str,
+        response_body: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO request_details
+             (request_id, api_key_id, request_body, response_body, created_at)
+             VALUES (?, ?, ?, ?, 1)",
+        )
+        .bind(request_id)
+        .bind(api_key_id)
+        .bind(request_body)
+        .bind(response_body)
+        .execute(pool)
+        .await
+        .expect("insert request detail");
+    }
+
+    #[tokio::test]
+    async fn details_are_scoped_to_the_key_that_wrote_them() {
+        let pool = pool().await;
+        let first = insert_key(&pool, "first", None, None).await;
+        let second = insert_key(&pool, "second", None, None).await;
+        let request_id = "shared-request-id";
+        insert_detail(&pool, request_id, first, "request-first", "response-first").await;
+        insert_detail(&pool, request_id, second, "request-second", "response-second").await;
+        let first_log =
+            insert_usage(&pool, request_id, Some(first), Some(first), "model-first").await;
+        let second_log =
+            insert_usage(&pool, request_id, Some(second), Some(second), "model-second").await;
+
+        let first_row = find_by_id(&pool, first_log)
+            .await
+            .expect("find first")
+            .expect("first row");
+        let second_row = find_by_id(&pool, second_log)
+            .await
+            .expect("find second")
+            .expect("second row");
+        assert_eq!(first_row.api_key_id, Some(first));
+        assert_eq!(first_row.model, "model-first");
+        assert_eq!(second_row.api_key_id, Some(second));
+        assert_eq!(second_row.model, "model-second");
+
+        assert_eq!(
+            detail_bodies(&pool, first_log).await.expect("first bodies"),
+            Some((
+                Some("request-first".to_string()),
+                Some("response-first".to_string())
+            )),
+            "the first key must not receive the second key's bodies"
+        );
+        assert_eq!(
+            detail_bodies(&pool, second_log).await.expect("second bodies"),
+            Some((
+                Some("request-second".to_string()),
+                Some("response-second".to_string())
+            )),
+            "the second key must not receive the first key's bodies"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleted_key_details_do_not_fall_back_to_another_key() {
+        let pool = pool().await;
+        let deleted = insert_key(&pool, "deleted", None, None).await;
+        let live = insert_key(&pool, "live", None, None).await;
+        let request_id = "reused-request-id";
+        let history_log =
+            insert_usage(&pool, request_id, Some(deleted), Some(deleted), "model-history").await;
+
+        // Deleting the key nulls `usage_logs.api_key_id` but leaves the usage
+        // row and its `detail_api_key_id` behind. Recreate the detail row as a
+        // historical record (written before the cleanup trigger existed) so the
+        // reader has something to return for the deleted owner.
+        sqlx::query("DELETE FROM api_keys WHERE id = ?")
+            .bind(deleted)
+            .execute(&pool)
+            .await
+            .expect("delete api key");
+        insert_detail(&pool, request_id, deleted, "history-request", "history-response").await;
+        insert_detail(&pool, request_id, live, "live-request", "live-response").await;
+
+        let row = find_by_id(&pool, history_log)
+            .await
+            .expect("find history")
+            .expect("history row");
+        assert_eq!(
+            row.api_key_id, None,
+            "deleting the key must clear the usage row's foreign key"
+        );
+
+        assert_eq!(
+            detail_bodies(&pool, history_log)
+                .await
+                .expect("history bodies"),
+            Some((
+                Some("history-request".to_string()),
+                Some("history-response".to_string())
+            )),
+            "the historical detail must be found by its deleted key id, not the live key"
+        );
+    }
+}
