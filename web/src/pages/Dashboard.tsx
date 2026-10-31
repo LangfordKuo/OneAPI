@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Cpu,
+  MessagesSquare,
   Zap,
 } from 'lucide-react';
 import {
@@ -255,18 +256,37 @@ export default function Dashboard() {
 
       <Card className="mb-4 overflow-hidden bg-gradient-to-br from-emerald-500/5 via-transparent to-transparent">
         <CardContent className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="rounded-xl bg-emerald-500/10 p-3 text-emerald-600 dark:text-emerald-400">
-              <Activity className="size-5" />
+          <div className="flex flex-wrap items-center gap-6 sm:gap-10">
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl bg-emerald-500/10 p-3 text-emerald-600 dark:text-emerald-400">
+                <Activity className="size-5" />
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">全站实时输出</p>
+                <p className="text-3xl font-semibold tabular-nums">
+                  {live.global_tok_s.toFixed(1)}
+                  <span className="ml-1.5 text-sm font-normal text-muted-foreground">
+                    tok/s
+                  </span>
+                </p>
+              </div>
             </div>
-            <div>
-              <p className="text-xs text-muted-foreground">全站实时输出</p>
-              <p className="text-3xl font-semibold tabular-nums">
-                {live.global_tok_s.toFixed(1)}
-                <span className="ml-1.5 text-sm font-normal text-muted-foreground">
-                  tok/s
-                </span>
-              </p>
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl bg-sky-500/10 p-3 text-sky-600 dark:text-sky-400">
+                <MessagesSquare className="size-5" />
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">并行会话</p>
+                <p
+                  className="text-3xl font-semibold tabular-nums"
+                  title="当前正在输出的会话数"
+                >
+                  {live.active_sessions ?? 0}
+                  <span className="ml-1.5 text-sm font-normal text-muted-foreground">
+                    个
+                  </span>
+                </p>
+              </div>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">

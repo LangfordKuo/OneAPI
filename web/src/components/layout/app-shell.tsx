@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MessagesSquare,
   Moon,
   Server,
   Settings,
@@ -122,25 +123,41 @@ function SidebarContent({
   );
 }
 
-function LiveRateBadge() {
+function LiveMetricsBadge() {
   const live = useLiveMetrics();
   const active = live.global_tok_s > 0;
+  const sessions = live.active_sessions ?? 0;
 
   return (
     <div
-      className="hidden items-center gap-1.5 rounded-full border bg-card px-2.5 py-1 text-xs text-muted-foreground sm:flex"
-      title="全站实时输出速度"
+      className="flex shrink-0 items-center gap-1.5 rounded-full border bg-card px-2 py-1 text-[11px] text-muted-foreground sm:gap-2.5 sm:px-2.5 sm:py-1"
+      title="全站实时输出速度与并行会话数"
     >
-      <Activity
-        className={cn(
-          'size-3.5',
-          active ? 'text-emerald-500' : 'text-muted-foreground/50',
-        )}
-      />
-      <span className="font-mono tabular-nums text-foreground">
-        {live.global_tok_s.toFixed(1)}
+      <span className="flex items-center gap-1">
+        <Activity
+          className={cn(
+            'size-3.5',
+            active ? 'text-emerald-500' : 'text-muted-foreground/50',
+          )}
+        />
+        <span className="font-mono tabular-nums text-foreground">
+          {live.global_tok_s.toFixed(1)}
+        </span>
+        <span className="hidden sm:inline">tok/s</span>
       </span>
-      <span>tok/s</span>
+      <span className="h-3 w-px bg-border" aria-hidden />
+      <span className="flex items-center gap-1" title="当前并行会话数">
+        <MessagesSquare
+          className={cn(
+            'size-3.5',
+            sessions > 0 ? 'text-sky-500' : 'text-muted-foreground/50',
+          )}
+        />
+        <span className="font-mono tabular-nums text-foreground">
+          {sessions}
+        </span>
+        <span className="hidden sm:inline">会话</span>
+      </span>
     </div>
   );
 }
@@ -195,7 +212,7 @@ export function AppShell({
             <h1 className="truncate text-sm font-semibold">{title}</h1>
           </div>
 
-          <LiveRateBadge />
+          <LiveMetricsBadge />
 
           <Button
             type="button"
