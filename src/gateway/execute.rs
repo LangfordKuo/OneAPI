@@ -207,6 +207,13 @@ pub async fn proxy_with_identity(
     let started = Instant::now();
     let deadline = started + REQUEST_TOTAL_BUDGET;
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    // Streams keep their guard inside the forwarding task; a non-streaming
+    // request counts as one session until this handler returns.
+    let _session = if streaming {
+        None
+    } else {
+        Some(state.live.session())
+    };
     let mut log = AttemptLog {
         request_id: &request_id,
         api_key_id: identity.api_key_id,

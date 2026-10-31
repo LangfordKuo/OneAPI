@@ -16,6 +16,11 @@ export interface LiveChannelRate {
 export interface LiveMetricsSnapshot {
   timestamp: number;
   global_tok_s: number;
+  /**
+   * Gateway requests currently producing output (streams plus in-flight
+   * non-streaming requests). Older servers omit it.
+   */
+  active_sessions?: number;
   channels: LiveChannelRate[];
   /**
    * Monotonic count of usage rows committed by the server process. A change
@@ -37,6 +42,7 @@ interface LiveState {
 const EMPTY_SNAPSHOT: LiveMetricsSnapshot = {
   timestamp: 0,
   global_tok_s: 0,
+  active_sessions: 0,
   channels: [],
 };
 
