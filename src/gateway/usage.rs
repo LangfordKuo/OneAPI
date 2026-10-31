@@ -309,15 +309,19 @@ where
 {
     sqlx::query(
         "INSERT INTO usage_logs
-         (request_id, source, api_key_id, channel_id, model, upstream_model,
+         (request_id, source, api_key_id, detail_api_key_id, channel_id, model, upstream_model,
           inbound_protocol, upstream_protocol, stream, status_code, attempts,
           error_type, error_message, prompt_tokens, completion_tokens, total_tokens,
           cached_tokens, cache_creation_tokens, reasoning_tokens, latency_ms, first_token_ms,
           created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&record.request_id)
     .bind(&record.source)
+    .bind(record.api_key_id)
+    // Pins the detail row to the key that wrote it, independently of
+    // usage_logs.api_key_id, which is cleared when the key is deleted.
+    // Playground requests (no key) store NULL.
     .bind(record.api_key_id)
     .bind(record.channel_id)
     .bind(&record.model)

@@ -205,8 +205,8 @@ export default function Logs() {
   const total = logsQuery.data?.total;
 
   const detailQuery = useQuery({
-    queryKey: ['log-detail', selected?.request_id],
-    queryFn: () => api.get<LogDetail>(`/api/logs/${selected?.request_id}`),
+    queryKey: ['log-detail', selected?.id],
+    queryFn: () => api.get<LogDetail>(`/api/logs/${selected?.id}`),
     enabled: selected != null,
   });
 

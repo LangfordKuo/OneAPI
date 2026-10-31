@@ -160,15 +160,11 @@ pub async fn list(
     Ok((rows, Some(total)))
 }
 
-pub async fn find_by_request_id(
-    pool: &SqlitePool,
-    request_id: &str,
-) -> sqlx::Result<Option<UsageLogRow>> {
-    let query = format!("{SELECT} WHERE l.request_id = ? ORDER BY l.id DESC LIMIT 1");
-    sqlx::query_as(&query)
-        .bind(request_id)
-        .fetch_optional(pool)
-        .await
+/// Fetch one usage row by its immutable primary key. The client-supplied
+/// `request_id` is not unique, so it must never select a row on its own.
+pub async fn find_by_id(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<UsageLogRow>> {
+    let query = format!("{SELECT} WHERE l.id = ?");
+    sqlx::query_as(&query).bind(id).fetch_optional(pool).await
 }
 
 /// Distinct models observed recently. Used to populate model pickers for
@@ -187,30 +183,25 @@ pub async fn recent_models(pool: &SqlitePool, since: i64, limit: i64) -> sqlx::R
     .await
 }
 
+/// Fetch the request/response bodies belonging to one usage row. The detail is
+/// matched on the exact `(request_id, detail_api_key_id)` pair recorded when
+/// the usage row was written; `detail_api_key_id` survives the deletion of the
+/// API key, and playground requests map to `0` like `request_details` does.
+/// There is deliberately no "newest row for this request_id" fallback: that
+/// would leak another key's bodies for a client-chosen request id.
 pub async fn detail_bodies(
     pool: &SqlitePool,
-    request_id: &str,
-    api_key_id: i64,
+    id: i64,
 ) -> sqlx::Result<Option<(Option<String>, Option<String>)>> {
-    let keyed = sqlx::query_as(
-        "SELECT request_body, response_body FROM request_details
-         WHERE request_id = ? AND api_key_id = ?",
-    )
-    .bind(request_id)
-    .bind(api_key_id)
-    .fetch_optional(pool)
-    .await?;
-    if keyed.is_some() {
-        return Ok(keyed);
-    }
-
-    // The API key may have been deleted (usage_logs.api_key_id becomes NULL)
-    // or the row predates per-key scoping. Fall back to the newest detail.
     sqlx::query_as(
-        "SELECT request_body, response_body FROM request_details
-         WHERE request_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT d.request_body, d.response_body
+         FROM usage_logs l
+         JOIN request_details d
+           ON d.request_id = l.request_id
+          AND d.api_key_id = COALESCE(l.detail_api_key_id, 0)
+         WHERE l.id = ?",
     )
-    .bind(request_id)
+    .bind(id)
     .fetch_optional(pool)
     .await
 }
