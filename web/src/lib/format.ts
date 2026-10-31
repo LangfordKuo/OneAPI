@@ -56,8 +56,12 @@ export function formatTokens(value: number | null | undefined): string {
   return `${trimTrailingZero(value / divisor)}${suffix}`;
 }
 
-export function formatLatency(value: number | null | undefined): string {
-  return value == null ? '-' : `${value} ms`;
+export function formatSeconds(value: number | null | undefined): string {
+  if (value == null) {
+    return '-';
+  }
+  const seconds = value / 1000;
+  return `${seconds.toFixed(seconds >= 10 ? 1 : 2)} s`;
 }
 
 export function formatBytes(value: number | null | undefined): string {

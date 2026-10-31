@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-31
-- 当前阶段：v0.1.19 后续安全修复已实现并通过测试（待合并/发布）
-- 当前分支：`security/hardening-0.1.19`
-- 最近发布：`v0.1.18`
+- 当前阶段：v0.1.20 指标展示口径修正已实现（待合并/发布）
+- 当前分支：`fix/latency-labels`
+- 最近发布：`v0.1.19`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -588,6 +588,15 @@
 - R4 去 panic：移除请求路径剩余 6 处 `expect`（execute 的 response_id/unified_request、admin keys 的 limits、SSE response builder）。
 - R5 回归测试：新增 `src/test_support.rs` 与 21 个单元测试，覆盖 client_ip 唯一来源、URL 脱敏、预留限额/日限额/陈旧清理、Responses 配额按字节计数/覆盖差值/冲突/删除、日志详情跨 Key 隔离、SSE 终止与 `error:null`。
 - 验证：`cargo test --locked` 21/21、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo build --release --locked`、`npx tsc --noEmit`、`npm run lint`、`npm run build` 通过；真实服务 + 假上游端到端 68 项断言通过（新增 H3 输入限长、H4 探活/更新改 base_url 拒绝、R2 queued Responses/非法 Anthropic 类型 502）。
+
+## 指标展示口径（2026-10-31，v0.1.20）
+
+- 背景：`latency_ms` 是总耗时（含思考/生成），但 UI 标为“延迟”，容易被理解为首字慢；Chat→Chat 等路径的思考时间全部计入总耗时，所有协议一致，并非协议分支差异。
+- 调整：日志列表/详情、Playground 的“耗时”统一改名“总耗时”并以秒展示（`formatSeconds`，<10s 两位小数、≥10s 一位小数）。
+- 日志新增“首字延迟”列与详情项，直接展示 `first_token_ms`；定义保持首个可见事件（思考或正文都算），不改变采集语义。
+- 生成速度提示改为“输出 tokens ÷（总耗时 − 首字延迟）”。
+- 仪表盘移除“平均延迟”卡片，保留“平均首字延迟”并以秒展示；`avg_latency_ms` 仍由 API 返回但不展示。
+- 验证：`npx tsc --noEmit`、`npm run lint`（0 error，6 个既有 react-refresh warning）、`npm run build`、`cargo fmt/clippy/test/build` 通过；端到端 68 项断言通过。
 
 ## AOCI 状态
 
