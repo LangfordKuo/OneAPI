@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-31
-- 当前阶段：v0.1.20 指标展示口径修正已实现（待合并/发布）
-- 当前分支：`fix/latency-labels`
-- 最近发布：`v0.1.19`
+- 当前阶段：v0.1.21 前端体验与更新流程优化已实现（待合并/发布）
+- 当前分支：`feature/ui-polish-0.1.21`
+- 最近发布：`v0.1.20`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -597,6 +597,23 @@
 - 生成速度提示改为“输出 tokens ÷（总耗时 − 首字延迟）”。
 - 仪表盘移除“平均延迟”卡片，保留“平均首字延迟”并以秒展示；`avg_latency_ms` 仍由 API 返回但不展示。
 - 验证：`npx tsc --noEmit`、`npm run lint`（0 error，6 个既有 react-refresh warning）、`npm run build`、`cargo fmt/clippy/test/build` 通过；端到端 68 项断言通过。
+
+## 前端体验与更新流程（2026-10-31，v0.1.21）
+
+范围：六项前端与更新体验调整。
+
+- 移动端日志：移除表格列的响应式隐藏，15 列在移动端全部保留；`Table` 自带的横向滚动容器在屏幕不足时滚动，不再丢字段。
+- 并行会话：`LiveSnapshot` 新增 `active_sessions`。流式请求在转发任务内持有 RAII guard，非流式请求在 handler 返回前计数，失败、取消与断连路径都会释放；实测流式期间为 1、结束后回到 0。
+- 统一实时指标：顶栏在所有页面展示全站 tok/s 与并行会话数，移动端同样可见（窄屏隐藏单位文字）；移除渠道页的全站徽章与单渠道 tok/s 列，仪表盘实时卡新增并行会话数。
+- 更新反馈：`UpdateError` 区分 network/integrity/platform/replace/storage/state，`/api/update/*` 失败返回 `severity`、`kind` 与中文 `hint`；网络/元数据问题显示黄色提示（建议切换更新源），安装阶段失败显示红色提示（检查 updates 目录权限、二进制替换、数据库）。成功时按钮、内联 Alert 与 toast 统一为绿色并显示「更新成功」。
+- 每日更新检查：`useUpdateCheck` 通过 localStorage 缓存 24 小时并按当前运行版本校验；发现新版本时侧边栏版本号显示红点，点击跳转 `/settings#update` 并滚动到更新卡片。检查失败保持静默。
+- 账户设置：新增 `/account` 分页与 `PUT /api/auth/account`，支持修改用户名（≤64 字符、禁止控制字符、复用改密限流）与密码；入口同时位于侧边栏与顶栏用户下拉，设置页不再包含改密卡片。
+
+验证：
+
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 25/25、`npm run typecheck`、`npm run lint`（0 error，6 个既有 warning）、`npm run build` 通过。
+- 真实服务 + 假上游端到端：流式期间 `active_sessions=1`、`global_tok_s=22.0`，结束后归零；日志落库并在移动端表格中显示。
+- 桌面浏览器断言 20/20、移动端 11/11、更新警告 5/5、更新错误 4/4、更新成功 3/3；更新成功用例使用临时构建的 v0.1.19 二进制，真实下载 v0.1.20 安装包、校验 SHA256、替换二进制并重启为新版本。
 
 ## AOCI 状态
 

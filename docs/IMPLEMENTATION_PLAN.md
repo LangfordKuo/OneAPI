@@ -157,9 +157,9 @@ StreamEvent { Start | BlockStart{index,kind} | TextDelta | ReasoningDelta |
 ## 8. 后台 API
 
 ```
-POST /api/auth/login|logout   GET /api/auth/me   PUT /api/auth/password
+POST /api/auth/login|logout   GET /api/auth/me   PUT /api/auth/password   PUT /api/auth/account
 GET /api/setup/status   POST /api/setup   # 首次运行安装向导（无会话）
-GET /api/metrics/stream   # 实时 tok/s SSE（管理员会话，最近 1 秒实测值，附带 usage_total 写入计数）
+GET /api/metrics/stream   # 实时指标 SSE（管理员会话：最近 1 秒 tok/s、并行会话数 active_sessions、usage_total 写入计数）
 GET /api/update/check   POST /api/update/apply   # 在线更新
 GET|POST /api/channels        GET|PUT|DELETE /api/channels/:id
 POST /api/channels/test       POST /api/channels/fetch-models   # 支持未保存配置
@@ -177,14 +177,17 @@ GET /healthz  /readyz
 
 ## 9. 前端
 
-会话状态驱动首屏：`App` 依次查询安装状态与 `/api/auth/me`，未安装渲染安装向导，未登录渲染登录页，登录后进入带侧边栏的后台路由（`/`、`/channels`、`/keys`、`/logs`、`/playground`、`/settings`）。UI 采用 shadcn/ui（base-nova，Base UI 原语）+ Tailwind CSS 4 的 CSS 变量主题；侧边栏在移动端折叠为 Sheet，暗色模式由 next-themes 切换。
+会话状态驱动首屏：`App` 依次查询安装状态与 `/api/auth/me`，未安装渲染安装向导，未登录渲染登录页，登录后进入带侧边栏的后台路由（`/`、`/channels`、`/keys`、`/logs`、`/playground`、`/account`、`/settings`）。UI 采用 shadcn/ui（base-nova，Base UI 原语）+ Tailwind CSS 4 的 CSS 变量主题；侧边栏在移动端折叠为 Sheet，暗色模式由 next-themes 切换。
 
-- 渠道页：表格（名称/原生协议/地址/模型数/优先级/状态/实时 tok/s）；抽屉表单把三个协议做成内分页，每页独立配置 Base URL、Key、auth_header、模型、model_mapping、自定义头；每页的「转换目标」可选「不转换」或另一个原生协议，选转换后隐藏本页详细配置并复用目标页配置；priority/weight、超时、代理、启用为渠道级共用。表单内“测试连通性”“拉取模型”作用于当前协议页，拉取结果回填当前页。
+- 顶栏：所有页面统一展示全站实时 tok/s 与并行会话数，移动端同样可见（窄屏隐藏单位文字、保留图标与数字）；侧边栏底部的版本号在每日更新检查发现新版本时显示红点，点击跳转到「设置 → 软件更新」。
+- 渠道页：表格（名称/原生协议/地址/模型数/优先级/状态）；抽屉表单把三个协议做成内分页，每页独立配置 Base URL、Key、auth_header、模型、model_mapping、自定义头；每页的「转换目标」可选「不转换」或另一个原生协议，选转换后隐藏本页详细配置并复用目标页配置；priority/weight、超时、代理、启用为渠道级共用。表单内“测试连通性”“拉取模型”作用于当前协议页，拉取结果回填当前页。
 - Key 页：创建/编辑弹窗一次性展示完整 Key（CodeBlock + 复制）；可配置可用渠道、可用模型与 Token 上限，留空即不限制；列表显示限制摘要、累计用量/上限与「已超限」状态；启用/禁用/删除；显示前缀、最后使用时间。
-- 日志页：时间范围/模型/请求 ID/渠道/Key/状态/协议/来源/流式筛选 + 分页 + 详情抽屉（token、总耗时（秒）、首字延迟（秒）、错误、可选请求响应体）；窄屏隐藏次要列，行点击仍可查看全部字段。
-- 仪表盘：统计卡 + Recharts 请求/错误时序与 Token 柱状图 + 模型/渠道占比环形图 + 最近错误 + 系统信息。
+- 日志页：时间范围/模型/请求 ID/渠道/Key/状态/协议/来源/流式筛选 + 分页 + 详情抽屉（token、总耗时（秒）、首字延迟（秒）、错误、可选请求响应体）；所有列在移动端保留，屏幕不足时表格横向滚动，行点击仍可查看全部字段。
+- 仪表盘：实时卡（全站 tok/s + 并行会话数）、统计卡 + Recharts 请求/错误时序与 Token 柱状图 + 模型/渠道占比环形图 + 最近错误 + 系统信息。
 - Playground：选协议、模型（datalist 可输入）、系统提示、多轮消息、流式开关；用 fetch + ReadableStream 自写 SSE 解析，展示文本/推理/工具调用与耗时/token/命中渠道。
-- 统一 fetch 封装（`credentials: include`；401 时仅登录、`/api/auth/me` 与修改密码接口不跳转），TanStack Query 管理服务端状态，路由级代码分割；图表单独懒加载。
+- 账户页：独立的账户设置分页，支持修改用户名与登录密码（均需验证当前密码），入口同时存在于侧边栏与顶栏用户下拉菜单；修改密码后其他会话立即下线。
+- 软件更新：手动检查后展示版本信息；应用成功时按钮与提示切换为绿色并显示「更新成功」，失败按严重程度分级——网络/元数据问题为黄色并提示切换更新源，完整性、替换或存储失败为红色并给出排查方法。
+- 统一 fetch 封装（`credentials: include`；401 时仅登录、`/api/auth/me` 与账户/密码接口不跳转），TanStack Query 管理服务端状态，路由级代码分割；图表单独懒加载。
 - 开发代理把 `Origin` 重写为后端地址，使 `npm run dev` 下经过 Vite 代理的写请求能通过 CSRF 同源检查。
 
 ## 10. 单文件构建与部署
@@ -262,6 +265,7 @@ GET /healthz  /readyz
 - 2026-10-31：备份仅服务器端（v0.1.17）：删除 `GET /api/backup/export` 与 `POST /api/backup/import`。导出会让任何持有管理员会话的人下载整库；导入允许上传构造过的 SQLite 文件并在重启时替换线上库。两者都移除，并同步删除启动时换入 `<db>.import` 的隐式入口及其 `validate`/`prepare_import`/`checkpoint_wal`/sidecar 处理，仓库内不再存在从外部文件加载数据库的代码路径。新增 `POST /api/backup/snapshot`（在 `data/backups` 生成一致快照，只返回文件名与大小）与 `GET /api/backup/list`（只读元数据）；快照文件创建后收紧为 0600；设置页改为“立即备份到服务器”并展示备份列表，恢复改为停机替换文件。
 - 2026-10-31：安全修复批次（v0.1.18）：新增 `0009_security_fixes.sql`（`usage_logs.detail_api_key_id`、`api_keys.key_hash_v2`/预留列、`response_usage`、JSON 触发器、删除 Key 清正文触发器）。实现准入配额预留与结算（`reserved_tokens`/`reserved_daily_tokens`，启动清零 + 60 秒 janitor，`ONEAPI_DISABLE_QUOTA_RESERVATION=1` 可关闭）；Responses 每 Key/全局存储配额；详情队列入队前截断并限制 16 MiB 字节预算；日志详情改按 `usage_logs.id` 且删除跨 Key 回退；API Key 使用 HMAC(pepper) 哈希并惰性回填旧哈希；鉴权失败按客户端 IP 限速；配置 `client_ip_header` 时该头为唯一来源，不再回退建联 IP（避免拉黑 CDN 回源地址）。网关侧：SSE 校验 `Content-Type` 与协议终止事件，慢客户端不再冷却渠道，上游错误与路由头脱敏，`model`/`previous_response_id` 限长，usage 饱和运算与状态/拒答映射，未知协议字段显式 400。运维侧：备份权限/并发加固、指标 SSE 会话复检与停机主动结束、设置新增正文保留期与 Responses 配额、前端 401/路径/编辑提交与 chart 样式安全修复。实现与验证记录见 `docs/SECURITY_FIX_PLAN.md`。
 - 2026-10-31：后续安全修复（v0.1.19）：登录/改密/安装的 Argon2 校验与哈希移入阻塞池并由 4 并发信号量限流，用户名/密码登录输入限长，限流表增加 10k 硬上限与最旧 25% 淘汰；渠道探活/更新在复用已存密钥时禁止修改 base_url（防止密钥被发往新主机）；流式提交前失败把预留 guard 回传下一个候选，删除异步释放后重新预留的竞态；同协议 Responses/Anthropic 非流式响应增加状态/类型语义校验；结算逻辑收敛为 `settle_key`，模型白名单收敛为 `ApiKeyLimits::allows_model`；移除请求路径 `expect`；新增 21 项单元回归测试（client_ip、错误脱敏、预留、Responses 配额/计数、日志详情隔离、SSE 终止/error:null）。验证：`cargo test` 21/21、端到端 68 项断言、fmt/clippy/build/前端 lint+build 均通过。
+- 2026-10-31：界面与更新体验（v0.1.21）：`/api/metrics/stream` 快照新增 `active_sessions`（流式转发任务与非流式在途请求的并行会话数，RAII guard 保证失败/取消路径正确释放）；顶栏统一展示全站 tok/s 与并行会话数（移动端也显示），移除渠道页的全站与单渠道 tok/s；日志表在移动端保留全部 15 列并横向滚动；仪表盘实时卡新增并行会话数。更新流程改为分级错误：`UpdateError` 区分网络、完整性、平台、替换、存储与状态，管理端返回 `severity`/`kind`/`hint`，前端用黄色（可切换更新源重试）或红色（需排查写入权限/二进制替换/数据库）提示，成功时按钮、内联提示与 toast 统一为绿色；新增每日更新检查（localStorage 24 小时缓存，按运行版本校验）与侧边栏版本号红点跳转。新增 `PUT /api/auth/account` 与独立账户页，支持修改用户名（64 字符上限、禁止控制字符、复用改密限流）与密码。验证：`cargo test` 25/25、桌面 20 项、移动端 11 项、更新警告 5 项、更新错误 4 项、更新成功 3 项浏览器断言全部通过，并用 v0.1.19 二进制实测完成真实下载、SHA256 校验、二进制替换与重启。
 - 2026-10-31：指标展示口径（v0.1.20）：`latency_ms` 明确定义为“总耗时”，日志/详情/Playground 统一以秒展示，避免“延迟”被误解为生成慢；日志新增“首字延迟”列与详情项，定义为首个可见事件（思考或正文，`first_token_ms` 现有语义不变）；生成速度提示改为“输出 tokens ÷（总耗时 − 首字延迟）”；仪表盘移除“平均延迟”卡片，保留“平均首字延迟”并同样以秒展示。
 - 2026-10-30：冗余与写法审查（v0.1.16）：修复 `snapshot` 无差别轮转导致每次导出永久挤掉一份真实备份（改为调用方决定是否轮转）；`parse_channel_ids` 拒绝非正整数，避免 `allowed_channel_ids: [0]` 静默放大为“不限渠道”；`prepare_import` 换库前先 `wal_checkpoint(TRUNCATE)`，不再丢弃未 checkpoint 的 WAL 帧；导入暂存文件改为唯一路径并用进程级标记拒绝重叠导入。设置数值增加上界并改用 `saturating_mul`；安装写入站点名后失效缓存；`/api/system` 的冷却渠道统计排除已禁用渠道；流式首帧提交预算改为按每次尝试计算。结构上把两套故障转移循环的判定、请求体准备与终止响应抽为 `attempt_gate`/`prepare_attempt_body`/`finish_failover`，usage 记录合并为 `AttemptLog`；四处上游错误字段提取合并为 `protocol::error_fields`；流式透传每帧只解析一次 JSON（`usage_only`/`has_content` 并入 `PassthroughObservation`）；usage 编码、stop reason 映射、Anthropic `tool_use` 块与 Responses 输出项各收敛为单份实现；删除 `protocol` 模块级 `allow(dead_code)` 及其掩盖的死代码。前端修复日志筛选逐字符请求、实时指标每秒重渲染日志页、仪表盘图表每秒重绘，并让 Playground/备份复用 `requestRaw`（恢复 401 跳转）、补上登出失败提示。
 - 2026-10-30：渠道列表快捷启停与前端 lint 修复（v0.1.15）：新增 `PUT /api/channels/{id}/enabled` 与 `channel::set_enabled`，只更新 `channels.enabled`/`updated_at` 并失效渠道缓存，列表可直接启用/停用渠道而不重传协议配置与密钥；同版本修复 `react-hooks` 报错——`useLiveRefresh` 的 ref 同步移入 effect，`useNow` 拆为 30 秒/1 秒共享时钟并新增 `useNowSeconds`，仪表盘运行时长不再在渲染期调用 `Date.now()`。
@@ -300,3 +304,5 @@ GET /healthz  /readyz
 - SSE 解析的单帧上限为 8MB（覆盖整个未完成事件）。
 - 备份只在服务器端生成（`data/backups/`），不提供下载或上传；设置 `ONEAPI_DATABASE_URL` 时不会生成快照。恢复需在服务器上停机替换数据库文件，服务不提供在线恢复。
 - 每日 Token 上限在请求进入时检查、请求完成后异步累加，并发请求可能短暂超过上限；按 UTC 自然日重置。
+- 更新检查由浏览器每天执行一次（结果缓存在 localStorage，并按当前运行版本校验），不使用服务端定时任务；未打开管理后台时不会检查。
+- 更新失败分级依赖后端 `UpdateError` 分类；未分类的异常按红色内部错误展示，提示查看服务端日志。
