@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-31T14:06:58Z",
+  "updated_at": "2026-10-31T14:17:15Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -47,15 +47,15 @@
     },
     "Cargo.lock": {
       "role": "index",
-      "sha256": "757e519f9761d626c7ac67524fb3d67b635f8afe3ac9805a9dab978011c5be54",
+      "sha256": "7ee4b4b8676c58097be64b67c6e980b4db2c0e8e38a87d85702e4f40d131b7fc",
       "size": 83963,
-      "normalized_sha256": "757e519f9761d626c7ac67524fb3d67b635f8afe3ac9805a9dab978011c5be54"
+      "normalized_sha256": "7ee4b4b8676c58097be64b67c6e980b4db2c0e8e38a87d85702e4f40d131b7fc"
     },
     "Cargo.toml": {
       "role": "index",
-      "sha256": "5ac7de66ba529bfd57178f7449600d1c9d3d7a2f51b9e9e1a0162cff433f9cc7",
+      "sha256": "2da1db48a06947aee1a5b38f54ac2b966e72f03f028682d41d4c1a4aa24c4945",
       "size": 1542,
-      "normalized_sha256": "5ac7de66ba529bfd57178f7449600d1c9d3d7a2f51b9e9e1a0162cff433f9cc7"
+      "normalized_sha256": "2da1db48a06947aee1a5b38f54ac2b966e72f03f028682d41d4c1a4aa24c4945"
     },
     "Dockerfile": {
       "role": "index",
@@ -89,9 +89,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "c9762a96eee9ad75c2b8858659b5d34e552e2dbabb16235561dc1eb0f801eca9",
+      "sha256": "928b19850e8183f520ecc5e0fe235e8eda0d74d41830bd481b1d8c2cd62f368b",
       "size": 91889,
-      "normalized_sha256": "c9762a96eee9ad75c2b8858659b5d34e552e2dbabb16235561dc1eb0f801eca9"
+      "normalized_sha256": "928b19850e8183f520ecc5e0fe235e8eda0d74d41830bd481b1d8c2cd62f368b"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -605,15 +605,15 @@
     },
     "web/package-lock.json": {
       "role": "index",
-      "sha256": "3a51270fd9d8abf2de2e79408490d1729e29912640523d23fb211fb9bf5bab94",
+      "sha256": "ba83ceb1103db69844b3d7c2a5cec6496b3c18644507e3befe552a5d8065c440",
       "size": 296386,
-      "normalized_sha256": "3a51270fd9d8abf2de2e79408490d1729e29912640523d23fb211fb9bf5bab94"
+      "normalized_sha256": "ba83ceb1103db69844b3d7c2a5cec6496b3c18644507e3befe552a5d8065c440"
     },
     "web/package.json": {
       "role": "index",
-      "sha256": "10b551216f980d5f7ed02ef13dc5856af399a3c815fc37948e55b95da62963e7",
+      "sha256": "fce30d42e19892dde58dc7a3a6a56e78c403a38b299ff9fa11d711102fbd662e",
       "size": 1283,
-      "normalized_sha256": "10b551216f980d5f7ed02ef13dc5856af399a3c815fc37948e55b95da62963e7"
+      "normalized_sha256": "fce30d42e19892dde58dc7a3a6a56e78c403a38b299ff9fa11d711102fbd662e"
     },
     "web/src/App.tsx": {
       "role": "index",
