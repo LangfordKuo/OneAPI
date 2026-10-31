@@ -240,9 +240,11 @@ pub fn apply_auth(
         .decrypt(&config.api_key_enc)
         .context("failed to decrypt channel API key")?;
 
+    // `api_key` is a Zeroizing<String>: the decrypted plaintext is wiped when
+    // this scope ends, while the header value has its own copy inside reqwest.
     let mut request = match config.auth_header.as_str() {
-        "x-api-key" => request.header("x-api-key", api_key),
-        _ => request.bearer_auth(api_key),
+        "x-api-key" => request.header("x-api-key", api_key.as_str()),
+        _ => request.bearer_auth(api_key.as_str()),
     };
 
     let mut has_anthropic_version = false;

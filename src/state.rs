@@ -354,6 +354,14 @@ pub struct AppState {
     pub probes: Arc<ChannelProbes>,
     pub usage_writer: Option<Arc<UsageWriter>>,
     pub started_at: DateTime<Utc>,
+    /// Serializes database snapshots. The admin endpoint uses `try_lock` so a
+    /// second request is rejected instead of queued behind a slow `VACUUM
+    /// INTO`.
+    pub backup_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Start of the most recent snapshot attempt, used to rate-limit manual
+    /// backups. Ordinary `std::sync::Mutex` because it is held only for a
+    /// short check and never across an await.
+    pub last_backup_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl AppState {

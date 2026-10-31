@@ -1,9 +1,16 @@
+use std::time::{Duration, Instant};
+
 use axum::{extract::State, Json};
 use serde_json::{json, Value};
 
 use crate::{backup, error::AppError, state::AppState};
 
 use super::auth::AdminSession;
+
+/// Minimum spacing between manual snapshots. A `VACUUM INTO` copies the whole
+/// database, so an admin session hammering the endpoint can fill the data
+/// directory faster than pruning reclaims it.
+const MIN_BACKUP_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Create a snapshot on the server.
 ///
@@ -19,6 +26,33 @@ pub async fn snapshot(
         return Err(AppError::BadRequest(
             "backup requires the default SQLite file".to_string(),
         ));
+    }
+
+    // Only one snapshot at a time. Queuing would let requests pile up behind a
+    // slow VACUUM and multiply the disk and CPU cost, so the second caller is
+    // rejected instead of waiting for the lock.
+    let _snapshot_guard = state
+        .backup_lock
+        .try_lock()
+        .map_err(|_| AppError::BadRequest("a backup is already in progress".to_string()))?;
+
+    // Rate limit attempts rather than successes so a failing snapshot (for
+    // example a full disk) cannot be retried in a tight loop.
+    {
+        let mut last = state
+            .last_backup_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(previous) = *last {
+            let elapsed = previous.elapsed();
+            if elapsed < MIN_BACKUP_INTERVAL {
+                let retry_after = (MIN_BACKUP_INTERVAL - elapsed).as_secs().max(1);
+                return Err(AppError::TooManyRequests(format!(
+                    "backup requested too often; retry in {retry_after}s"
+                )));
+            }
+        }
+        *last = Some(Instant::now());
     }
 
     let path = backup::snapshot(&state.db, &state.config.data_dir, "manual", true)

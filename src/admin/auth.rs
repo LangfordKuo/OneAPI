@@ -13,6 +13,7 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use zeroize::Zeroizing;
 
 use crate::{
     client_ip,
@@ -177,8 +178,11 @@ pub async fn login(
     client_addr: ClientAddr,
     Json(input): Json<LoginInput>,
 ) -> Result<(CookieJar, Json<AdminOutput>), AppError> {
-    let username = input.username.trim();
-    if username.is_empty() || input.password.is_empty() {
+    let LoginInput { username, password } = input;
+    let username = username.trim();
+    // The plaintext password is wiped as soon as this handler returns.
+    let password = Zeroizing::new(password);
+    if username.is_empty() || password.is_empty() {
         return Err(AppError::BadRequest(
             "username and password are required".to_string(),
         ));
@@ -200,12 +204,12 @@ pub async fn login(
     let Some(admin) = models::admin::find_by_username(&state.db, username).await? else {
         // Keep the Argon2 cost identical to the wrong-password path so response
         // timing does not reveal whether the username exists.
-        security::verify_password(security::dummy_password_hash(), &input.password);
+        security::verify_password(security::dummy_password_hash(), password.as_str());
         state.login_limiter.record_failure(&limiter_key);
         return Err(AppError::Unauthorized);
     };
 
-    if !security::verify_password(&admin.password_hash, &input.password) {
+    if !security::verify_password(&admin.password_hash, password.as_str()) {
         state.login_limiter.record_failure(&limiter_key);
         return Err(AppError::Unauthorized);
     }
@@ -245,6 +249,14 @@ pub async fn change_password(
     client_addr: ClientAddr,
     Json(input): Json<ChangePasswordInput>,
 ) -> Result<(CookieJar, Json<AdminOutput>), AppError> {
+    let ChangePasswordInput {
+        current_password,
+        new_password,
+    } = input;
+    // Wipe both plaintext passwords when this handler returns.
+    let current_password = Zeroizing::new(current_password);
+    let new_password = Zeroizing::new(new_password);
+
     let client_ip = client_addr
         .0
         .map(|ip| ip.to_string())
@@ -257,17 +269,18 @@ pub async fn change_password(
         )));
     }
 
-    if !security::verify_password(&session.admin.password_hash, &input.current_password) {
+    if !security::verify_password(&session.admin.password_hash, current_password.as_str()) {
         state.login_limiter.record_failure(&limiter_key);
         return Err(AppError::Unauthorized);
     }
     state.login_limiter.record_success(&limiter_key);
 
-    if let Some(violation) = security::password_violation(&input.new_password) {
+    if let Some(violation) = security::password_violation(new_password.as_str()) {
         return Err(AppError::BadRequest(format!("new password {violation}")));
     }
 
-    let password_hash = security::hash_password(&input.new_password).map_err(AppError::Internal)?;
+    let password_hash =
+        security::hash_password(new_password.as_str()).map_err(AppError::Internal)?;
     models::admin::update_password(&state.db, session.admin.id, &password_hash).await?;
     models::session::delete_all_for_admin(&state.db, session.admin.id).await?;
 
@@ -309,17 +322,19 @@ pub async fn bootstrap(pool: &SqlitePool) -> anyhow::Result<()> {
         tracing::info!("OneAPI is not initialized; open the web UI to create the admin account");
         return Ok(());
     };
+    // The bootstrap password comes from the environment as plaintext.
+    let password = Zeroizing::new(password);
 
     let username = std::env::var("ONEAPI_ADMIN_USER")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "admin".to_string());
 
-    if let Some(violation) = security::password_violation(&password) {
+    if let Some(violation) = security::password_violation(password.as_str()) {
         return Err(anyhow::anyhow!("ONEAPI_ADMIN_PASSWORD {violation}"));
     }
 
-    let password_hash = security::hash_password(&password)?;
+    let password_hash = security::hash_password(password.as_str())?;
     models::admin::create(pool, &username, &password_hash, models::now_ms()).await?;
     tracing::info!(username = %username, "initial admin account created from environment");
 

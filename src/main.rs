@@ -26,6 +26,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use config::Config;
 use state::AppState;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Parser)]
 #[command(name = "oneapi", version, about = "Self-hosted AI API gateway")]
@@ -78,6 +79,8 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
     let db = db::connect(&config).await?;
     let crypto = Arc::new(security::Crypto::load_or_create(&config.data_dir)?);
     admin::bootstrap(&db).await?;
+    // Precompute the constant-cost dummy hash before any login can reach it.
+    let _ = security::dummy_password_hash();
 
     let events = Arc::new(events::EventBus::default());
     let usage_writer = Arc::new(gateway::usage::UsageWriter::start(
@@ -97,6 +100,8 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
         probes: Arc::new(state::ChannelProbes::default()),
         usage_writer: Some(usage_writer),
         started_at: chrono::Utc::now(),
+        backup_lock: Arc::new(tokio::sync::Mutex::new(())),
+        last_backup_at: Arc::new(std::sync::Mutex::new(None)),
     };
 
     maintenance::spawn(state.clone());
@@ -185,17 +190,23 @@ fn restart_process(exe: Option<std::path::PathBuf>) -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %error, "failed to listen for Ctrl+C");
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                let _ = signal.recv().await;
+            }
+            Err(error) => {
+                // Keep waiting on Ctrl+C instead of shutting down eagerly.
+                tracing::error!(error = %error, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]
@@ -218,22 +229,26 @@ async fn reset_password(data_dir: PathBuf, password: Option<String>) -> anyhow::
     })?;
 
     let password = match password {
-        Some(password) => password,
+        Some(password) => Zeroizing::new(password),
         None => {
             use std::io::Write;
             eprint!("New password: ");
             std::io::stderr().flush().ok();
-            let mut line = String::new();
+            let mut line = Zeroizing::new(String::new());
             std::io::stdin().read_line(&mut line)?;
-            line.trim_end_matches(['\r', '\n']).to_string()
+            // Trim in place so the buffer stays zeroized instead of leaving an
+            // extra plaintext copy behind.
+            let trimmed_len = line.trim_end_matches(['\r', '\n']).len();
+            line.truncate(trimmed_len);
+            line
         }
     };
 
-    if let Some(violation) = security::password_violation(&password) {
+    if let Some(violation) = security::password_violation(password.as_str()) {
         anyhow::bail!("password {violation}");
     }
 
-    let password_hash = security::hash_password(&password)?;
+    let password_hash = security::hash_password(password.as_str())?;
     models::admin::update_password(&db, admin.id, &password_hash).await?;
     models::session::delete_all_for_admin(&db, admin.id).await?;
 

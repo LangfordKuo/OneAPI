@@ -1,6 +1,7 @@
 use axum::{extract::State, Json};
 use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::{config::Config, error::AppError, models, security, state::AppState};
 
@@ -72,21 +73,29 @@ pub async fn setup(
     jar: CookieJar,
     Json(input): Json<SetupInput>,
 ) -> Result<(CookieJar, Json<SetupResult>), AppError> {
+    let SetupInput {
+        username,
+        password,
+        site_name,
+    } = input;
+    // Wipe the plaintext password when this handler returns.
+    let password = Zeroizing::new(password);
+
     if models::admin::count(&state.db).await? > 0 {
         return Err(AppError::BadRequest(
             "OneAPI is already initialized".to_string(),
         ));
     }
 
-    let username = input.username.trim();
+    let username = username.trim();
     if username.is_empty() {
         return Err(AppError::BadRequest("username is required".to_string()));
     }
-    if let Some(violation) = security::password_violation(&input.password) {
+    if let Some(violation) = security::password_violation(password.as_str()) {
         return Err(AppError::BadRequest(format!("password {violation}")));
     }
 
-    let password_hash = security::hash_password(&input.password).map_err(AppError::Internal)?;
+    let password_hash = security::hash_password(password.as_str()).map_err(AppError::Internal)?;
     let admin_id =
         match models::admin::create(&state.db, username, &password_hash, models::now_ms()).await {
             Ok(admin_id) => admin_id,
@@ -100,8 +109,7 @@ pub async fn setup(
             }
         };
 
-    if let Some(site_name) = input
-        .site_name
+    if let Some(site_name) = site_name
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
