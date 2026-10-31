@@ -14,6 +14,9 @@ const MAX_TIMEOUT_SECONDS: i64 = 86_400;
 /// Upper bound for retention windows. `0` disables time-based cleanup for the
 /// category instead of meaning "delete immediately".
 const MAX_RETENTION_DAYS: i64 = 3_650;
+/// Upper bound for Responses storage quotas, in MiB (1 TiB). `0` means
+/// unlimited.
+const MAX_RESPONSE_STORAGE_MB: i64 = 1_048_576;
 
 fn check_range(field: &str, value: i64, min: i64, max: i64) -> Result<(), AppError> {
     if !(min..=max).contains(&value) {
@@ -34,6 +37,8 @@ pub struct SettingsOutput {
     pub usage_log_retention_days: i64,
     pub request_detail_retention_days: i64,
     pub response_retention_days: i64,
+    pub response_storage_per_key_mb: i64,
+    pub response_storage_total_mb: i64,
     pub store_request_bodies: bool,
     pub update_source: String,
     pub client_ip_header: String,
@@ -55,6 +60,14 @@ impl SettingsOutput {
             usage_log_retention_days: map.integer("usage_log_retention_days", 30),
             request_detail_retention_days: map.integer("request_detail_retention_days", 7),
             response_retention_days: map.integer("response_retention_days", 7),
+            response_storage_per_key_mb: map.integer(
+                "response_storage_per_key_mb",
+                setting::DEFAULT_RESPONSE_STORAGE_PER_KEY_MB,
+            ),
+            response_storage_total_mb: map.integer(
+                "response_storage_total_mb",
+                setting::DEFAULT_RESPONSE_STORAGE_TOTAL_MB,
+            ),
             store_request_bodies: map.boolean("store_request_bodies", false),
             update_source: map
                 .string("update_source")
@@ -87,6 +100,10 @@ pub struct SettingsInput {
     pub request_detail_retention_days: Option<i64>,
     #[serde(default)]
     pub response_retention_days: Option<i64>,
+    #[serde(default)]
+    pub response_storage_per_key_mb: Option<i64>,
+    #[serde(default)]
+    pub response_storage_total_mb: Option<i64>,
     #[serde(default)]
     pub store_request_bodies: Option<bool>,
     #[serde(default)]
@@ -172,6 +189,26 @@ pub async fn update(
             ));
         }
         updates.push(("response_retention_days", value.to_string()));
+    }
+
+    if let Some(value) = input.response_storage_per_key_mb {
+        check_range(
+            "response_storage_per_key_mb",
+            value,
+            0,
+            MAX_RESPONSE_STORAGE_MB,
+        )?;
+        updates.push(("response_storage_per_key_mb", value.to_string()));
+    }
+
+    if let Some(value) = input.response_storage_total_mb {
+        check_range(
+            "response_storage_total_mb",
+            value,
+            0,
+            MAX_RESPONSE_STORAGE_MB,
+        )?;
+        updates.push(("response_storage_total_mb", value.to_string()));
     }
 
     if let Some(value) = input.store_request_bodies {

@@ -2,7 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     net::IpAddr,
     path::PathBuf,
-    sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Arc, Mutex, RwLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -450,6 +453,11 @@ pub struct AppState {
     /// second request is rejected instead of queued behind a slow `VACUUM
     /// INTO`.
     pub backup_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes the Responses storage quota check, write and accounting so
+    /// concurrent requests cannot both pass the same preimage check.
+    pub response_store_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Responses objects rejected by the quota or ownership check since start.
+    pub response_store_rejected: Arc<AtomicU64>,
     /// Start of the most recent snapshot attempt, used to rate-limit manual
     /// backups. Ordinary `std::sync::Mutex` because it is held only for a
     /// short check and never across an await.

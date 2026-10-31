@@ -103,6 +103,8 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
         started_at: chrono::Utc::now(),
         backup_lock: Arc::new(tokio::sync::Mutex::new(())),
         last_backup_at: Arc::new(std::sync::Mutex::new(None)),
+        response_store_lock: Arc::new(tokio::sync::Mutex::new(())),
+        response_store_rejected: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     maintenance::spawn(state.clone());

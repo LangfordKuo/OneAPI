@@ -2,6 +2,11 @@ use std::collections::HashMap;
 
 use sqlx::{Executor, Sqlite, SqlitePool};
 
+/// Default Responses storage quotas shared by the gateway and the settings API.
+/// `0` means unlimited for both.
+pub const DEFAULT_RESPONSE_STORAGE_PER_KEY_MB: i64 = 64;
+pub const DEFAULT_RESPONSE_STORAGE_TOTAL_MB: i64 = 2_048;
+
 pub async fn all(pool: &SqlitePool) -> sqlx::Result<Vec<(String, String)>> {
     sqlx::query_as("SELECT key, value FROM settings ORDER BY key")
         .fetch_all(pool)
@@ -63,6 +68,10 @@ pub struct GatewayDefaults {
     pub nonstream_timeout_ms: u64,
     pub stream_idle_timeout_ms: u64,
     pub store_request_bodies: bool,
+    /// Responses storage quota in MiB; `0` disables the limit.
+    pub response_storage_per_key_mb: i64,
+    /// Global Responses storage quota in MiB; `0` disables the limit.
+    pub response_storage_total_mb: i64,
 }
 
 impl GatewayDefaults {
@@ -86,6 +95,14 @@ impl GatewayDefaults {
             .max(1)
             .saturating_mul(1000),
             store_request_bodies: settings.boolean("store_request_bodies", false),
+            response_storage_per_key_mb: settings.integer(
+                "response_storage_per_key_mb",
+                DEFAULT_RESPONSE_STORAGE_PER_KEY_MB,
+            ),
+            response_storage_total_mb: settings.integer(
+                "response_storage_total_mb",
+                DEFAULT_RESPONSE_STORAGE_TOTAL_MB,
+            ),
         })
     }
 }

@@ -66,6 +66,8 @@ export interface Settings {
   usage_log_retention_days: number;
   request_detail_retention_days: number;
   response_retention_days: number;
+  response_storage_per_key_mb: number;
+  response_storage_total_mb: number;
   store_request_bodies: boolean;
   update_source: 'github' | 'ghproxy';
   client_ip_header: string;

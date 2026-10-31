@@ -1,9 +1,11 @@
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{models, state::AppState};
+use crate::{
+    models::{self, response::StoreOutcome},
+    state::AppState,
+};
 
-pub const MAX_STORED_BYTES: usize = 10 * 1024 * 1024;
 /// Guard against unbounded `previous_response_id` chains: the expanded input is
 /// sent upstream, so it needs its own ceiling independent of per-response size.
 const MAX_EXPANDED_ITEMS: usize = 2_000;
@@ -144,9 +146,10 @@ fn normalize_input(value: Option<&Value>) -> Vec<Value> {
     }
 }
 
-/// Persist a Responses object. Returns `false` when the payload is too large or
-/// has no id; callers must then report `store: false` to the client instead of
-/// promising a retrievable response.
+/// Persist a Responses object. Returns `false` when the payload is too large,
+/// exceeds the per-key/global storage quota, or has no id; callers must then
+/// report `store: false` to the client instead of promising a retrievable
+/// response.
 pub async fn store(
     state: &AppState,
     api_key_id: i64,
@@ -156,15 +159,6 @@ pub async fn store(
 ) -> sqlx::Result<bool> {
     let request_json = serde_json::to_string(request).unwrap_or_default();
     let response_json = serde_json::to_string(response).unwrap_or_default();
-
-    if request_json.len() > MAX_STORED_BYTES || response_json.len() > MAX_STORED_BYTES {
-        tracing::warn!(
-            request_bytes = request_json.len(),
-            response_bytes = response_json.len(),
-            "response exceeds the storage limit; skipping persistence"
-        );
-        return Ok(false);
-    }
 
     let id = response
         .get("id")
@@ -181,7 +175,15 @@ pub async fn store(
         .unwrap_or("completed")
         .to_string();
 
-    let stored = models::response::insert(
+    let defaults = state.cache.defaults(&state.db).await?;
+    let per_key_limit = storage_limit_bytes(defaults.response_storage_per_key_mb);
+    let total_limit = storage_limit_bytes(defaults.response_storage_total_mb);
+
+    // The quota check, upsert and counter update must observe one consistent
+    // preimage; two concurrent requests must not both pass the same check.
+    let _guard = state.response_store_lock.lock().await;
+
+    let outcome = models::response::store_with_quota(
         &state.db,
         &id,
         api_key_id,
@@ -190,18 +192,63 @@ pub async fn store(
         &response_json,
         &status,
         models::now_ms(),
+        per_key_limit,
+        total_limit,
     )
     .await?;
 
-    if !stored {
-        tracing::warn!(
-            response_id = %id,
-            api_key_id,
-            "response id is owned by another API key; skipping persistence"
-        );
+    match outcome {
+        StoreOutcome::Stored => Ok(true),
+        StoreOutcome::Conflict => {
+            state
+                .response_store_rejected
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                response_id = %id,
+                api_key_id,
+                "response id is owned by another API key; skipping persistence"
+            );
+            Ok(false)
+        }
+        StoreOutcome::QuotaExceeded => {
+            state
+                .response_store_rejected
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                response_id = %id,
+                api_key_id,
+                new_bytes = request_json.len().saturating_add(response_json.len()),
+                per_key_limit,
+                total_limit,
+                "response storage quota exceeded; skipping persistence"
+            );
+            Ok(false)
+        }
+        StoreOutcome::TooLarge => {
+            state
+                .response_store_rejected
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                response_id = %id,
+                api_key_id,
+                request_bytes = request_json.len(),
+                response_bytes = response_json.len(),
+                "response exceeds the storage limit; skipping persistence"
+            );
+            Ok(false)
+        }
     }
+}
 
-    Ok(stored)
+/// Convert a MiB setting to bytes. `0` (or a negative hand-edited value) means
+/// unlimited and stays `0`; the multiplication saturates so an out-of-range
+/// stored value cannot wrap.
+fn storage_limit_bytes(mb: i64) -> i64 {
+    if mb <= 0 {
+        0
+    } else {
+        mb.saturating_mul(1024 * 1024)
+    }
 }
 
 pub async fn get(

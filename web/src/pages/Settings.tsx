@@ -44,6 +44,8 @@ interface SettingsDraft {
   usage_log_retention_days: string;
   request_detail_retention_days: string;
   response_retention_days: string;
+  response_storage_per_key_mb: string;
+  response_storage_total_mb: string;
   store_request_bodies: boolean;
   update_source: 'github' | 'ghproxy';
   client_ip_header: string;
@@ -63,6 +65,8 @@ const NUMERIC_DEFAULTS = {
   usage_log_retention_days: 30,
   request_detail_retention_days: 7,
   response_retention_days: 7,
+  response_storage_per_key_mb: 64,
+  response_storage_total_mb: 2048,
 } as const;
 
 const EMPTY_DRAFT: SettingsDraft = {
@@ -80,6 +84,12 @@ const EMPTY_DRAFT: SettingsDraft = {
     NUMERIC_DEFAULTS.request_detail_retention_days,
   ),
   response_retention_days: String(NUMERIC_DEFAULTS.response_retention_days),
+  response_storage_per_key_mb: String(
+    NUMERIC_DEFAULTS.response_storage_per_key_mb,
+  ),
+  response_storage_total_mb: String(
+    NUMERIC_DEFAULTS.response_storage_total_mb,
+  ),
   store_request_bodies: false,
   update_source: 'github',
   client_ip_header: '',
@@ -97,6 +107,8 @@ function toDraft(settings: Settings): SettingsDraft {
       settings.request_detail_retention_days,
     ),
     response_retention_days: String(settings.response_retention_days),
+    response_storage_per_key_mb: String(settings.response_storage_per_key_mb),
+    response_storage_total_mb: String(settings.response_storage_total_mb),
     store_request_bodies: settings.store_request_bodies,
     update_source: settings.update_source,
     client_ip_header: settings.client_ip_header ?? '',
@@ -138,6 +150,14 @@ function toSettings(draft: SettingsDraft): Settings {
     response_retention_days: toInt(
       draft.response_retention_days,
       NUMERIC_DEFAULTS.response_retention_days,
+    ),
+    response_storage_per_key_mb: toInt(
+      draft.response_storage_per_key_mb,
+      NUMERIC_DEFAULTS.response_storage_per_key_mb,
+    ),
+    response_storage_total_mb: toInt(
+      draft.response_storage_total_mb,
+      NUMERIC_DEFAULTS.response_storage_total_mb,
     ),
     store_request_bodies: draft.store_request_bodies,
     update_source: draft.update_source,
@@ -422,6 +442,42 @@ export default function SettingsPage() {
                       onChange={(event) =>
                         update({
                           response_retention_days: event.target.value,
+                        })
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="Responses 单 Key 存储上限（MB）"
+                    htmlFor="settings-response-per-key-mb"
+                    hint="单个 API Key 的 Responses 存储上限；0 表示不限制，超额返回 store: false。"
+                  >
+                    <Input
+                      id="settings-response-per-key-mb"
+                      type="number"
+                      min={0}
+                      max={1048576}
+                      value={draft.response_storage_per_key_mb}
+                      onChange={(event) =>
+                        update({
+                          response_storage_per_key_mb: event.target.value,
+                        })
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="Responses 全局存储上限（MB）"
+                    htmlFor="settings-response-total-mb"
+                    hint="所有 API Key 合计的 Responses 存储上限；0 表示不限制。"
+                  >
+                    <Input
+                      id="settings-response-total-mb"
+                      type="number"
+                      min={0}
+                      max={1048576}
+                      value={draft.response_storage_total_mb}
+                      onChange={(event) =>
+                        update({
+                          response_storage_total_mb: event.target.value,
                         })
                       }
                     />

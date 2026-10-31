@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::{
-    models::{now_ms, setting},
+    models::{self, now_ms, setting},
     state::AppState,
 };
 
@@ -18,8 +18,6 @@ const DELETE_USAGE_LOGS: &str = "DELETE FROM usage_logs WHERE rowid IN
     (SELECT rowid FROM usage_logs WHERE created_at < ? LIMIT ?)";
 const DELETE_REQUEST_DETAILS: &str = "DELETE FROM request_details WHERE rowid IN
     (SELECT rowid FROM request_details WHERE created_at < ? LIMIT ?)";
-const DELETE_RESPONSES: &str = "DELETE FROM responses WHERE rowid IN
-    (SELECT rowid FROM responses WHERE created_at < ? LIMIT ?)";
 
 #[derive(Debug, Default)]
 pub struct CleanupStats {
@@ -69,7 +67,10 @@ pub async fn cleanup_once(state: &AppState) -> anyhow::Result<CleanupStats> {
     }
 
     if let Some(cutoff) = response_cutoff {
-        stats.responses = delete_before(&state.db, DELETE_RESPONSES, cutoff).await?;
+        // The Responses sweep also decrements the per-key/global storage
+        // counters from the rows it actually removed.
+        stats.responses =
+            models::response::delete_before(&state.db, cutoff, DELETE_BATCH).await? as u64;
     }
 
     Ok(stats)
