@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-31
-- 当前阶段：v0.1.18 安全修复批次已实现并通过端到端验证（待合并/发布）
-- 当前分支：`security/hardening-0.1.18`
-- 最近发布：`v0.1.17`
+- 当前阶段：v0.1.19 后续安全修复已实现并通过测试（待合并/发布）
+- 当前分支：`security/hardening-0.1.19`
+- 最近发布：`v0.1.18`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -575,6 +575,19 @@
 - 验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo build --release --locked`、`cargo test --locked`、`npx tsc --noEmit`、`npm run lint`、`npm run build` 通过；真实服务 + 假上游端到端 60 项断言通过（登录/渠道/Key、三协议请求、模型列表隔离、错误脱敏、HTML/截断流、Responses 存储与配额、同 request_id 双 Key 详情、配额 403/429、长 model/cursor、跨协议未知字段 400、JSON 触发器、鉴权限速、配置客户端 IP 头后不同头 IP 互不牵连且不回退建联 IP、同协议非 JSON 200 拒绝、count_tokens 2xx 校验、日志 id JSON 400、保留期上界、系统计数器、备份权限与限流、删除 Key 清正文、v2 哈希与预留结算）。
 - 全量复审后修复：usage 批量写入对已删除 Key/渠道做外键归一（避免整批回滚）；`error:null` 三处判定统一；跨协议解码失败补发安全 error 帧；usage 同步写失败不再 disarm 预留；详情正文在序列化/捕获时即截断；删除 `response::insert` 死代码；Responses 配额计数统一按字节（`length(CAST(... AS BLOB))`）；未知客户端桶限速（头缺失/非法时不放行也不使用 TCP 对端）；同协议非流式 200 增加 JSON/Content-Type 校验；`count_tokens` 2xx 校验；备份冲突改 409；保留期上界统一；日志路由改 `{id}` 并返回 JSON 400；`response.failed` 字段优先级收敛；首帧 `id:`/`retry:` 不再误判；`client_slow` 写入 usage；配额/详情计数器在 `/api/system` 与 `/readyz` 暴露。
 - 未纳入本批次（保持现状，另行排期）：S1、H1–H5、M1–M4、M9、M15、L12，详见 `docs/SECURITY_FIX_PLAN.md` §0.2。
+
+## 后续安全修复（2026-10-31，v0.1.19）
+
+范围：H3、H4、R1–R5。
+
+- H3 登录 DoS：密码校验/哈希移入 `spawn_blocking`，由 4 并发信号量限流；登录 username ≤64、password ≤256；限流表 10k 硬上限，达到后按 `last_failure` 淘汰最旧 25%，不清空全部锁定。
+- H4 密钥外带：渠道更新/探活复用已存密钥时，禁止把同一协议的 `base_url` 改到新主机；必须重新输入该协议 api_key 才允许迁移。
+- R1 预留竞态：`stream::start` 提交前失败时把 `Reservation` 随 `StreamStartError` 回传，下一个候选直接复用；删除异步 Drop 后重新 reserve 的竞态。
+- R2 同协议语义：非流式 Responses 要求 `status ∈ {completed,incomplete}`，Anthropic 要求 `type=message` 且 `stop_reason` 存在；流式透传对 Responses 终帧状态与 Anthropic `message_start.type` 做观测校验。
+- R3 去重：结算收敛为 `settle_key`（同步/批量共用），模型白名单收敛为 `ApiKeyLimits::allows_model`（`ProxyIdentity` 持有 limits），删除重复的 `*` 判断。
+- R4 去 panic：移除请求路径剩余 6 处 `expect`（execute 的 response_id/unified_request、admin keys 的 limits、SSE response builder）。
+- R5 回归测试：新增 `src/test_support.rs` 与 21 个单元测试，覆盖 client_ip 唯一来源、URL 脱敏、预留限额/日限额/陈旧清理、Responses 配额按字节计数/覆盖差值/冲突/删除、日志详情跨 Key 隔离、SSE 终止与 `error:null`。
+- 验证：`cargo test --locked` 21/21、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo build --release --locked`、`npx tsc --noEmit`、`npm run lint`、`npm run build` 通过；真实服务 + 假上游端到端 68 项断言通过（新增 H3 输入限长、H4 探活/更新改 base_url 拒绝、R2 queued Responses/非法 Anthropic 类型 502）。
 
 ## AOCI 状态
 
