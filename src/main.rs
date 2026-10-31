@@ -95,6 +95,7 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
         events,
         updates: std::sync::Arc::new(crate::state::UpdateState::default()),
         login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
+        auth_failure_limiter: std::sync::Arc::new(crate::state::AuthFailureLimiter::default()),
         clients: Arc::new(upstream::ClientCache::default()),
         cache: Arc::new(state::RuntimeCache::default()),
         probes: Arc::new(state::ChannelProbes::default()),

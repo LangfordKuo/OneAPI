@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    net::IpAddr,
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
     time::{Duration, Instant},
@@ -275,6 +276,96 @@ pub struct UpdateState {
     pub shutdown: Notify,
 }
 
+const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
+const AUTH_FAILURE_PER_IP_LIMIT: usize = 20;
+/// Cap the per-peer vector so concurrent failures cannot grow it without bound.
+const AUTH_FAILURE_MAX_TRACKED: usize = 128;
+
+/// Sliding-window limiter for failed API key authentication. Keys are the TCP
+/// peer address from `ConnectInfo`, never a forwarded header, so a spoofed
+/// `X-Forwarded-For` cannot consume another client's budget.
+#[derive(Debug, Default)]
+pub struct AuthFailureLimiter {
+    state: Mutex<AuthFailureState>,
+}
+
+#[derive(Debug, Default)]
+struct AuthFailureState {
+    per_ip: HashMap<IpAddr, Vec<Instant>>,
+}
+
+impl AuthFailureLimiter {
+    fn lock(&self) -> std::sync::MutexGuard<'_, AuthFailureState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether the peer may still attempt authentication. Only the peer's own
+    /// failures count: a global gate would let one attacker lock every tenant
+    /// out of the gateway.
+    pub fn check(&self, peer: Option<IpAddr>) -> bool {
+        let now = Instant::now();
+        let mut state = self.lock();
+        state.retain_recent(now);
+
+        match peer {
+            Some(peer) => {
+                let mut expired = false;
+                let allowed = match state.per_ip.get_mut(&peer) {
+                    Some(failures) => {
+                        retain_recent(failures, now);
+                        expired = failures.is_empty();
+                        failures.len() < AUTH_FAILURE_PER_IP_LIMIT
+                    }
+                    None => true,
+                };
+                if expired {
+                    state.per_ip.remove(&peer);
+                }
+                allowed
+            }
+            None => true,
+        }
+    }
+
+    pub fn record_failure(&self, peer: Option<IpAddr>) {
+        let now = Instant::now();
+        let mut state = self.lock();
+        state.retain_recent(now);
+        if let Some(peer) = peer {
+            let failures = state.per_ip.entry(peer).or_default();
+            retain_recent(failures, now);
+            if failures.len() < AUTH_FAILURE_MAX_TRACKED {
+                failures.push(now);
+            }
+        }
+    }
+
+    pub fn record_success(&self, peer: Option<IpAddr>) {
+        if let Some(peer) = peer {
+            self.lock().per_ip.remove(&peer);
+        }
+    }
+}
+
+impl AuthFailureState {
+    fn retain_recent(&mut self, now: Instant) {
+        // Drop fully expired peers, but only scan the whole map when it grows
+        // large so the common case stays cheap.
+        if self.per_ip.len() > 10_000 {
+            self.per_ip.retain(|_, failures| {
+                retain_recent(failures, now);
+                !failures.is_empty()
+            });
+        }
+    }
+}
+
+fn retain_recent(attempts: &mut Vec<Instant>, now: Instant) {
+    attempts.retain(|attempt| now.saturating_duration_since(*attempt) < AUTH_FAILURE_WINDOW);
+}
+
 /// Result of asking to try a channel that is coming out of cooldown.
 pub enum ProbeAttempt {
     /// The channel is not recovering, so normal traffic may use it.
@@ -349,6 +440,7 @@ pub struct AppState {
     pub events: Arc<EventBus>,
     pub updates: Arc<UpdateState>,
     pub login_limiter: Arc<LoginLimiter>,
+    pub auth_failure_limiter: Arc<AuthFailureLimiter>,
     pub clients: Arc<ClientCache>,
     pub cache: Arc<RuntimeCache>,
     pub probes: Arc<ChannelProbes>,

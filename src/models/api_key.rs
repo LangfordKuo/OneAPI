@@ -7,6 +7,8 @@ pub struct ApiKey {
     pub name: String,
     #[allow(dead_code)]
     pub key_hash: String,
+    /// Peppered hash; `None` for keys created before migration 0009.
+    pub key_hash_v2: Option<String>,
     pub key_prefix: String,
     pub enabled: i64,
     pub expires_at: Option<i64>,
@@ -74,6 +76,7 @@ impl ApiKey {
 pub struct ApiKeyCreate<'a> {
     pub name: &'a str,
     pub key_hash: &'a str,
+    pub key_hash_v2: &'a str,
     pub key_prefix: &'a str,
     pub enabled: i64,
     pub expires_at: Option<i64>,
@@ -95,8 +98,8 @@ pub struct ApiKeyUpdate<'a> {
     pub daily_token_limit: Option<i64>,
 }
 
-const SELECT_COLUMNS: &str = "id, name, key_hash, key_prefix, enabled, expires_at, last_used_at,
-    allowed_channel_ids, allowed_models, token_limit, token_usage, daily_token_limit,
+const SELECT_COLUMNS: &str = "id, name, key_hash, key_hash_v2, key_prefix, enabled, expires_at,
+    last_used_at, allowed_channel_ids, allowed_models, token_limit, token_usage, daily_token_limit,
     daily_token_usage, daily_usage_day, created_at";
 
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<ApiKey>> {
@@ -109,12 +112,31 @@ pub async fn get(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<ApiKey>> {
     sqlx::query_as(&query).bind(id).fetch_optional(pool).await
 }
 
-pub async fn find_by_hash(pool: &SqlitePool, key_hash: &str) -> sqlx::Result<Option<ApiKey>> {
-    let query = format!("SELECT {SELECT_COLUMNS} FROM api_keys WHERE key_hash = ?");
+pub async fn find_by_key_hash(
+    pool: &SqlitePool,
+    v2_hash: &str,
+    legacy_hash: &str,
+) -> sqlx::Result<Option<ApiKey>> {
+    let query = format!(
+        "SELECT {SELECT_COLUMNS} FROM api_keys WHERE key_hash_v2 = ?1 OR key_hash = ?2"
+    );
     sqlx::query_as(&query)
-        .bind(key_hash)
+        .bind(v2_hash)
+        .bind(legacy_hash)
         .fetch_optional(pool)
         .await
+}
+
+/// Backfill the peppered hash for a key that only has the legacy one. The
+/// `IS NULL` guard keeps a concurrent upgrade from overwriting the first
+/// writer's value.
+pub async fn set_key_hash_v2(pool: &SqlitePool, id: i64, hash: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE api_keys SET key_hash_v2 = ? WHERE id = ? AND key_hash_v2 IS NULL")
+        .bind(hash)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn touch_last_used(pool: &SqlitePool, id: i64, now: i64) -> sqlx::Result<()> {
@@ -132,12 +154,13 @@ pub async fn create_with_limits(
 ) -> sqlx::Result<ApiKey> {
     let result = sqlx::query(
         "INSERT INTO api_keys
-         (name, key_hash, key_prefix, enabled, expires_at, allowed_channel_ids, allowed_models,
-          token_limit, daily_token_limit, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (name, key_hash, key_hash_v2, key_prefix, enabled, expires_at, allowed_channel_ids,
+          allowed_models, token_limit, daily_token_limit, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(input.name)
     .bind(input.key_hash)
+    .bind(input.key_hash_v2)
     .bind(input.key_prefix)
     .bind(input.enabled)
     .bind(input.expires_at)

@@ -189,7 +189,8 @@ pub async fn create(
     .await?;
 
     let key = security::generate_api_key();
-    let key_hash = security::api_key_hash(&key);
+    let key_hash = security::Crypto::api_key_hash_legacy(&key);
+    let key_hash_v2 = state.crypto.api_key_hash_v2(&key);
     let key_prefix: String = key.chars().take(12).collect();
     let enabled = if input.enabled.unwrap_or(true) { 1 } else { 0 };
     let allowed_channel_ids = encode(&channel_ids)?;
@@ -200,6 +201,7 @@ pub async fn create(
         &ApiKeyCreate {
             name,
             key_hash: &key_hash,
+            key_hash_v2: &key_hash_v2,
             key_prefix: &key_prefix,
             enabled,
             expires_at: input.expires_at,

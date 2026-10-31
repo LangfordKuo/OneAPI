@@ -1,5 +1,7 @@
+use std::net::SocketAddr;
+
 use axum::{
-    extract::FromRequestParts,
+    extract::{ConnectInfo, FromRequestParts},
     http::{header, request::Parts, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -28,18 +30,52 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let raw_key = extract_api_key(parts).ok_or_else(|| unauthorized(parts))?;
-        let key_hash = security::api_key_hash(&raw_key);
+        // Limit by the real TCP peer; forwarded headers are client controlled
+        // and must not be able to shape another client's window.
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| addr.ip());
 
-        let record = models::api_key::find_by_hash(&state.db, &key_hash)
+        // Fail before touching the database: a peer that keeps sending bad
+        // keys must not get a lookup per attempt.
+        if !state.auth_failure_limiter.check(peer) {
+            tracing::warn!(peer = ?peer, "API key authentication rate limit exceeded");
+            return Err(rate_limited(parts));
+        }
+
+        let raw_key = match extract_api_key(parts) {
+            Some(key) => key,
+            None => {
+                state.auth_failure_limiter.record_failure(peer);
+                return Err(unauthorized(parts));
+            }
+        };
+
+        let v2_hash = state.crypto.api_key_hash_v2(&raw_key);
+        let legacy_hash = security::Crypto::api_key_hash_legacy(&raw_key);
+
+        let record = models::api_key::find_by_key_hash(&state.db, &v2_hash, &legacy_hash)
             .await
             .map_err(|error| {
                 tracing::error!(error = %error, "failed to look up API key");
                 server_error(parts)
             })?
-            .ok_or_else(|| unauthorized(parts))?;
+            .ok_or_else(|| {
+                state.auth_failure_limiter.record_failure(peer);
+                tracing::debug!(
+                    hash_prefix = %legacy_hash.get(..8).unwrap_or(legacy_hash.as_str()),
+                    "API key authentication failed"
+                );
+                unauthorized(parts)
+            })?;
 
         let now = models::now_ms();
+
+        // The credentials matched a stored hash, so clear this peer's failure
+        // history even if a quota check below rejects the request.
+        state.auth_failure_limiter.record_success(peer);
+
         if record.token_limit_reached() {
             if record.enabled != 0 {
                 if let Err(error) = models::api_key::disable(&state.db, record.id).await {
@@ -59,7 +95,23 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
                 .map(|expires_at| expires_at <= now)
                 .unwrap_or(false)
         {
+            state.auth_failure_limiter.record_failure(peer);
             return Err(unauthorized(parts));
+        }
+
+        // Rows created before migration 0009 only carry the legacy hash. Fill
+        // in the peppered one on first successful use; a failed backfill must
+        // never break authentication.
+        if record.key_hash_v2.is_none() {
+            if let Err(error) =
+                models::api_key::set_key_hash_v2(&state.db, record.id, &v2_hash).await
+            {
+                tracing::warn!(
+                    error = %error,
+                    key_id = record.id,
+                    "failed to backfill API key hash"
+                );
+            }
         }
 
         // Parse the restrictions once and fail closed: a malformed allowlist
@@ -143,6 +195,15 @@ fn daily_limit_reached(parts: &Parts) -> Response {
         protocol_for_path(parts.uri.path()),
         StatusCode::TOO_MANY_REQUESTS,
         "API key daily token limit reached; it resets at 00:00 UTC",
+        "rate_limit_error",
+    )
+}
+
+fn rate_limited(parts: &Parts) -> Response {
+    client_error(
+        protocol_for_path(parts.uri.path()),
+        StatusCode::TOO_MANY_REQUESTS,
+        "too many failed authentication attempts; retry later",
         "rate_limit_error",
     )
 }

@@ -16,6 +16,7 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
+hmac = "0.12"
 mime_guess = "2"
 rand = "0.8"
 self-replace = "1"

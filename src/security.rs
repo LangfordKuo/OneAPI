@@ -16,6 +16,7 @@ use argon2::{
     Argon2,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use hmac::{Hmac, Mac};
 use rand::{distributions::Alphanumeric, Rng, RngCore};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -24,6 +25,10 @@ const API_KEY_PREFIX: &str = "sk-";
 const API_KEY_RANDOM_LEN: usize = 48;
 const MASTER_KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
+/// Domain separator for deriving the API key pepper from the master key.
+const API_KEY_PEPPER_CONTEXT: &[u8] = b"oneapi-api-key-pepper";
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone)]
 pub struct Crypto {
@@ -175,6 +180,33 @@ impl Crypto {
         }
         masked
     }
+
+    /// Pepper for API key hashes, derived from the master key with a fixed
+    /// domain separator. It is never stored, so a database copy alone cannot
+    /// reproduce (or brute-force) the stored hashes.
+    fn api_key_pepper(&self) -> [u8; 32] {
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.key[..])
+            .expect("HMAC-SHA256 accepts keys of any length");
+        mac.update(API_KEY_PEPPER_CONTEXT);
+        let mut pepper = [0u8; 32];
+        pepper.copy_from_slice(&mac.finalize().into_bytes());
+        pepper
+    }
+
+    /// Peppered API key hash: `HMAC-SHA256(pepper, key)`, hex encoded.
+    pub fn api_key_hash_v2(&self, key: &str) -> String {
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.api_key_pepper())
+            .expect("HMAC-SHA256 accepts keys of any length");
+        mac.update(key.as_bytes());
+        hex(&mac.finalize().into_bytes())
+    }
+
+    /// Legacy unpeppered SHA-256 hash. Existing rows keep authenticating with
+    /// it (and an older binary can still read them after a rollback); new
+    /// writes use [`Self::api_key_hash_v2`].
+    pub fn api_key_hash_legacy(key: &str) -> String {
+        sha256_hex(key)
+    }
 }
 
 fn write_secret_file(path: &Path, key: &[u8]) -> Result<()> {
@@ -289,10 +321,6 @@ pub fn generate_api_key() -> String {
         .map(char::from)
         .collect();
     format!("{API_KEY_PREFIX}{random}")
-}
-
-pub fn api_key_hash(key: &str) -> String {
-    sha256_hex(key)
 }
 
 pub fn generate_session_token() -> String {
