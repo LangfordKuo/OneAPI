@@ -4,7 +4,7 @@
 - 当前阶段：v0.1.21 已发布，后续开发在 `develop` 长期分支进行
 - 当前分支：`develop`
 - 最近发布：`v0.1.21`
-- 计划文档：`docs/IMPLEMENTATION_PLAN.md`
+- 已知限制：`docs/KNOWN_LIMITATIONS.md`
 
 ## 里程碑
 
@@ -29,7 +29,7 @@
 - M5 已完成：三协议 SSE 解码/编码、同协议 tee 透传、跨协议 6 条流路径、首 event 失败切换、逐 chunk 空闲超时、断连 499、Responses 流式落库与回读。
 - M6 已完成：请求日志页与详情抽屉、仪表盘统计/时序/占比/最近错误、Playground 三协议（含流式）、`/api/logs`、`/api/dashboard/*`、`/api/models`、`/api/playground`、路由级懒加载与暗色模式。
 - M7 已完成：GitHub Actions CI、Tag 触发的六平台 Release（Linux/Windows/macOS × amd64/arm64）、GHCR 多架构 Docker 镜像、Web 安装向导、保留期清理、`reset-password` 与请求/响应正文记录。
-- 已确认的产品决策见 `docs/IMPLEMENTATION_PLAN.md` 第 1 节。
+- 架构、数据模型与协议映射以代码和 AOCI 认知索引为准。
 
 ## M0 验证记录
 
@@ -245,7 +245,7 @@
 
 - 版本号从 `0.1.10` 升至 `0.1.11`。
 - 完成两轮全仓复审：SSE 单帧上限与裸 CR、Responses 透传零拷贝与轻量观测、健康渠道成功跳过写库、`count_tokens` 资源复用、同协议 usage 精简解析、Responses 增量历史存储与链式展开、请求详情并入写队列、渠道掩码缓存、选路 `Arc<PreparedChannel>`、缓存 single-flight、启动前加载 `.env`、`client_ip_header` 缓存等。
-- 归档并删除已完成的 `docs/REVIEW_PLAN.md` 与 `docs/OPTIMIZATION_PLAN.md`；后续能力与已知限制移入 `docs/IMPLEMENTATION_PLAN.md` §16。
+- 归档并删除已完成的 `docs/REVIEW_PLAN.md` 与 `docs/OPTIMIZATION_PLAN.md`。
 - 验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（177 个测试）与 `web/` `npm run build` 通过。
 
 ## v0.1.10 发布记录
@@ -259,7 +259,7 @@
 
 ## v0.1.9 发布记录
 
-- 版本号从 `0.1.8` 升至 `0.1.9`，完成优化清单批次 1–5（含 P3-7，原文件已归档至实施计划 §16）。
+- 版本号从 `0.1.8` 升至 `0.1.9`，完成优化清单批次 1–5（含 P3-7）。
 - 安全：登录/改密限速、设置事务化、CSRF 转发头取值、短 Key 掩码；上游重定向限制与故障转移总预算；协议化 JSON 解析错误与 `include_usage` 兼容重试。
 - 性能：日志分页上限与可选总数、运行时缓存补齐、可配置连接池与 `/readyz` 队列指标、加权选路 O(n log n)、实时指标分片、SSE 字节级解析。
 - 前端与响应头：SSE 读取器与增量换行、Playground 流取消、Key 限额整数校验、全局 `nosniff`/`X-Frame-Options`/`Referrer-Policy`/CSP。
@@ -301,7 +301,7 @@
 
 ## 审查计划阶段 A（v0.1.2 修复与一致性）
 
-- 新增审查计划，按阶段记录审查结论与验收标准（原文件已归档至实施计划 §16）。
+- 新增审查计划，按阶段记录审查结论与验收标准。
 - 设置项接线：`default_max_tokens` 用于跨协议编码到 Anthropic 时的缺省值；`nonstream_timeout_seconds` / `stream_idle_timeout_seconds` 作为渠道未配置 `timeout_ms` 时的默认超时；`site_name` 通过公开 `GET /api/site` 用于登录页、安装页、侧边栏与浏览器标题。
 - 新增 `POST /v1/messages/count_tokens`：Anthropic 上游原样转发，其他上游按字符数估算并返回 Anthropic 形状。
 - 通配符渠道的模型列表回退到最近 30 天 `usage_logs` 中出现的模型；Playground 模型选择改为可自由输入的 AutoComplete。
@@ -337,7 +337,7 @@
 
 - 依赖清理：移除未使用的 `eventsource-stream`；`tower` 仅测试使用，移入 `[dev-dependencies]`；`tower-http` 去掉未启用的 `timeout`、`limit` feature。
 - 移除 `src/error.rs` 中已无必要的 `#[allow(dead_code)]`，Clippy 仍保持零警告。
-- 文档同步：README 更新发布进度、真实 CI runner、环境变量与 `0.1.1` 镜像/标签示例；`docs/IMPLEMENTATION_PLAN.md` 补充 `GET /api/site`、ESLint 与新环境变量，并新增变更记录。
+- 文档同步：README 更新发布进度、真实 CI runner、环境变量与 `0.1.1` 镜像/标签示例；文档补充 `GET /api/site`、ESLint 与新环境变量，并记录变更。
 - 前端版本对齐 `package.json` / `package-lock.json` 到 `0.1.1`。
 - 引入 ESLint 10 flat config（typescript-eslint、react-hooks、react-refresh），新增 `npm run lint`，CI 前端任务增加 lint 步骤；Playground 默认模型改为派生值，消除 effect 内 setState。
 - `.env.example` 补齐 `ONEAPI_TRUST_PROXY`、`ONEAPI_ALLOW_SELF_UPDATE`、`ONEAPI_UPDATE_API_BASE` 说明。
@@ -396,11 +396,11 @@
 
 验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked` 通过。
 
-本轮未执行的安全/性能/兼容性事项整理到优化清单（原文件已归档至实施计划 §16）。
+本轮未执行的安全/性能/兼容性事项整理到优化清单。
 
 ## 优化计划批次 1–5（2026-10-28）
 
-按优化清单（原文件已归档至实施计划 §16）的顺序完成批次 1–5（含 P3-7），未修改已发布迁移。
+按优化清单的顺序完成批次 1–5（含 P3-7），未修改已发布迁移。
 
 - **批次 1（安全）**：登录对不存在的用户执行一次 dummy Argon2 校验以抹平时序差；改密复用登录限速（key 为 `password|{ip}|{admin_id}`）；设置更新改为先校验、再单事务写入；CSRF 的 `X-Forwarded-Host` 取最后一个非空值；长度 ≤4 的短 Key 掩码只返回 `••••`。
 - **批次 2（可用性与协议）**：上游 Client 的 3xx 只跟随同 host、最多 3 次；请求入口引入总预算（非流式 600s、流式提交前 60s），候选循环与首帧等待共用绝对 deadline；`/v1/*` 改用 `ApiJson`，解析失败返回各协议 JSON 错误；Chat 流式注入 `include_usage` 被上游 400 拒绝时去掉字段重试一次。
@@ -440,7 +440,7 @@
 - **启动顺序**：`.env` 在 tokio 运行时启动前加载，`Config::from_env` 不再调用 `env::set_var`。
 - **登录限速设置缓存**：`client_ip_header` 并入 `RuntimeCache`（30 秒，设置更新后失效），登录/改密不再每次查设置表。
 
-验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（177 个测试）与 `web/` 下 `npm run build` 均通过。审查阶段列出的问题至此全部处理完毕，剩余事项只有 P4 路线图。
+验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（177 个测试）与 `web/` 下 `npm run build` 均通过。审查阶段列出的问题至此全部处理完毕。
 
 ## 同模型渠道无缝故障转移（2026-10-29，v0.1.12）
 
@@ -565,7 +565,7 @@
 
 ## 安全修复批次（2026-10-31，v0.1.18）
 
-范围：`docs/SECURITY_FIX_PLAN.md` 中的 M5–M8、M10–M14、L1–L11，共 20 项。
+范围：安全修复计划中的 M5–M8、M10–M14、L1–L11，共 20 项。
 
 - 新增迁移 `0009_security_fixes.sql`：`usage_logs.detail_api_key_id`、`api_keys.key_hash_v2` 与预留列、`response_usage` 表、`usage_logs(api_key_id, created_at)` 索引、删除 Key 清正文触发器、API Key/渠道 JSON 有效性触发器。
 - 计费与配额：准入阶段原子预留（`reserved_tokens`/`reserved_daily_tokens`），用量事务内释放并计入实际 token；启动清零、60 秒 janitor 清理 30 分钟以上陈旧预留；`ONEAPI_DISABLE_QUOTA_RESERVATION=1` 可紧急关闭。Responses 增加每 Key（默认 64 MiB）与全局（默认 2 GiB）存储配额，超额返回 `store:false`，保留期删除与显式删除同步回写 `response_usage`。
@@ -574,7 +574,7 @@
 - 安全加固：API Key v2 哈希 `HMAC-SHA256(pepper, key)`，v1 兼容并惰性回填；鉴权失败按客户端 IP 限速；**配置 `client_ip_header` 时该头为唯一来源，绝不回退建联 IP**，避免 CDN 回源地址被拉黑；备份目录 0700/文件 0600、并发与 10 秒限流；指标 SSE 30 秒会话复检、连接上限与停机主动结束；主密钥/密码 zeroize；正文保留期独立于 usage 日志；前端 401 统一处理、路径校验、设置脏字段提交、编辑不回写 `enabled`、chart 样式安全注入。
 - 验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo build --release --locked`、`cargo test --locked`、`npx tsc --noEmit`、`npm run lint`、`npm run build` 通过；真实服务 + 假上游端到端 60 项断言通过（登录/渠道/Key、三协议请求、模型列表隔离、错误脱敏、HTML/截断流、Responses 存储与配额、同 request_id 双 Key 详情、配额 403/429、长 model/cursor、跨协议未知字段 400、JSON 触发器、鉴权限速、配置客户端 IP 头后不同头 IP 互不牵连且不回退建联 IP、同协议非 JSON 200 拒绝、count_tokens 2xx 校验、日志 id JSON 400、保留期上界、系统计数器、备份权限与限流、删除 Key 清正文、v2 哈希与预留结算）。
 - 全量复审后修复：usage 批量写入对已删除 Key/渠道做外键归一（避免整批回滚）；`error:null` 三处判定统一；跨协议解码失败补发安全 error 帧；usage 同步写失败不再 disarm 预留；详情正文在序列化/捕获时即截断；删除 `response::insert` 死代码；Responses 配额计数统一按字节（`length(CAST(... AS BLOB))`）；未知客户端桶限速（头缺失/非法时不放行也不使用 TCP 对端）；同协议非流式 200 增加 JSON/Content-Type 校验；`count_tokens` 2xx 校验；备份冲突改 409；保留期上界统一；日志路由改 `{id}` 并返回 JSON 400；`response.failed` 字段优先级收敛；首帧 `id:`/`retry:` 不再误判；`client_slow` 写入 usage；配额/详情计数器在 `/api/system` 与 `/readyz` 暴露。
-- 未纳入本批次（保持现状，另行排期）：S1、H1–H5、M1–M4、M9、M15、L12，详见 `docs/SECURITY_FIX_PLAN.md` §0.2。
+- 未纳入本批次（保持现状，另行排期）：S1、H1–H5、M1–M4、M9、M15、L12。
 
 ## 后续安全修复（2026-10-31，v0.1.19）
 
@@ -626,14 +626,13 @@
 ## 下一步
 
 1. 审查计划阶段 A–D 与 E3 已合并回 `main` 并发布 `v0.1.2`；`v0.1.3` 为日志筛选修复补丁。
-2. 阶段 E 剩余项（速率限制与额度、Prometheus `/metrics`、日志导出/重放、备份恢复、Playground 增强、多管理员/RBAC 与 PostgreSQL）仍是路线图。
-3. 后续版本按 `Cargo.toml` 版本打标签，保留数据目录升级。
-4. 审查计划与优化清单的可执行项已全部完成，两份计划文档已删除；后续能力与已知限制见 `docs/IMPLEMENTATION_PLAN.md` §16。
+2. 后续版本按 `Cargo.toml` 版本打标签，保留数据目录升级。
+3. 审查计划、优化清单、实施计划与安全修复计划均已归档删除；仍存在的限制见 `docs/KNOWN_LIMITATIONS.md`。
 
 ## 交接约定
 
-- 新会话开始先读 `AGENTS.md`、本文档和 `docs/IMPLEMENTATION_PLAN.md`。
-- 每个里程碑结束更新本文档；计划或决策变化同步更新 `docs/IMPLEMENTATION_PLAN.md`。
+- 新会话开始先读 `AGENTS.md`、本文档和 `docs/KNOWN_LIMITATIONS.md`。
+- 每个里程碑结束更新本文档；新增或解除已知限制时同步更新 `docs/KNOWN_LIMITATIONS.md`。
 - 不提交 AOCI 的机器运行时资产；`aoci.txt`、`aoci.meta.txt`、`aoci.code.txt`、`.aoci/config.json`、`.aoci/baseline.json`、`AGENTS.md`、`.gitattributes` 属于应纳入版本管理的认知资产。
 
 ## 分支约定
