@@ -332,6 +332,9 @@ async fn run(
     let mut stream_error_provider_json = false;
     let mut synthesize_error = false;
     let mut held_terminal: Option<Vec<Bytes>> = None;
+    // Same-protocol passthrough does not run every frame through the decoder,
+    // so its terminal frame is tracked from the observation instead.
+    let mut passthrough_terminal = false;
 
     loop {
         let frame = if let Some(frame) = pending.pop_front() {
@@ -413,6 +416,7 @@ async fn run(
             &mut response_capture,
             &mut tokens,
             &mut first_token_at,
+            &mut passthrough_terminal,
         )
         .await
         {
@@ -433,6 +437,25 @@ async fn run(
                 held_terminal = Some(held);
                 break;
             }
+        }
+    }
+
+    // An upstream that closes without its protocol terminal frame truncated
+    // the stream even when every byte it sent was valid SSE. Report it instead
+    // of encoding a synthetic completion the client would trust.
+    if !client_disconnected && stream_error.is_none() && held_terminal.is_none() {
+        let saw_terminal = if job.passthrough {
+            passthrough_terminal
+        } else {
+            decoder.saw_terminal()
+        };
+        if !saw_terminal {
+            stream_error = Some(bounded_error(
+                "upstream_stream_truncated".to_string(),
+                "upstream stream ended without a terminal event".to_string(),
+            ));
+            stream_error_provider_json = false;
+            synthesize_error = true;
         }
     }
 
@@ -707,9 +730,13 @@ async fn process_frame(
     capture: &mut Vec<u8>,
     tokens: &mut Usage,
     first_token_at: &mut Option<Instant>,
+    passthrough_terminal: &mut bool,
 ) -> FrameOutcome {
     if passthrough {
         let observation = observe_passthrough(upstream, &frame);
+        if observation.saw_terminal {
+            *passthrough_terminal = true;
+        }
         account_stream_chars(
             live,
             channel_id,
@@ -874,6 +901,10 @@ struct PassthroughObservation {
     /// Responses `response.completed` / `response.incomplete`, i.e. the frame
     /// that must be held back until persistence decides `store`.
     terminal: bool,
+    /// The protocol's terminal frame was seen: Chat `[DONE]`, Anthropic
+    /// `message_stop`, or a Responses terminal event. Used to detect a stream
+    /// that ends without one.
+    saw_terminal: bool,
     /// First frame that actually carries generated content, used to time the
     /// first token.
     has_content: bool,
@@ -904,6 +935,7 @@ fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObser
     };
 
     if protocol == Protocol::Chat && frame.data.trim() == "[DONE]" {
+        observation.saw_terminal = true;
         return observation;
     }
 
@@ -977,19 +1009,30 @@ fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObser
                 }
             }
             "error" => observation.error = Some(observed_error(&value)),
+            "message_stop" => observation.saw_terminal = true,
             _ => {}
         },
         Protocol::Responses => {
             match name {
-                "response.completed" | "response.incomplete" => observation.terminal = true,
+                "response.completed" | "response.incomplete" => {
+                    observation.terminal = true;
+                    observation.saw_terminal = true;
+                }
                 "error" => observation.error = Some(observed_error(&value)),
                 "response.failed" => {
-                    if let Some(error) = value
-                        .get("response")
-                        .and_then(|response| response.get("error"))
-                    {
-                        observation.error = Some(observed_error(error));
-                    }
+                    observation.saw_terminal = true;
+                    observation.error = Some(
+                        value
+                            .get("response")
+                            .and_then(|response| response.get("error"))
+                            .map(observed_error)
+                            .unwrap_or_else(|| {
+                                (
+                                    "upstream_error".to_string(),
+                                    "upstream response failed".to_string(),
+                                )
+                            }),
+                    );
                 }
                 _ => {}
             }
@@ -1044,6 +1087,27 @@ async fn send_bytes(
 }
 
 fn frame_error(protocol: Protocol, frame: &SseFrame) -> Option<(String, String)> {
+    // A non-SSE body (HTML error page, bare JSON document) reaches the parser
+    // as a line without a `data:` field, so `data` stays empty while `raw`
+    // carries bytes. It must never be committed to the client as a stream.
+    // Comment-only heartbeats (`: ping`) and `event:`-only frames are valid SSE
+    // and must keep flowing.
+    let comment_only = frame
+        .raw
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        == Some(&b':');
+    if frame.data.trim().is_empty()
+        && !frame.raw.is_empty()
+        && frame.event.is_none()
+        && !comment_only
+    {
+        return Some((
+            "upstream_invalid_frame".to_string(),
+            "upstream returned a non-SSE response".to_string(),
+        ));
+    }
+
     let value: Value = serde_json::from_str(&frame.data).ok()?;
     let name = frame
         .event
@@ -1068,9 +1132,17 @@ fn frame_error(protocol: Protocol, frame: &SseFrame) -> Option<(String, String)>
         Protocol::Anthropic if name == "error" => Some(fields(&value, false)),
         Protocol::Responses if name == "error" => Some(fields(&value, false)),
         Protocol::Responses if name == "response.failed" => {
-            let error = value.get("response")?.get("error")?;
-            // These payloads carry the machine-readable `code`; prefer it.
-            Some(fields(error, true))
+            let fields = value
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .map(|error| fields(error, true))
+                .unwrap_or_else(|| {
+                    (
+                        "upstream_error".to_string(),
+                        "upstream response failed".to_string(),
+                    )
+                });
+            Some(fields)
         }
         Protocol::Anthropic | Protocol::Responses => None,
     }

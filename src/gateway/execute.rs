@@ -1020,6 +1020,27 @@ async fn proxy_stream(
 
             let status = response.status();
             if status.is_success() {
+                // A 200 with a non-SSE body (HTML error page, JSON payload) is
+                // not a stream. Reject it before committing to this channel; an
+                // absent header is left to the first-frame check.
+                let invalid_content_type = response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .is_some_and(|value| {
+                        !value
+                            .to_str()
+                            .map(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+                            .unwrap_or(false)
+                    });
+                if invalid_content_type {
+                    // Drain the bounded body so the connection can be reused.
+                    let _ = upstream::read_body_limited(response).await;
+                    last_message = "upstream returned a non-SSE response".to_string();
+                    last_error_type = "upstream_invalid_content_type".to_string();
+                    last_provider_json = false;
+                    state.mark_channel_failure(channel.id, &last_message).await;
+                    continue 'candidates;
+                }
                 break response;
             }
 

@@ -81,6 +81,16 @@ impl StreamDecoder {
         }
     }
 
+    /// Whether the upstream sent the protocol's terminal event. A stream that
+    /// ends without one was truncated and must not be treated as complete.
+    pub fn saw_terminal(&self) -> bool {
+        match self {
+            Self::Chat(decoder) => decoder.terminal,
+            Self::Responses(decoder) => decoder.terminal,
+            Self::Anthropic(decoder) => decoder.terminal,
+        }
+    }
+
     pub fn final_response(&self) -> Option<Value> {
         match self {
             Self::Responses(decoder) => decoder.final_response.clone(),
@@ -100,6 +110,8 @@ pub struct ChatDecoder {
     finish_reason: Option<StopReason>,
     stopped: bool,
     done: bool,
+    /// `[DONE]` was observed; `finish()` alone does not count.
+    terminal: bool,
 }
 
 impl ChatDecoder {
@@ -112,6 +124,7 @@ impl ChatDecoder {
             return Ok(Vec::new());
         }
         if frame.data.trim() == "[DONE]" {
+            self.terminal = true;
             return Ok(self.close());
         }
 
@@ -291,6 +304,8 @@ pub struct AnthropicDecoder {
     open: BTreeSet<usize>,
     stopped: bool,
     done: bool,
+    /// `message_stop` was observed; `finish()` alone does not count.
+    terminal: bool,
 }
 
 impl AnthropicDecoder {
@@ -301,6 +316,7 @@ impl AnthropicDecoder {
             open: BTreeSet::new(),
             stopped: false,
             done: false,
+            terminal: false,
         }
     }
 
@@ -420,6 +436,7 @@ impl AnthropicDecoder {
                 }
             }
             "message_stop" => {
+                self.terminal = true;
                 events.extend(self.close());
             }
             "error" => events.push(error_event(&value)),
@@ -465,6 +482,9 @@ pub struct ResponsesDecoder {
     stopped: bool,
     done: bool,
     final_response: Option<Value>,
+    /// `response.completed` / `response.incomplete` / `response.failed` was
+    /// observed; `finish()` alone does not count.
+    terminal: bool,
 }
 
 impl ResponsesDecoder {
@@ -601,6 +621,7 @@ impl ResponsesDecoder {
                 self.stop_output_item(output_index, &mut events);
             }
             "response.completed" | "response.incomplete" => {
+                self.terminal = true;
                 if let Some(response) = value.get("response") {
                     self.final_response = Some(response.clone());
                     if let Ok(parsed) = responses::parse_response(response) {
@@ -613,12 +634,21 @@ impl ResponsesDecoder {
                 events.extend(self.close());
             }
             "response.failed" => {
-                if let Some(response) = value.get("response") {
-                    self.final_response = Some(response.clone());
-                    if let Some(error) = response.get("error") {
-                        events.push(error_event(error));
-                    }
-                }
+                self.terminal = true;
+                // A failed response is never a stored success. Some compatible
+                // upstreams omit the nested error object; synthesize one so the
+                // client still receives an error event.
+                let error = value
+                    .get("response")
+                    .and_then(|response| response.get("error"))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({
+                            "type": "upstream_error",
+                            "message": "upstream response failed",
+                        })
+                    });
+                events.push(error_event(&error));
             }
             "error" => events.push(error_event(&value)),
             _ => {}
@@ -952,7 +982,8 @@ impl ChatEncoder {
                 frames.push(sse_data(&json!({
                     "error": {"message": message, "type": error_type},
                 })));
-                frames.push("data: [DONE]\n\n".to_string());
+                // Do not emit the success sentinel: OpenAI-compatible clients
+                // treat `[DONE]` as a completed stream.
                 self.done = true;
             }
             _ => {}
