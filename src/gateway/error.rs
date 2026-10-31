@@ -137,9 +137,8 @@ mod tests {
 
     #[test]
     fn redact_urls_handles_embedded_url_tokens() {
-        let redacted = redact_urls(
-            "connect failed (https://internal:1/x) url=http://b/y <https://c/z> done",
-        );
+        let redacted =
+            redact_urls("connect failed (https://internal:1/x) url=http://b/y <https://c/z> done");
 
         assert!(
             !redacted.contains("internal")
@@ -154,7 +153,10 @@ mod tests {
         );
         assert!(redacted.contains("([url]"), "wrapped url: {redacted}");
         assert!(redacted.contains("url=[url]"), "prefixed url: {redacted}");
-        assert!(redacted.contains("<[url]"), "angle-bracketed url: {redacted}");
+        assert!(
+            redacted.contains("<[url]"),
+            "angle-bracketed url: {redacted}"
+        );
         assert!(redacted.contains("connect failed"), "prefixes must survive");
         assert!(redacted.contains("done"), "suffixes must survive");
     }
@@ -178,7 +180,13 @@ mod tests {
             true,
         );
 
-        assert!(!message.contains("internal"), "host must be redacted: {message}");
-        assert!(message.contains("[url]"), "redaction marker expected: {message}");
+        assert!(
+            !message.contains("internal"),
+            "host must be redacted: {message}"
+        );
+        assert!(
+            message.contains("[url]"),
+            "redaction marker expected: {message}"
+        );
     }
 }

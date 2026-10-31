@@ -290,11 +290,24 @@ mod tests {
         let second = insert_key(&pool, "second", None, None).await;
         let request_id = "shared-request-id";
         insert_detail(&pool, request_id, first, "request-first", "response-first").await;
-        insert_detail(&pool, request_id, second, "request-second", "response-second").await;
+        insert_detail(
+            &pool,
+            request_id,
+            second,
+            "request-second",
+            "response-second",
+        )
+        .await;
         let first_log =
             insert_usage(&pool, request_id, Some(first), Some(first), "model-first").await;
-        let second_log =
-            insert_usage(&pool, request_id, Some(second), Some(second), "model-second").await;
+        let second_log = insert_usage(
+            &pool,
+            request_id,
+            Some(second),
+            Some(second),
+            "model-second",
+        )
+        .await;
 
         let first_row = find_by_id(&pool, first_log)
             .await
@@ -318,7 +331,9 @@ mod tests {
             "the first key must not receive the second key's bodies"
         );
         assert_eq!(
-            detail_bodies(&pool, second_log).await.expect("second bodies"),
+            detail_bodies(&pool, second_log)
+                .await
+                .expect("second bodies"),
             Some((
                 Some("request-second".to_string()),
                 Some("response-second".to_string())
@@ -333,8 +348,14 @@ mod tests {
         let deleted = insert_key(&pool, "deleted", None, None).await;
         let live = insert_key(&pool, "live", None, None).await;
         let request_id = "reused-request-id";
-        let history_log =
-            insert_usage(&pool, request_id, Some(deleted), Some(deleted), "model-history").await;
+        let history_log = insert_usage(
+            &pool,
+            request_id,
+            Some(deleted),
+            Some(deleted),
+            "model-history",
+        )
+        .await;
 
         // Deleting the key nulls `usage_logs.api_key_id` but leaves the usage
         // row and its `detail_api_key_id` behind. Recreate the detail row as a
@@ -345,7 +366,14 @@ mod tests {
             .execute(&pool)
             .await
             .expect("delete api key");
-        insert_detail(&pool, request_id, deleted, "history-request", "history-response").await;
+        insert_detail(
+            &pool,
+            request_id,
+            deleted,
+            "history-request",
+            "history-response",
+        )
+        .await;
         insert_detail(&pool, request_id, live, "live-request", "live-response").await;
 
         let row = find_by_id(&pool, history_log)

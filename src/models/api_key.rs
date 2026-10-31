@@ -473,18 +473,26 @@ mod tests {
             .expect("seed token usage");
 
         assert_eq!(
-            reserve(&pool, id, 20, DAY, now_ms()).await.expect("reserve"),
+            reserve(&pool, id, 20, DAY, now_ms())
+                .await
+                .expect("reserve"),
             ReserveOutcome::TokenLimit,
             "90 used + 20 reserved would exceed the 100 token limit"
         );
 
         assert_eq!(
-            reserve(&pool, id, 10, DAY, now_ms()).await.expect("reserve"),
+            reserve(&pool, id, 10, DAY, now_ms())
+                .await
+                .expect("reserve"),
             ReserveOutcome::Reserved,
             "the reservation that exactly fills the limit must succeed"
         );
         assert_eq!(
-            get(&pool, id).await.expect("get").expect("row").reserved_tokens,
+            get(&pool, id)
+                .await
+                .expect("get")
+                .expect("row")
+                .reserved_tokens,
             10
         );
 
@@ -498,7 +506,11 @@ mod tests {
             .await
             .expect("release reservation");
         assert_eq!(
-            get(&pool, id).await.expect("get").expect("row").reserved_tokens,
+            get(&pool, id)
+                .await
+                .expect("get")
+                .expect("row")
+                .reserved_tokens,
             0,
             "releasing the held tokens must clear the reservation"
         );
@@ -508,23 +520,25 @@ mod tests {
     async fn reservations_enforce_daily_limit() {
         let pool = pool().await;
         let id = insert_key(&pool, "daily", None, Some(50)).await;
-        sqlx::query(
-            "UPDATE api_keys SET daily_usage_day = ?, daily_token_usage = 30 WHERE id = ?",
-        )
-        .bind(DAY)
-        .bind(id)
-        .execute(&pool)
-        .await
-        .expect("seed daily usage");
+        sqlx::query("UPDATE api_keys SET daily_usage_day = ?, daily_token_usage = 30 WHERE id = ?")
+            .bind(DAY)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("seed daily usage");
 
         assert_eq!(
-            reserve(&pool, id, 30, DAY, now_ms()).await.expect("reserve"),
+            reserve(&pool, id, 30, DAY, now_ms())
+                .await
+                .expect("reserve"),
             ReserveOutcome::DailyLimit,
             "30 used + 30 reserved would exceed the 50 token daily limit"
         );
 
         assert_eq!(
-            reserve(&pool, id, 20, DAY, now_ms()).await.expect("reserve"),
+            reserve(&pool, id, 20, DAY, now_ms())
+                .await
+                .expect("reserve"),
             ReserveOutcome::Reserved,
             "the reservation that exactly fills the daily limit must succeed"
         );
@@ -568,7 +582,10 @@ mod tests {
         assert_eq!(stale_at, None);
 
         let fresh_row = get(&pool, fresh).await.expect("get").expect("row");
-        assert_eq!(fresh_row.reserved_tokens, 7, "fresh reservation must survive");
+        assert_eq!(
+            fresh_row.reserved_tokens, 7,
+            "fresh reservation must survive"
+        );
         assert_eq!(fresh_row.reserved_daily_tokens, 7);
         let fresh_at: Option<i64> =
             sqlx::query_scalar("SELECT reserved_at FROM api_keys WHERE id = ?")

@@ -1825,7 +1825,9 @@ mod tests {
         let events = decoder.decode(&frame(None, "[DONE]")).expect("decode");
 
         assert!(
-            events.iter().any(|event| matches!(event, StreamEvent::Done)),
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Done)),
             "the done sentinel must close the stream"
         );
         assert!(
@@ -1838,7 +1840,9 @@ mod tests {
     async fn chat_null_error_is_not_a_stream_error() {
         let mut decoder = StreamDecoder::new(Protocol::Chat);
 
-        let events = decoder.decode(&frame(None, r#"{"error":null}"#)).expect("decode");
+        let events = decoder
+            .decode(&frame(None, r#"{"error":null}"#))
+            .expect("decode");
 
         assert!(
             !has_error_event(&events),
