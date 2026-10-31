@@ -91,8 +91,10 @@ impl ClientFailure {
 pub struct ProxyIdentity {
     pub api_key_id: Option<i64>,
     pub source: &'static str,
-    allowed_channel_ids: Vec<i64>,
-    allowed_models: Vec<String>,
+    /// Parsed channel/model allowlists. Model matching goes through
+    /// `ApiKeyLimits::allows_model` so there is one definition of the
+    /// "empty = all / `*` = all" convention.
+    pub limits: ApiKeyLimits,
 }
 
 impl ProxyIdentity {
@@ -100,8 +102,7 @@ impl ProxyIdentity {
         Self {
             api_key_id: Some(key.id),
             source: "gateway",
-            allowed_channel_ids: limits.channel_ids.clone(),
-            allowed_models: limits.models.clone(),
+            limits: limits.clone(),
         }
     }
 
@@ -109,17 +110,15 @@ impl ProxyIdentity {
         Self {
             api_key_id: None,
             source: "playground",
-            allowed_channel_ids: Vec::new(),
-            allowed_models: Vec::new(),
+            limits: ApiKeyLimits {
+                channel_ids: Vec::new(),
+                models: Vec::new(),
+            },
         }
     }
 
     fn allows_model(&self, model: &str) -> bool {
-        self.allowed_models.is_empty()
-            || self
-                .allowed_models
-                .iter()
-                .any(|item| item == "*" || item == model)
+        self.limits.allows_model(model)
     }
 }
 
@@ -377,13 +376,13 @@ pub async fn proxy_with_identity(
         &health,
         &model,
         inbound,
-        &identity.allowed_channel_ids,
+        &identity.limits.channel_ids,
     );
     if candidates.is_empty() {
         // A model whose channels are all in cooldown is not a missing model;
         // tell the client to retry instead of making it think routing changed.
         let cooling =
-            select::has_matching_channel(&channels, &model, inbound, &identity.allowed_channel_ids);
+            select::has_matching_channel(&channels, &model, inbound, &identity.limits.channel_ids);
         let (status, error_type, message) = if cooling {
             (
                 StatusCode::SERVICE_UNAVAILABLE,

@@ -386,11 +386,9 @@ async fn available_models(
     }
 
     // A per-key model allowlist narrows the catalog to models that can actually
-    // be served by the channels this key may use.
-    let allowed = &limits.models;
-    if !allowed.is_empty() && !allowed.iter().any(|model| model == "*") {
-        result.retain(|model| allowed.contains(model));
-    }
+    // be served by the channels this key may use. `allows_model` is the single
+    // definition of the convention: an empty list or `*` allows every model.
+    result.retain(|model| limits.allows_model(model));
 
     Ok(result.into_iter().collect())
 }
