@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-31T11:57:52Z",
+  "updated_at": "2026-10-31T12:29:48Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -41,9 +41,9 @@
     },
     "AGENTS.md": {
       "role": "index",
-      "sha256": "3a6735af1bce9d34e379c0ae2770b1168b1112ad8d199cc5b313d852ed165894",
-      "size": 14021,
-      "normalized_sha256": "3a6735af1bce9d34e379c0ae2770b1168b1112ad8d199cc5b313d852ed165894"
+      "sha256": "84b857c9c3fb0be14a4ff7858c9a19245d51c521b04c87f0265302e01e370f99",
+      "size": 14049,
+      "normalized_sha256": "84b857c9c3fb0be14a4ff7858c9a19245d51c521b04c87f0265302e01e370f99"
     },
     "Cargo.lock": {
       "role": "index",
@@ -89,9 +89,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "bd313e2f3e585198a7095693f0b5080b2bebb710e229f0bfcf2646c7040eff7d",
-      "size": 89680,
-      "normalized_sha256": "bd313e2f3e585198a7095693f0b5080b2bebb710e229f0bfcf2646c7040eff7d"
+      "sha256": "294fb41773d5f2b3641f299019a5c323b774275e0b00b3ebcf57272b1c0b2f66",
+      "size": 88136,
+      "normalized_sha256": "294fb41773d5f2b3641f299019a5c323b774275e0b00b3ebcf57272b1c0b2f66"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -123,6 +123,12 @@
       "size": 47791,
       "normalized_sha256": "eefca4494f9b433405614a72da7d27793484f4617e0ac3999577efe59448f2fc"
     },
+    "docs/KNOWN_LIMITATIONS.md": {
+      "role": "index",
+      "sha256": "6fc3ffe055cd0a6ae947cc76d6f77fd536843e01b74f89fc20d599b1a205bc71",
+      "size": 1813,
+      "normalized_sha256": "6fc3ffe055cd0a6ae947cc76d6f77fd536843e01b74f89fc20d599b1a205bc71"
+    },
     "docs/OPTIMIZATION_PLAN.md": {
       "role": "index",
       "sha256": "c78470a7fc43c5b97157fa3c03fb9a69e78182fad58e7d0194faa2f3786c18b0",
@@ -131,9 +137,9 @@
     },
     "docs/PROGRESS.md": {
       "role": "index",
-      "sha256": "21236b1e90702b316b2dea94503b2de03c12b220e46c3d89029973508e59cd00",
-      "size": 81424,
-      "normalized_sha256": "21236b1e90702b316b2dea94503b2de03c12b220e46c3d89029973508e59cd00"
+      "sha256": "2abeecc6beb63a326e4e6bff5990e13751b7c772c750d8dc223b2a3533c74f7c",
+      "size": 2636,
+      "normalized_sha256": "2abeecc6beb63a326e4e6bff5990e13751b7c772c750d8dc223b2a3533c74f7c"
     },
     "docs/REVIEW_PLAN.md": {
       "role": "index",
