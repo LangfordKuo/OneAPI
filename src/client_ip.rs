@@ -8,38 +8,37 @@ pub const SETTING_KEY: &str = "client_ip_header";
 /// Header used when no explicit setting is configured.
 pub const DEFAULT_HEADER: &str = "x-forwarded-for";
 
-/// Resolve the client IP for a login attempt.
+/// Resolve the client IP for a login or API-key authentication attempt.
 ///
-/// An explicitly configured header is trusted as-is: the administrator opted
-/// in, typically because a CDN or reverse proxy in front of the app appends it.
-/// When the setting is empty, `X-Forwarded-For` is used only for loopback and
-/// private peers, so a directly exposed public client cannot spoof it.
+/// An explicitly configured header is authoritative: the administrator opted
+/// in, typically because a CDN or reverse proxy in front of the app sets it.
+/// If that header is missing or malformed the result is `None`, never the TCP
+/// peer, so a shared CDN egress address cannot be rate-limited by mistake.
+/// When the setting is empty, `X-Forwarded-For` is used for loopback/private
+/// peers, and the TCP peer is the final fallback for direct clients.
 pub fn resolve_client_ip(
     headers: &HeaderMap,
     configured_header: &str,
     peer: Option<IpAddr>,
 ) -> Option<IpAddr> {
-    let header = effective_header(configured_header, peer);
-    resolve(headers, header.unwrap_or_default(), peer)
-}
-
-fn effective_header(configured_header: &str, peer: Option<IpAddr>) -> Option<&str> {
     let configured = configured_header.trim();
     if !configured.is_empty() {
-        return Some(configured);
+        return resolve(headers, configured, peer);
     }
     if peer.is_some_and(is_trusted_proxy_peer) {
-        return Some(DEFAULT_HEADER);
+        return resolve(headers, DEFAULT_HEADER, peer).or(peer);
     }
-    None
+    peer
 }
 
 /// Resolve the client IP from the configured header.
 ///
-/// Pass `""` to ignore all headers. An empty header setting, an absent header,
-/// or a header without a parseable address all fall back to the TCP peer
-/// address. The fallback keeps rate limiting meaningful when a proxy is
-/// misconfigured instead of putting every request into an "unknown" bucket.
+/// Pass `""` to ignore all headers and use the TCP peer. When a header is in
+/// effect (explicitly configured, or the default `X-Forwarded-For` for a
+/// trusted proxy peer), the header is the only source of truth: a missing or
+/// malformed value returns `None` instead of falling back to the connection
+/// peer. Falling back would make rate limiting punish the CDN/reverse-proxy
+/// egress address shared by every client.
 pub fn resolve(headers: &HeaderMap, header: &str, peer: Option<IpAddr>) -> Option<IpAddr> {
     let header = header.trim();
     if header.is_empty() {
@@ -49,7 +48,6 @@ pub fn resolve(headers: &HeaderMap, header: &str, peer: Option<IpAddr>) -> Optio
         .get(header)
         .and_then(|value| value.to_str().ok())
         .and_then(first_ip)
-        .or(peer)
 }
 
 /// Whether a TCP peer is likely a local reverse proxy.

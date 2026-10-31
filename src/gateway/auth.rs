@@ -7,6 +7,7 @@ use axum::{
 };
 
 use crate::{
+    client_ip,
     error::AppError,
     models::{
         self,
@@ -30,24 +31,39 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // Limit by the real TCP peer; forwarded headers are client controlled
-        // and must not be able to shape another client's window.
+        // Use the same client-IP policy as login and logging. When a header is
+        // configured the header is authoritative; a missing/invalid value is
+        // NOT replaced by the TCP peer, because under a CDN that peer is the
+        // shared origin address and rate limiting it would lock out every
+        // client. Only an empty setting uses the peer (or trusted-proxy XFF).
         let peer = parts
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(addr)| addr.ip());
+        let client_addr = match state.cache.client_ip_header(&state.db).await {
+            Ok(configured) => client_ip::resolve_client_ip(&parts.headers, &configured, peer),
+            Err(error) => {
+                // Without the setting we cannot tell whether a header is in
+                // effect; skip per-IP limiting instead of blaming the peer.
+                tracing::warn!(error = %error, "failed to load client_ip_header setting");
+                None
+            }
+        };
 
         // Fail before touching the database: a peer that keeps sending bad
         // keys must not get a lookup per attempt.
-        if !state.auth_failure_limiter.check(peer) {
-            tracing::warn!(peer = ?peer, "API key authentication rate limit exceeded");
+        if !state.auth_failure_limiter.check(client_addr) {
+            tracing::warn!(
+                client_addr = ?client_addr,
+                "API key authentication rate limit exceeded"
+            );
             return Err(rate_limited(parts));
         }
 
         let raw_key = match extract_api_key(parts) {
             Some(key) => key,
             None => {
-                state.auth_failure_limiter.record_failure(peer);
+                state.auth_failure_limiter.record_failure(client_addr);
                 return Err(unauthorized(parts));
             }
         };
@@ -62,7 +78,7 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
                 server_error(parts)
             })?
             .ok_or_else(|| {
-                state.auth_failure_limiter.record_failure(peer);
+                state.auth_failure_limiter.record_failure(client_addr);
                 tracing::debug!(
                     hash_prefix = %legacy_hash.get(..8).unwrap_or(legacy_hash.as_str()),
                     "API key authentication failed"
@@ -72,9 +88,9 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
 
         let now = models::now_ms();
 
-        // The credentials matched a stored hash, so clear this peer's failure
+        // The credentials matched a stored hash, so clear this client's failure
         // history even if a quota check below rejects the request.
-        state.auth_failure_limiter.record_success(peer);
+        state.auth_failure_limiter.record_success(client_addr);
 
         if record.token_limit_reached() {
             if record.enabled != 0 {
@@ -95,7 +111,7 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
                 .map(|expires_at| expires_at <= now)
                 .unwrap_or(false)
         {
-            state.auth_failure_limiter.record_failure(peer);
+            state.auth_failure_limiter.record_failure(client_addr);
             return Err(unauthorized(parts));
         }
 

@@ -289,9 +289,11 @@ const AUTH_FAILURE_PER_IP_LIMIT: usize = 20;
 /// Cap the per-peer vector so concurrent failures cannot grow it without bound.
 const AUTH_FAILURE_MAX_TRACKED: usize = 128;
 
-/// Sliding-window limiter for failed API key authentication. Keys are the TCP
-/// peer address from `ConnectInfo`, never a forwarded header, so a spoofed
-/// `X-Forwarded-For` cannot consume another client's budget.
+/// Sliding-window limiter for failed API key authentication. Keys come from
+/// the shared client-IP policy (`client_ip::resolve_client_ip`): a configured
+/// header is authoritative, otherwise trusted-proxy XFF or the TCP peer is
+/// used. Under a CDN the header must keep distinct clients separate so the
+/// shared origin address is never rate-limited.
 #[derive(Debug, Default)]
 pub struct AuthFailureLimiter {
     state: Mutex<AuthFailureState>,
