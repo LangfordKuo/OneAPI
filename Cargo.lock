@@ -1482,6 +1482,7 @@ dependencies = [
  "clap",
  "flate2",
  "futures-util",
+ "hmac",
  "mime_guess",
  "rand 0.8.8",
  "reqwest",
@@ -1500,6 +1501,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
  "zip",
 ]
 
