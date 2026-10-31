@@ -267,7 +267,7 @@ async fn list_models(
     State(state): State<AppState>,
     auth: ApiKeyAuth,
 ) -> Result<Json<Value>, AppError> {
-    let models = available_models(&state, &auth.limits).await?;
+    let models = available_models(&state, &auth.limits, auth.key.id).await?;
     let first_id = models.first().cloned();
     let last_id = models.last().cloned();
     let data: Vec<Value> = models
@@ -296,7 +296,7 @@ async fn get_model(
     auth: ApiKeyAuth,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
-    let models = available_models(&state, &auth.limits).await?;
+    let models = available_models(&state, &auth.limits, auth.key.id).await?;
     if models.iter().any(|model| model == &id) {
         Ok(Json(json!({
             "id": id,
@@ -318,6 +318,7 @@ async fn get_model(
 async fn available_models(
     state: &AppState,
     limits: &models::api_key::ApiKeyLimits,
+    key_id: i64,
 ) -> sqlx::Result<Vec<String>> {
     let channels = state.cache.channels(&state.db).await?;
     let mut result = BTreeSet::new();
@@ -340,10 +341,14 @@ async fn available_models(
         }
     }
 
-    // Wildcard channels accept any model, so surface models seen in recent
-    // traffic to keep model pickers useful.
+    // Wildcard channels accept any model, so surface models seen in this key's
+    // recent traffic to keep model pickers useful. The global cache is
+    // deliberately not used here: it would leak every tenant's model names.
     if has_wildcard {
-        for model in state.cache.recent_models(&state.db).await? {
+        let since = models::now_ms() - 30 * 24 * 60 * 60 * 1000;
+        let key_models =
+            models::usage_log::recent_models_for_key(&state.db, since, 200, key_id).await?;
+        for model in key_models {
             if !model.is_empty() && model != "*" {
                 result.insert(model);
             }

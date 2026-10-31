@@ -188,6 +188,29 @@ pub async fn recent_models(pool: &SqlitePool, since: i64, limit: i64) -> sqlx::R
     .await
 }
 
+/// Distinct models observed recently by one API key. The gateway model list
+/// must not reveal model names that belong to other keys, so the wildcard
+/// catalog is scoped to the caller's own traffic.
+pub async fn recent_models_for_key(
+    pool: &SqlitePool,
+    since: i64,
+    limit: i64,
+    api_key_id: i64,
+) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT model FROM usage_logs
+         WHERE created_at >= ? AND api_key_id = ?
+         GROUP BY model
+         ORDER BY MAX(created_at) DESC
+         LIMIT ?",
+    )
+    .bind(since)
+    .bind(api_key_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 /// Fetch the request/response bodies belonging to one usage row. The detail is
 /// matched on the exact `(request_id, detail_api_key_id)` pair recorded when
 /// the usage row was written; `detail_api_key_id` survives the deletion of the
