@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{error::AppError, models, protocol::Protocol, state::AppState, upstream};
 
@@ -36,7 +36,15 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/models", get(list_models))
         .route("/v1/models/{id}", get(get_model))
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
-        .layer(CorsLayer::permissive())
+        // Explicit CORS: browsers may call `/v1` from any origin, but response
+        // headers (`x-oneapi-*`, `x-request-id`, …) are deliberately not
+        // exposed, so page scripts cannot read internal routing metadata.
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
 }
 
 /// JSON extractor that maps malformed bodies to the protocol-specific error
@@ -131,8 +139,9 @@ async fn count_tokens(
 
         if !candidates.is_empty() {
             let defaults = state.cache.defaults(&state.db).await?;
-            let mut client_error: Option<(StatusCode, String, String)> = None;
+            let mut client_error: Option<(StatusCode, String, String, bool)> = None;
             let mut last_message = "no upstream channel succeeded".to_string();
+            let mut last_provider_json = false;
 
             for candidate in candidates {
                 let mut request_body = body.clone();
@@ -195,23 +204,39 @@ async fn count_tokens(
                 let text = String::from_utf8_lossy(&bytes);
                 let value = serde_json::from_slice::<Value>(&bytes).ok();
                 let (error_type, message) = execute::upstream_error_info(value.as_ref(), &text);
+                let provider_json = value.is_some();
                 // count_tokens is an auxiliary endpoint that not every
                 // compatible provider implements, so failures here do not feed
                 // channel health; they only drive failover and the final error.
                 if !execute::penalizes_channel(status) && client_error.is_none() {
-                    client_error = Some((status, error_type.clone(), message.clone()));
+                    client_error = Some((
+                        status,
+                        error_type.clone(),
+                        message.clone(),
+                        provider_json,
+                    ));
                 }
                 last_message = message;
+                last_provider_json = provider_json;
             }
 
             return Ok(match client_error {
-                Some((status, error_type, message)) => {
-                    error::client_error(Protocol::Anthropic, status, message, &error_type)
+                Some((status, error_type, message, provider_json)) => {
+                    let client_message = error::client_safe_upstream_message(
+                        &error_type,
+                        &message,
+                        provider_json,
+                    );
+                    error::client_error(Protocol::Anthropic, status, client_message, &error_type)
                 }
                 None => error::client_error(
                     Protocol::Anthropic,
                     StatusCode::BAD_GATEWAY,
-                    format!("all upstream channels failed: {last_message}"),
+                    error::client_safe_upstream_message(
+                        "upstream_error",
+                        &last_message,
+                        last_provider_json,
+                    ),
                     "upstream_error",
                 ),
             });

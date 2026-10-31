@@ -50,7 +50,11 @@ const FAILOVER_BUDGET: Duration = Duration::from_secs(60);
 struct ClientFailure {
     status: StatusCode,
     error_type: String,
+    /// Raw upstream text, kept for the usage log only.
     message: String,
+    /// Whether `message` came from a structured provider JSON error. Only then
+    /// may it be shown to the client (after redaction).
+    provider_json: bool,
     channel_id: i64,
     upstream_model: String,
     upstream: Protocol,
@@ -61,6 +65,7 @@ impl ClientFailure {
         status: StatusCode,
         error_type: String,
         message: String,
+        provider_json: bool,
         channel_id: i64,
         upstream_model: &str,
         upstream: Protocol,
@@ -69,10 +74,16 @@ impl ClientFailure {
             status,
             error_type,
             message,
+            provider_json,
             channel_id,
             upstream_model: upstream_model.to_string(),
             upstream,
         }
+    }
+
+    /// The message this failure is allowed to expose to the API key client.
+    fn client_message(&self) -> String {
+        error::client_safe_upstream_message(&self.error_type, &self.message, self.provider_json)
     }
 }
 
@@ -137,6 +148,10 @@ pub async fn proxy_with_identity(
     mut body: Value,
 ) -> Result<Response, AppError> {
     let request_id = resolve_request_id(headers);
+    // Routing metadata (`x-oneapi-channel` / `x-oneapi-upstream-model`) is only
+    // for the admin Playground UI; API key clients must not learn the internal
+    // channel topology.
+    let expose_route_headers = identity.source == "playground";
 
     let requested_model = body
         .get("model")
@@ -406,6 +421,7 @@ pub async fn proxy_with_identity(
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
+    let mut last_provider_json = false;
     // A request-shaped error (for example 400) is still worth retrying on
     // another channel, but it must not cool the channel down. Remember the
     // first one so the client gets a meaningful status if every channel fails.
@@ -418,6 +434,9 @@ pub async fn proxy_with_identity(
         if let Some((error_type, message)) = attempt_gate(attempts, started, deadline) {
             last_error_type = error_type.to_string();
             last_message = message.to_string();
+            // Gateway-generated limit text is safe to forward; it contains no
+            // upstream host information.
+            last_provider_json = true;
             break;
         }
         let probe_lease = match state.probes.acquire(candidate.channel(), now_ms()) {
@@ -454,6 +473,10 @@ pub async fn proxy_with_identity(
                         StatusCode::BAD_REQUEST,
                         "invalid_request_error".to_string(),
                         message.clone(),
+                        // A conversion rejection is gateway wording about the
+                        // client payload, not raw upstream text, so it can be
+                        // forwarded as-is.
+                        true,
                         channel.id,
                         &candidate.upstream_model,
                         upstream,
@@ -461,6 +484,7 @@ pub async fn proxy_with_identity(
                 }
                 last_error_type = "invalid_request_error".to_string();
                 last_message = message;
+                last_provider_json = true;
                 continue;
             }
             AttemptBody::InvalidRequest(message) => {
@@ -492,6 +516,7 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
+                last_provider_json = false;
                 state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
@@ -509,6 +534,7 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
+                last_provider_json = false;
                 state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
@@ -519,6 +545,7 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_unreachable".to_string();
+                last_provider_json = false;
                 state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
@@ -530,6 +557,7 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_unreachable".to_string();
+                last_provider_json = false;
                 state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
@@ -542,6 +570,7 @@ pub async fn proxy_with_identity(
                 state.mark_channel_failure(channel.id, message).await;
                 last_error_type = "upstream_error".to_string();
                 last_message = message.to_string();
+                last_provider_json = false;
                 continue;
             }
             // Some compatible providers report failures inside a 200 body
@@ -553,6 +582,7 @@ pub async fn proxy_with_identity(
                     state.mark_channel_failure(channel.id, &message).await;
                     last_error_type = error_type;
                     last_message = message;
+                    last_provider_json = true;
                     continue;
                 }
             }
@@ -573,6 +603,7 @@ pub async fn proxy_with_identity(
                         state.mark_channel_failure(channel.id, message).await;
                         last_error_type = "upstream_error".to_string();
                         last_message = message.to_string();
+                        last_provider_json = false;
                         continue;
                     }
                 }
@@ -584,6 +615,7 @@ pub async fn proxy_with_identity(
                     state.mark_channel_failure(channel.id, message).await;
                     last_error_type = "upstream_error".to_string();
                     last_message = message.to_string();
+                    last_provider_json = false;
                     continue;
                 };
 
@@ -594,6 +626,7 @@ pub async fn proxy_with_identity(
                         state.mark_channel_failure(channel.id, &message).await;
                         last_error_type = "upstream_error".to_string();
                         last_message = message;
+                        last_provider_json = false;
                         continue;
                     }
                 };
@@ -610,6 +643,9 @@ pub async fn proxy_with_identity(
                         // channel for a gateway-side conversion limit.
                         last_error_type = "conversion_error".to_string();
                         last_message = error.to_string();
+                        // Gateway conversion wording is client-oriented and
+                        // contains no upstream address, so keep it visible.
+                        last_provider_json = true;
                         continue;
                     }
                 };
@@ -624,6 +660,7 @@ pub async fn proxy_with_identity(
                     state.mark_channel_failure(channel.id, message).await;
                     last_error_type = "upstream_error".to_string();
                     last_message = message.to_string();
+                    last_provider_json = false;
                     continue;
                 }
 
@@ -738,15 +775,16 @@ pub async fn proxy_with_identity(
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(client_body)
                 .map_err(|error| AppError::Internal(error.into()))?;
-            return Ok(with_route_headers(
-                response,
-                channel,
-                &candidate.upstream_model,
-            ));
+            return Ok(if expose_route_headers {
+                with_route_headers(response, channel, &candidate.upstream_model)
+            } else {
+                response
+            });
         }
 
         let text = String::from_utf8_lossy(&body_bytes);
         let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
+        let provider_json = upstream_value.is_some();
         if penalizes_channel(status) {
             state.mark_channel_failure(channel.id, &message).await;
         } else if client_error
@@ -757,12 +795,14 @@ pub async fn proxy_with_identity(
             // payload itself is the problem; retrying further only adds load.
             last_error_type = error_type;
             last_message = message;
+            last_provider_json = provider_json;
             break;
         } else if client_error.is_none() {
             client_error = Some(ClientFailure::new(
                 status,
                 error_type.clone(),
                 message.clone(),
+                provider_json,
                 channel.id,
                 &candidate.upstream_model,
                 upstream,
@@ -770,6 +810,7 @@ pub async fn proxy_with_identity(
         }
         last_error_type = error_type;
         last_message = message;
+        last_provider_json = provider_json;
     }
 
     finish_failover(
@@ -783,6 +824,7 @@ pub async fn proxy_with_identity(
             last_upstream,
             last_error_type,
             last_message,
+            last_provider_json,
             client_error,
             probe_deferred,
         },
@@ -811,6 +853,8 @@ async fn proxy_stream(
     headers: &HeaderMap,
     defaults: models::setting::GatewayDefaults,
 ) -> Result<Response, AppError> {
+    // Only the admin Playground may see internal routing metadata.
+    let expose_route_headers = identity.source == "playground";
     let log = AttemptLog {
         request_id,
         api_key_id: identity.api_key_id,
@@ -826,6 +870,7 @@ async fn proxy_stream(
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
+    let mut last_provider_json = false;
     let mut client_error: Option<ClientFailure> = None;
     let mut unified_request: Option<UnifiedRequest> = None;
     let mut probe_deferred = false;
@@ -835,6 +880,9 @@ async fn proxy_stream(
         if let Some((error_type, message)) = attempt_gate(attempts, started, deadline) {
             last_error_type = error_type.to_string();
             last_message = message.to_string();
+            // Gateway-generated limit text is safe to forward; it contains no
+            // upstream host information.
+            last_provider_json = true;
             break;
         }
         let probe = match state.probes.acquire(candidate.channel(), now_ms()) {
@@ -871,6 +919,10 @@ async fn proxy_stream(
                         StatusCode::BAD_REQUEST,
                         "invalid_request_error".to_string(),
                         message.clone(),
+                        // A conversion rejection is gateway wording about the
+                        // client payload, not raw upstream text, so it can be
+                        // forwarded as-is.
+                        true,
                         channel.id,
                         &candidate.upstream_model,
                         upstream,
@@ -878,6 +930,7 @@ async fn proxy_stream(
                 }
                 last_error_type = "invalid_request_error".to_string();
                 last_message = message;
+                last_provider_json = true;
                 continue;
             }
             AttemptBody::InvalidRequest(message) => {
@@ -928,6 +981,7 @@ async fn proxy_stream(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
+                last_provider_json = false;
                 state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
@@ -947,6 +1001,7 @@ async fn proxy_stream(
                 Err(error) => {
                     last_message = error.to_string();
                     last_error_type = "upstream_configuration_error".to_string();
+                    last_provider_json = false;
                     state.mark_channel_failure(channel.id, &last_message).await;
                     continue 'candidates;
                 }
@@ -957,6 +1012,7 @@ async fn proxy_stream(
                 Err(error) => {
                     last_message = error.to_string();
                     last_error_type = "upstream_unreachable".to_string();
+                    last_provider_json = false;
                     state.mark_channel_failure(channel.id, &last_message).await;
                     continue 'candidates;
                 }
@@ -987,6 +1043,7 @@ async fn proxy_stream(
 
             let upstream_value = serde_json::from_str::<Value>(&text).ok();
             let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
+            let provider_json = upstream_value.is_some();
 
             if penalizes_channel(status) {
                 state.mark_channel_failure(channel.id, &message).await;
@@ -996,12 +1053,14 @@ async fn proxy_stream(
                 // Same rejection on another channel: stop retrying this payload.
                 last_error_type = error_type;
                 last_message = message;
+                last_provider_json = provider_json;
                 break 'candidates;
             } else if client_error.is_none() {
                 client_error = Some(ClientFailure::new(
                     status,
                     error_type.clone(),
                     message.clone(),
+                    provider_json,
                     channel.id,
                     &candidate.upstream_model,
                     upstream,
@@ -1009,6 +1068,7 @@ async fn proxy_stream(
             }
             last_error_type = error_type;
             last_message = message;
+            last_provider_json = provider_json;
             continue 'candidates;
         };
 
@@ -1056,7 +1116,9 @@ async fn proxy_stream(
 
         match stream::start(job).await {
             Ok(mut response) => {
-                add_route_headers(&mut response, channel, &candidate.upstream_model);
+                if expose_route_headers {
+                    add_route_headers(&mut response, channel, &candidate.upstream_model);
+                }
                 return Ok(response);
             }
             Err(failure) => {
@@ -1065,6 +1127,7 @@ async fn proxy_stream(
                     .await;
                 last_error_type = failure.error_type.clone();
                 last_message = failure.message.clone();
+                last_provider_json = failure.provider_json;
 
                 // Nothing was written downstream yet, so try the next channel.
                 continue;
@@ -1083,6 +1146,7 @@ async fn proxy_stream(
             last_upstream,
             last_error_type,
             last_message,
+            last_provider_json,
             client_error,
             probe_deferred,
         },
@@ -1147,6 +1211,9 @@ struct FailoverState {
     last_upstream: Protocol,
     last_error_type: String,
     last_message: String,
+    /// Whether `last_message` is structured provider JSON that may be shown to
+    /// the client after redaction.
+    last_provider_json: bool,
     client_error: Option<ClientFailure>,
     probe_deferred: bool,
 }
@@ -1197,6 +1264,7 @@ async fn finish_failover(
     // Every channel was tried. If one of them rejected the payload itself,
     // surface that status instead of hiding a client mistake behind a 502.
     if let Some(failure) = failover.client_error {
+        let client_message = failure.client_message();
         log.record(
             state,
             Some(failure.channel_id),
@@ -1213,13 +1281,14 @@ async fn finish_failover(
             log.request_id,
             log.api_key_id,
             detail_request,
+            // The raw upstream text is retained in the internal detail log.
             &error::client_error_value(inbound, &failure.message, &failure.error_type).to_string(),
         )
         .await;
         return Ok(error::client_error(
             inbound,
             failure.status,
-            failure.message,
+            client_message,
             &failure.error_type,
         ));
     }
@@ -1239,20 +1308,27 @@ async fn finish_failover(
     )
     .await;
 
-    let message = format!("all upstream channels failed: {}", failover.last_message);
+    // The client only receives a safe classification; the full upstream text
+    // stays in the usage row, the request detail and the channel health state.
+    let client_message = error::client_safe_upstream_message(
+        &failover.last_error_type,
+        &failover.last_message,
+        failover.last_provider_json,
+    );
+    let detail_message = format!("all upstream channels failed: {}", failover.last_message);
     store_request_detail(
         state,
         log.request_id,
         log.api_key_id,
         detail_request,
-        &error::client_error_value(inbound, &message, &failover.last_error_type).to_string(),
+        &error::client_error_value(inbound, &detail_message, &failover.last_error_type).to_string(),
     )
     .await;
 
     Ok(error::client_error(
         inbound,
         StatusCode::BAD_GATEWAY,
-        message,
+        client_message,
         &failover.last_error_type,
     ))
 }

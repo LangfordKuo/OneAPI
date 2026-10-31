@@ -33,7 +33,12 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> +
 #[derive(Debug)]
 pub struct StreamFailure {
     pub error_type: String,
+    /// Raw failure text for the usage log and channel health state. It is never
+    /// written to the client as-is.
     pub message: String,
+    /// Whether `message` came from a structured provider JSON error, in which
+    /// case it may be shown to the client after redaction.
+    pub provider_json: bool,
 }
 
 impl StreamFailure {
@@ -44,6 +49,17 @@ impl StreamFailure {
         Self {
             error_type: error_type.into(),
             message: message.into(),
+            provider_json: false,
+        }
+    }
+
+    /// A failure carrying an upstream error body that was already parsed as
+    /// JSON.
+    fn from_provider(error_type: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            error_type: error_type.into(),
+            message: message.into(),
+            provider_json: true,
         }
     }
 }
@@ -89,6 +105,18 @@ fn bounded_error(error_type: String, message: String) -> (String, String) {
         error::truncate_message(&error_type, 128),
         error::truncate_message(&message, 1024),
     )
+}
+
+/// Text that may be written to the client for an in-stream failure.
+///
+/// Upstream-provided messages go through the shared mapping (URL redaction and
+/// clamping). `conversion_error` describes the request the client itself sent,
+/// so it is kept verbatim and merely clamped.
+fn client_stream_message(error_type: &str, message: &str, provider_json: bool) -> String {
+    if error_type == "conversion_error" {
+        return error::truncate_message(message, 300);
+    }
+    error::client_safe_upstream_message(error_type, message, provider_json)
 }
 
 /// Commit the stream to the client only after the first upstream SSE frame has
@@ -252,7 +280,7 @@ async fn run(
 
     if let Some((error_type, message)) = frame_error(job.upstream, &first) {
         let (error_type, message) = bounded_error(error_type, message);
-        let _ = ready.send(Err(StreamFailure::new(error_type, message)));
+        let _ = ready.send(Err(StreamFailure::from_provider(error_type, message)));
         return;
     }
 
@@ -285,6 +313,9 @@ async fn run(
     let mut first_token_at: Option<Instant> = None;
     let mut client_disconnected = false;
     let mut stream_error: Option<(String, String)> = None;
+    // Raw stream_error text is kept for logging and channel health; this flag
+    // selects the client-facing wording when the error frame is emitted.
+    let mut stream_error_provider_json = false;
     let mut synthesize_error = false;
     let mut held_terminal: Option<Vec<Bytes>> = None;
 
@@ -304,6 +335,7 @@ async fn run(
                         "upstream_stream_timeout".to_string(),
                         format!("upstream stream was idle for {:?}", job.idle_timeout),
                     ));
+                    stream_error_provider_json = false;
                     synthesize_error = true;
                     break;
                 }
@@ -314,6 +346,7 @@ async fn run(
                             "upstream_stream_too_large".to_string(),
                             "upstream stream frame exceeded the size limit".to_string(),
                         ));
+                        stream_error_provider_json = false;
                         synthesize_error = true;
                         break;
                     }
@@ -324,6 +357,7 @@ async fn run(
                         "upstream_unreachable".to_string(),
                         error.to_string(),
                     ));
+                    stream_error_provider_json = false;
                     synthesize_error = true;
                     break;
                 }
@@ -362,6 +396,10 @@ async fn run(
                 break;
             }
             FrameOutcome::Failed(error_type, message) => {
+                // `conversion_error` is gateway wording about the payload the
+                // client sent; every other failure comes from a structured
+                // upstream error event.
+                stream_error_provider_json = error_type != "conversion_error";
                 stream_error = Some(bounded_error(error_type, message));
                 break;
             }
@@ -375,7 +413,11 @@ async fn run(
     if !client_disconnected {
         if synthesize_error {
             if let Some((error_type, message)) = stream_error.clone() {
-                let frame = error_frame(job.inbound, &error_type, &message);
+                // `stream_error` keeps the raw text for the usage row and the
+                // channel health state above; only the frame is sanitized.
+                let client_message =
+                    client_stream_message(&error_type, &message, stream_error_provider_json);
+                let frame = error_frame(job.inbound, &error_type, &client_message);
                 let _ =
                     send_bytes(&tx, Bytes::from(frame.into_bytes()), &mut response_capture).await;
             }

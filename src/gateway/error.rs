@@ -58,3 +58,45 @@ pub fn truncate_message(value: &str, max_chars: usize) -> String {
     truncated.push('…');
     truncated
 }
+
+/// Replace URL tokens in upstream-provided text with `[url]`.
+///
+/// Error messages from providers and HTTP clients often embed the request URL,
+/// which reveals internal hosts, ports and routing paths. Those parts are never
+/// useful to an API key client, so they are redacted before the text is echoed
+/// back.
+pub(crate) fn redact_urls(text: &str) -> String {
+    text.split_whitespace()
+        .map(|token| {
+            if token.starts_with("http://") || token.starts_with("https://") {
+                "[url]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Wording that is safe to return to an API key client for an upstream failure.
+///
+/// Connection-level failures and channel configuration errors carry internal
+/// hosts and ports in their raw text, so the client only receives a fixed
+/// classification. A structured provider error (a JSON error body) is useful to
+/// the caller and is kept, but only after URL redaction and clamping.
+pub(crate) fn client_safe_upstream_message(
+    error_type: &str,
+    raw: &str,
+    provider_json: bool,
+) -> String {
+    match error_type {
+        "upstream_unreachable" => "upstream request failed".to_string(),
+        "upstream_configuration_error" => "upstream channel is misconfigured".to_string(),
+        "upstream_stream_timeout" => "upstream stream timed out".to_string(),
+        "upstream_invalid_content_type" | "upstream_invalid_frame" => {
+            "upstream returned an invalid response".to_string()
+        }
+        _ if !provider_json => "upstream returned an invalid response".to_string(),
+        _ => truncate_message(&redact_urls(raw), 300),
+    }
+}
