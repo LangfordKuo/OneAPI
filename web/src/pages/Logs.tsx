@@ -206,7 +206,16 @@ export default function Logs() {
 
   const detailQuery = useQuery({
     queryKey: ['log-detail', selected?.id],
-    queryFn: () => api.get<LogDetail>(`/api/logs/${selected?.id}`),
+    queryFn: () => {
+      if (selected == null) {
+        throw new Error('没有选中的日志');
+      }
+      // Detail is addressed by the numeric row id; the request_id is a
+      // display-only field and must never be spliced into the path.
+      return api.get<LogDetail>(
+        `/api/logs/${encodeURIComponent(String(selected.id))}`,
+      );
+    },
     enabled: selected != null,
   });
 

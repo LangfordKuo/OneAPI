@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertCircle } from 'lucide-react';
-import { lazy, Suspense, type ReactNode } from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
-import { api } from './api/client';
+import { lazy, Suspense, useEffect, type ReactNode } from 'react';
+import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { api, UNAUTHORIZED_EVENT } from './api/client';
 import type { Admin, SetupStatus, SiteInfo } from './api/types';
 import { PageLoader } from './components/common/page-loader';
 import { AppShell } from './components/layout/app-shell';
@@ -37,6 +37,22 @@ function CenteredShell({ children }: { children: ReactNode }) {
 
 export default function App() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
+
+  // Both `request`/`requestRaw` and the SSE stream report an expired session
+  // through this event. Invalidating `['me']` makes the app drop back to the
+  // login screen, which unmounts the authenticated shell and its SSE provider.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      void queryClient.invalidateQueries({ queryKey: ['me'] });
+      navigate('/', { replace: true });
+    };
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => {
+      window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    };
+  }, [navigate, queryClient]);
+
   const siteQuery = useQuery({
     queryKey: ['site'],
     queryFn: () => api.get<SiteInfo>('/api/site'),

@@ -165,10 +165,30 @@ function toSettings(draft: SettingsDraft): Settings {
   };
 }
 
+/**
+ * Only the fields the user actually edited are sent. The backend treats every
+ * field as optional, so this avoids writing defaults back over settings that
+ * were never loaded or never touched.
+ */
+function toSettingsPatch(
+  draft: SettingsDraft,
+  fields: ReadonlySet<keyof SettingsDraft>,
+): Partial<Settings> {
+  const values = toSettings(draft);
+  return Object.fromEntries(
+    Array.from(fields, (field) => [field, values[field]]),
+  ) as Partial<Settings>;
+}
+
 export default function SettingsPage() {
   const queryClient = useQueryClient();
   const [draftOverride, setDraftOverride] = useState<SettingsDraft | null>(
     null,
+  );
+  // Fields the user edited while a server copy exists. Only these are sent on
+  // save, so unrelated values are never replaced with local defaults.
+  const [dirtyFields, setDirtyFields] = useState<Set<keyof SettingsDraft>>(
+    () => new Set(),
   );
   const [siteNameError, setSiteNameError] = useState('');
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -207,13 +227,22 @@ export default function SettingsPage() {
 
   function update(patch: Partial<SettingsDraft>) {
     setDraftOverride({ ...draft, ...patch });
+    setDirtyFields((current) => {
+      const next = new Set(current);
+      for (const key of Object.keys(patch) as (keyof SettingsDraft)[]) {
+        next.add(key);
+      }
+      return next;
+    });
   }
 
   const saveMutation = useMutation({
-    mutationFn: (values: Settings) => api.put<Settings>('/api/settings', values),
+    mutationFn: (values: Partial<Settings>) =>
+      api.put<Settings>('/api/settings', values),
     onSuccess: (data) => {
       toast.success('设置已保存');
       setDraftOverride(toDraft(data));
+      setDirtyFields(new Set());
       queryClient.setQueryData(['settings'], data);
       queryClient.invalidateQueries({ queryKey: ['site'] });
     },
@@ -264,12 +293,18 @@ export default function SettingsPage() {
   });
 
   function saveSettings() {
-    if (!draft.site_name.trim()) {
+    // Without server data the form must not be usable; saving here would write
+    // EMPTY_DRAFT defaults over the stored configuration.
+    if (!settingsQuery.data) {
+      toast.error('设置尚未加载，无法保存');
+      return;
+    }
+    if (dirtyFields.has('site_name') && !draft.site_name.trim()) {
       setSiteNameError('请输入站点名称');
       return;
     }
     setSiteNameError('');
-    saveMutation.mutate(toSettings(draft));
+    saveMutation.mutate(toSettingsPatch(draft, dirtyFields));
   }
 
   function changePassword() {
@@ -313,7 +348,32 @@ export default function SettingsPage() {
                   <Skeleton key={index} className="h-10 w-full" />
                 ))}
               </div>
-            ) : (
+            ) : settingsQuery.isError ? (
+              <Alert variant="destructive">
+                <AlertTitle>加载设置失败</AlertTitle>
+                <AlertDescription>
+                  {settingsQuery.error instanceof Error
+                    ? settingsQuery.error.message
+                    : String(settingsQuery.error)}
+                </AlertDescription>
+                <div className="mt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void settingsQuery.refetch()}
+                    disabled={settingsQuery.isFetching}
+                  >
+                    {settingsQuery.isFetching ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <RefreshCw />
+                    )}
+                    重试
+                  </Button>
+                </div>
+              </Alert>
+            ) : settingsQuery.data ? (
               <>
                 <Field
                   label="站点名称"
@@ -560,7 +620,7 @@ export default function SettingsPage() {
                   保存设置
                 </Button>
               </>
-            )}
+            ) : null}
           </CardContent>
         </Card>
 

@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from 'react';
 import { readSse } from '@/api/sse';
+import { handleUnauthorized } from '@/api/client';
 
 export interface LiveChannelRate {
   channel_id: number;
@@ -83,7 +84,15 @@ function useLiveStream(): LiveState {
         });
 
         if (response.status === 401) {
+          // The session expired: stop reconnecting and hand the 401 to the
+          // shared handler so the app invalidates `['me']` and shows login.
+          // The provider only mounts for an authenticated admin, so a
+          // successful login remounts it and restarts this stream.
           stopped = true;
+          setState((previous) =>
+            previous.connected ? { ...previous, connected: false } : previous,
+          );
+          handleUnauthorized();
           return;
         }
         if (!response.ok || !response.body) {

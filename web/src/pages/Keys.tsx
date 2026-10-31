@@ -124,6 +124,9 @@ export default function Keys() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
+  // Editing must not resend `enabled` unless the user actually flipped it,
+  // otherwise a stale form can undo a toggle made elsewhere.
+  const [enabledTouched, setEnabledTouched] = useState(false);
 
   const keysQuery = useQuery({
     queryKey: ['keys'],
@@ -137,7 +140,10 @@ export default function Keys() {
   const saveMutation = useMutation({
     mutationFn: ({ id, payload }: { id?: number; payload: unknown }) =>
       id
-        ? api.put<ApiKey>(`/api/keys/${id}`, payload)
+        ? api.put<ApiKey>(
+            `/api/keys/${encodeURIComponent(String(id))}`,
+            payload,
+          )
         : api.post<ApiKey>('/api/keys', payload),
     onSuccess: (data, variables) => {
       setDialogOpen(false);
@@ -148,6 +154,7 @@ export default function Keys() {
         toast.success('已保存');
       }
       queryClient.invalidateQueries({ queryKey: ['keys'] });
+      saveMutation.reset();
     },
     onError: (error) =>
       toast.error(errorMessage(error)),
@@ -155,7 +162,9 @@ export default function Keys() {
 
   const toggleMutation = useMutation({
     mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) =>
-      api.put<ApiKey>(`/api/keys/${id}`, { enabled }),
+      api.put<ApiKey>(`/api/keys/${encodeURIComponent(String(id))}`, {
+        enabled,
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['keys'] });
     },
@@ -164,7 +173,8 @@ export default function Keys() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: number) => api.delete(`/api/keys/${id}`),
+    mutationFn: (id: number) =>
+      api.delete(`/api/keys/${encodeURIComponent(String(id))}`),
     onSuccess: () => {
       toast.success('已删除');
       setDeleteTarget(null);
@@ -197,6 +207,7 @@ export default function Keys() {
     setEditingKey(null);
     setDraft(emptyDraft());
     setErrors({});
+    setEnabledTouched(false);
     setDialogOpen(true);
   }
 
@@ -204,10 +215,17 @@ export default function Keys() {
     setEditingKey(key);
     setDraft(draftFromKey(key, channelsQuery.data ?? []));
     setErrors({});
+    setEnabledTouched(false);
     setDialogOpen(true);
   }
 
   function submit() {
+    // Guard against a second Enter while the create/update is still in flight;
+    // otherwise a fast double keypress creates two keys.
+    if (saveMutation.isPending) {
+      return;
+    }
+
     const nextErrors: Record<string, string> = {};
     if (!draft.name.trim()) {
       nextErrors.name = '请输入名称';
@@ -226,17 +244,23 @@ export default function Keys() {
         )
       : draft.channelIds;
 
+    const payload: Record<string, unknown> = {
+      name: draft.name.trim(),
+      expires_at: draft.expiresAt ? dayjs(draft.expiresAt).valueOf() : null,
+      allowed_channel_ids: channelIds,
+      allowed_models: draft.models,
+      token_limit: limitOf(draft.tokenLimit),
+      daily_token_limit: limitOf(draft.dailyTokenLimit),
+    };
+    // Creation needs the initial state; edits only send it after an explicit
+    // switch toggle.
+    if (!editingKey || enabledTouched) {
+      payload.enabled = draft.enabled;
+    }
+
     saveMutation.mutate({
       id: editingKey?.id,
-      payload: {
-        name: draft.name.trim(),
-        expires_at: draft.expiresAt ? dayjs(draft.expiresAt).valueOf() : null,
-        enabled: draft.enabled,
-        allowed_channel_ids: channelIds,
-        allowed_models: draft.models,
-        token_limit: limitOf(draft.tokenLimit),
-        daily_token_limit: limitOf(draft.dailyTokenLimit),
-      },
+      payload,
     });
   }
 
@@ -432,6 +456,7 @@ export default function Keys() {
           setDialogOpen(next);
           if (!next) {
             setEditingKey(null);
+            setEnabledTouched(false);
           }
         }}
       >
@@ -446,6 +471,7 @@ export default function Keys() {
               <Input
                 id="key-name"
                 value={draft.name}
+                disabled={saveMutation.isPending}
                 onChange={(event) => update({ name: event.target.value })}
                 placeholder="例如：本地开发"
                 onKeyDown={(event) => {
@@ -465,6 +491,7 @@ export default function Keys() {
                 id="key-expires"
                 type="datetime-local"
                 value={draft.expiresAt}
+                disabled={saveMutation.isPending}
                 onChange={(event) =>
                   update({ expiresAt: event.target.value })
                 }
@@ -489,6 +516,7 @@ export default function Keys() {
                         type="button"
                         variant={active ? 'default' : 'outline'}
                         size="sm"
+                        disabled={saveMutation.isPending}
                         onClick={() => toggleChannel(channel.id)}
                       >
                         {channel.name}
@@ -528,6 +556,7 @@ export default function Keys() {
                 type="number"
                 min={1}
                 value={draft.tokenLimit}
+                disabled={saveMutation.isPending}
                 onChange={(event) =>
                   update({ tokenLimit: event.target.value })
                 }
@@ -546,6 +575,7 @@ export default function Keys() {
                 type="number"
                 min={1}
                 value={draft.dailyTokenLimit}
+                disabled={saveMutation.isPending}
                 onChange={(event) =>
                   update({ dailyTokenLimit: event.target.value })
                 }
@@ -562,7 +592,11 @@ export default function Keys() {
               </div>
               <Switch
                 checked={draft.enabled}
-                onCheckedChange={(checked) => update({ enabled: checked })}
+                disabled={saveMutation.isPending}
+                onCheckedChange={(checked) => {
+                  update({ enabled: checked });
+                  setEnabledTouched(true);
+                }}
               />
             </div>
           </div>

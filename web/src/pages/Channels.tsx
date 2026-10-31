@@ -254,7 +254,7 @@ function toNumber(value: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function toPayload(draft: ChannelDraft) {
+function toPayload(draft: ChannelDraft, includeEnabled = true) {
   return {
     name: draft.name.trim(),
     protocols: PROTOCOL_ORDER.map((kind) => {
@@ -280,7 +280,9 @@ function toPayload(draft: ChannelDraft) {
       ? Math.max(1, toNumber(draft.timeoutMs, 1))
       : null,
     proxy_url: draft.proxyUrl.trim() || null,
-    enabled: draft.enabled,
+    // Editing omits `enabled` unless the user flipped it, so saving unrelated
+    // fields cannot resurrect a channel that was disabled elsewhere.
+    ...(includeEnabled ? { enabled: draft.enabled } : {}),
   };
 }
 
@@ -357,6 +359,9 @@ export default function Channels() {
     useState<ChannelKind>('openai_chat');
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [deleteTarget, setDeleteTarget] = useState<Channel | null>(null);
+  // Tracks whether the user actually flipped the enable switch in this edit
+  // session; only then is `enabled` part of the update payload.
+  const [enabledTouched, setEnabledTouched] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [modelTarget, setModelTarget] =
@@ -452,7 +457,10 @@ export default function Channels() {
   const saveMutation = useMutation({
     mutationFn: ({ id, payload }: { id?: number; payload: unknown }) =>
       id
-        ? api.put<Channel>(`/api/channels/${id}`, payload)
+        ? api.put<Channel>(
+            `/api/channels/${encodeURIComponent(String(id))}`,
+            payload,
+          )
         : api.post<Channel>('/api/channels', payload),
     onSuccess: () => {
       toast.success('渠道已保存');
@@ -466,7 +474,9 @@ export default function Channels() {
 
   const toggleMutation = useMutation({
     mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) =>
-      api.put<Channel>(`/api/channels/${id}/enabled`, { enabled }),
+      api.put<Channel>(`/api/channels/${encodeURIComponent(String(id))}/enabled`, {
+        enabled,
+      }),
     onSuccess: (channel) => {
       toast.success(channel.enabled ? '渠道已启用' : '渠道已停用');
       queryClient.invalidateQueries({ queryKey: ['channels'] });
@@ -476,7 +486,8 @@ export default function Channels() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: number) => api.delete(`/api/channels/${id}`),
+    mutationFn: (id: number) =>
+      api.delete(`/api/channels/${encodeURIComponent(String(id))}`),
     onSuccess: () => {
       toast.success('渠道已删除');
       setDeleteTarget(null);
@@ -498,7 +509,9 @@ export default function Channels() {
 
   const testMutation = useMutation({
     mutationFn: (id: number) =>
-      api.post<ChannelTestResult>(`/api/channels/${id}/test`),
+      api.post<ChannelTestResult>(
+        `/api/channels/${encodeURIComponent(String(id))}/test`,
+      ),
     onSuccess: reportTest,
     onError: (error) =>
       toast.error(errorMessage(error)),
@@ -566,6 +579,7 @@ export default function Channels() {
     setDraft(emptyDraft());
     setActiveProtocol('openai_chat');
     setErrors({});
+    setEnabledTouched(false);
     setOpen(true);
   }
 
@@ -578,6 +592,7 @@ export default function Channels() {
       'openai_chat';
     setActiveProtocol(primary);
     setErrors({});
+    setEnabledTouched(false);
     setOpen(true);
   }
 
@@ -589,7 +604,7 @@ export default function Channels() {
     }
     saveMutation.mutate({
       id: editing?.id,
-      payload: toPayload(draft),
+      payload: toPayload(draft, editing == null || enabledTouched),
     });
   }
 
@@ -1110,9 +1125,10 @@ export default function Channels() {
               </div>
               <Switch
                 checked={draft.enabled}
-                onCheckedChange={(checked) =>
-                  updateShared({ enabled: checked })
-                }
+                onCheckedChange={(checked) => {
+                  updateShared({ enabled: checked });
+                  setEnabledTouched(true);
+                }}
               />
             </div>
           </div>
