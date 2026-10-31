@@ -1,5 +1,10 @@
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 
+/// Upper bound for the indexed `model` / `upstream_model` columns. The request
+/// path rejects longer names, and the usage writer clamps anything that still
+/// reaches it, so an indexed value can never grow unbounded.
+pub const MAX_MODEL_NAME_LEN: usize = 256;
+
 #[derive(Debug, Clone, FromRow)]
 pub struct UsageLogRow {
     pub id: i64,

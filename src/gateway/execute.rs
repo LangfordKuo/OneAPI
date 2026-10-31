@@ -137,17 +137,37 @@ pub async fn proxy_with_identity(
     mut body: Value,
 ) -> Result<Response, AppError> {
     let request_id = resolve_request_id(headers);
+
+    let requested_model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if let Some(model) = requested_model.as_deref() {
+        // The model name is echoed into response headers and written to the
+        // indexed `usage_logs.model` column. Reject over-long names and control
+        // characters before fetching defaults, building the request detail,
+        // selecting a channel or writing a usage row: this request never
+        // reaches an upstream attempt, so it produces no usage row.
+        if model.chars().count() > models::usage_log::MAX_MODEL_NAME_LEN
+            || model.chars().any(char::is_control)
+        {
+            return Ok(error::client_error(
+                inbound,
+                StatusCode::BAD_REQUEST,
+                "invalid model name",
+                "invalid_request_error",
+            ));
+        }
+    }
+
     let defaults = state.cache.defaults(&state.db).await?;
     let store_request_bodies = defaults.store_request_bodies;
     let detail_request =
         store_request_bodies.then(|| serde_json::to_string(&body).unwrap_or_default());
 
-    let Some(model) = body
-        .get("model")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-    else {
+    let Some(model) = requested_model else {
         let message = "model is required";
         store_request_detail(
             state,

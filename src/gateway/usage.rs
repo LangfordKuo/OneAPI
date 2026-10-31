@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -380,10 +381,54 @@ pub async fn insert(pool: &SqlitePool, record: &UsageRecord<'_>) -> sqlx::Result
     tx.commit().await
 }
 
+/// Bounds for the text fields that land in indexed usage-log columns.
+const MAX_ERROR_TYPE_LEN: usize = 128;
+const MAX_ERROR_MESSAGE_LEN: usize = 1024;
+
+/// Clamp a usage-log text field to `max_chars` Unicode scalar values before it
+/// is bound to a column. Char-based truncation never splits a UTF-8 sequence.
+fn truncate_field<'a>(field: &'static str, value: &'a str, max_chars: usize) -> Cow<'a, str> {
+    let chars = value.chars().count();
+    if chars <= max_chars {
+        return Cow::Borrowed(value);
+    }
+    tracing::warn!(
+        field,
+        chars,
+        max_chars,
+        "usage log field exceeds the storage limit; truncating"
+    );
+    Cow::Owned(value.chars().take(max_chars).collect())
+}
+
 async fn insert_one<'e, E>(executor: E, record: &OwnedUsageRecord) -> sqlx::Result<()>
 where
     E: Executor<'e, Database = Sqlite>,
 {
+    // Write-side backstop: the request path validates model names, but any
+    // caller can still hand the writer a long value. Clamp the text fields
+    // that feed indexed columns so one row cannot bloat the index.
+    let model = truncate_field(
+        "model",
+        &record.model,
+        models::usage_log::MAX_MODEL_NAME_LEN,
+    );
+    let upstream_model = record.upstream_model.as_deref().map(|value| {
+        truncate_field(
+            "upstream_model",
+            value,
+            models::usage_log::MAX_MODEL_NAME_LEN,
+        )
+    });
+    let error_type = record
+        .error_type
+        .as_deref()
+        .map(|value| truncate_field("error_type", value, MAX_ERROR_TYPE_LEN));
+    let error_message = record
+        .error_message
+        .as_deref()
+        .map(|value| truncate_field("error_message", value, MAX_ERROR_MESSAGE_LEN));
+
     sqlx::query(
         "INSERT INTO usage_logs
          (request_id, source, api_key_id, detail_api_key_id, channel_id, model, upstream_model,
@@ -401,15 +446,15 @@ where
     // Playground requests (no key) store NULL.
     .bind(record.api_key_id)
     .bind(record.channel_id)
-    .bind(&record.model)
-    .bind(&record.upstream_model)
+    .bind(model.as_ref())
+    .bind(upstream_model.as_deref())
     .bind(&record.inbound_protocol)
     .bind(&record.upstream_protocol)
     .bind(if record.stream { 1i64 } else { 0i64 })
     .bind(i64::from(record.status_code))
     .bind(i64::from(record.attempts))
-    .bind(&record.error_type)
-    .bind(&record.error_message)
+    .bind(error_type.as_deref())
+    .bind(error_message.as_deref())
     .bind(token(record.usage.input_tokens))
     .bind(token(record.usage.output_tokens))
     .bind(token(record.usage.total_tokens))
