@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-30T16:16:33Z",
+  "updated_at": "2026-10-31T07:31:18Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -89,9 +89,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "576f55ecc69b086cd1c73d9cf7f8949c6c1c2988cd533a305d20dae0b1e27f82",
-      "size": 77922,
-      "normalized_sha256": "576f55ecc69b086cd1c73d9cf7f8949c6c1c2988cd533a305d20dae0b1e27f82"
+      "sha256": "e93bcc4afbba794c82c15bd53c4b8ab96a2859edf4ba03d6fcf85a3cd8c996c4",
+      "size": 78346,
+      "normalized_sha256": "e93bcc4afbba794c82c15bd53c4b8ab96a2859edf4ba03d6fcf85a3cd8c996c4"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -140,6 +140,12 @@
       "sha256": "e963c6ce778f39831b285b8b5106b65a779c226d24d4ef4308c30f2bc4e92049",
       "size": 19010,
       "normalized_sha256": "e963c6ce778f39831b285b8b5106b65a779c226d24d4ef4308c30f2bc4e92049"
+    },
+    "docs/SECURITY_FIX_PLAN.md": {
+      "role": "index",
+      "sha256": "48822f70be676749965afa282693c5ef488ae6460056e9283564f6e11ab76336",
+      "size": 41143,
+      "normalized_sha256": "48822f70be676749965afa282693c5ef488ae6460056e9283564f6e11ab76336"
     },
     "migrations/0001_init.sql": {
       "role": "index",
