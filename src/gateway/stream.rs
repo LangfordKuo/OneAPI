@@ -170,6 +170,9 @@ const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
 enum WaitOutcome {
     Next(Option<Result<Bytes, std::io::Error>>),
     TimedOut,
+    /// The client stopped reading: the outbound channel stayed full past the
+    /// idle deadline, so this is not an upstream failure.
+    ClientBlocked,
     Disconnected,
 }
 
@@ -195,8 +198,19 @@ async fn wait_for_upstream(
                 if Instant::now() >= deadline {
                     return WaitOutcome::TimedOut;
                 }
-                if tx.send(Bytes::from_static(HEARTBEAT_FRAME)).await.is_err() {
-                    return WaitOutcome::Disconnected;
+                // The heartbeat must not block past the absolute idle deadline.
+                // A full channel means the client stopped reading, which is a
+                // client-side problem rather than upstream idleness.
+                tokio::select! {
+                    _ = tx.closed() => return WaitOutcome::Disconnected,
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                        return WaitOutcome::ClientBlocked;
+                    }
+                    result = tx.send(Bytes::from_static(HEARTBEAT_FRAME)) => {
+                        if result.is_err() {
+                            return WaitOutcome::Disconnected;
+                        }
+                    }
                 }
             }
             result = upstream.next() => return WaitOutcome::Next(result),
@@ -337,6 +351,18 @@ async fn run(
                     ));
                     stream_error_provider_json = false;
                     synthesize_error = true;
+                    break;
+                }
+                WaitOutcome::ClientBlocked => {
+                    // The heartbeat could not be written before the idle
+                    // deadline: treat it as a slow/disconnected client and
+                    // leave channel health untouched.
+                    tracing::warn!(
+                        request_id = %job.request_id,
+                        channel_id = job.channel_id,
+                        "client_slow: heartbeat blocked past the idle deadline"
+                    );
+                    client_disconnected = true;
                     break;
                 }
                 WaitOutcome::Next(Some(Ok(chunk))) => {
