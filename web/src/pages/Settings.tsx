@@ -5,7 +5,6 @@ import {
   CheckCircle2,
   Loader2,
   RefreshCw,
-  ShieldCheck,
   TriangleAlert,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -230,13 +229,6 @@ export default function SettingsPage() {
     null,
   );
 
-  const [currentPassword, setCurrentPassword] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [passwordErrors, setPasswordErrors] = useState<
-    Record<string, string>
-  >({});
-
   const settingsQuery = useQuery({
     queryKey: ['settings'],
     queryFn: () => api.get<Settings>('/api/settings'),
@@ -332,28 +324,6 @@ export default function SettingsPage() {
       ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [location.hash]);
 
-  const passwordMutation = useMutation({
-    mutationFn: (values: { current: string; next: string }) =>
-      api.put('/api/auth/password', {
-        current_password: values.current,
-        new_password: values.next,
-      }),
-    onSuccess: () => {
-      toast.success('密码已更新，其他会话已下线');
-      setCurrentPassword('');
-      setNewPassword('');
-      setConfirmPassword('');
-      setPasswordErrors({});
-    },
-    onError: (error) => {
-      if (error instanceof ApiError && error.status === 401) {
-        toast.error('当前密码不正确');
-        return;
-      }
-      toast.error(errorMessage(error));
-    },
-  });
-
   function saveSettings() {
     // Without server data the form must not be usable; saving here would write
     // EMPTY_DRAFT defaults over the stored configuration.
@@ -369,36 +339,14 @@ export default function SettingsPage() {
     saveMutation.mutate(toSettingsPatch(draft, dirtyFields));
   }
 
-  function changePassword() {
-    const errors: Record<string, string> = {};
-    if (!currentPassword) {
-      errors.current = '请输入当前密码';
-    }
-    if (!newPassword) {
-      errors.next = '请输入新密码';
-    } else if (newPassword.length < 8) {
-      errors.next = '至少 8 个字符';
-    }
-    if (!confirmPassword) {
-      errors.confirm = '请再次输入新密码';
-    } else if (newPassword !== confirmPassword) {
-      errors.confirm = '两次输入不一致';
-    }
-    setPasswordErrors(errors);
-    if (Object.keys(errors).length > 0) {
-      return;
-    }
-    passwordMutation.mutate({ current: currentPassword, next: newPassword });
-  }
-
   return (
     <>
       <PageHeader
         title="设置"
-        description="站点参数、请求体记录、软件更新与管理员密码。"
+        description="站点参数、请求体记录与软件更新。"
       />
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4">
         <Card>
           <CardHeader>
             <CardTitle>站点设置</CardTitle>
@@ -683,81 +631,6 @@ export default function SettingsPage() {
                 </Button>
               </>
             ) : null}
-          </CardContent>
-        </Card>
-
-        <Card className="self-start">
-          <CardHeader>
-            <CardTitle>修改密码</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <Field
-              label="当前密码"
-              htmlFor="settings-current-password"
-              error={passwordErrors.current}
-            >
-              <Input
-                id="settings-current-password"
-                type="password"
-                autoComplete="current-password"
-                value={currentPassword}
-                onChange={(event) => {
-                  setCurrentPassword(event.target.value);
-                  setPasswordErrors((errors) => ({
-                    ...errors,
-                    current: '',
-                  }));
-                }}
-              />
-            </Field>
-            <Field
-              label="新密码"
-              htmlFor="settings-new-password"
-              error={passwordErrors.next}
-              hint="至少 8 个字符。"
-            >
-              <Input
-                id="settings-new-password"
-                type="password"
-                autoComplete="new-password"
-                value={newPassword}
-                onChange={(event) => {
-                  setNewPassword(event.target.value);
-                  setPasswordErrors((errors) => ({ ...errors, next: '' }));
-                }}
-              />
-            </Field>
-            <Field
-              label="确认新密码"
-              htmlFor="settings-confirm-password"
-              error={passwordErrors.confirm}
-            >
-              <Input
-                id="settings-confirm-password"
-                type="password"
-                autoComplete="new-password"
-                value={confirmPassword}
-                onChange={(event) => {
-                  setConfirmPassword(event.target.value);
-                  setPasswordErrors((errors) => ({
-                    ...errors,
-                    confirm: '',
-                  }));
-                }}
-              />
-            </Field>
-            <Button
-              type="button"
-              onClick={changePassword}
-              disabled={passwordMutation.isPending}
-            >
-              {passwordMutation.isPending ? (
-                <Loader2 className="animate-spin" />
-              ) : (
-                <ShieldCheck />
-              )}
-              更新密码
-            </Button>
           </CardContent>
         </Card>
       </div>

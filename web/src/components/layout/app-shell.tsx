@@ -13,6 +13,7 @@ import {
   Settings,
   Sparkles,
   Sun,
+  UserRound,
 } from 'lucide-react';
 import { useTheme } from 'next-themes';
 import { useState, type ReactNode } from 'react';
@@ -44,6 +45,7 @@ const NAV_ITEMS = [
   { to: '/keys', label: 'API Keys', icon: KeyRound },
   { to: '/logs', label: '日志', icon: FileText },
   { to: '/playground', label: 'Playground', icon: Sparkles },
+  { to: '/account', label: '账户', icon: UserRound },
   { to: '/settings', label: '设置', icon: Settings },
 ];
 
@@ -53,6 +55,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/keys': 'API Keys',
   '/logs': '请求日志',
   '/playground': 'Playground',
+  '/account': '账户设置',
   '/settings': '设置',
 };
 
@@ -193,6 +196,7 @@ export function AppShell({
   children,
 }: AppShellProps) {
   const location = useLocation();
+  const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
   const { resolvedTheme, setTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
@@ -267,6 +271,10 @@ export function AppShell({
                 </div>
               </DropdownMenuGroup>
               <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => navigate('/account')}>
+                <UserRound className="size-4" />
+                账户设置
+              </DropdownMenuItem>
               <DropdownMenuItem onClick={onLogout}>
                 <LogOut className="size-4" />
                 退出登录
