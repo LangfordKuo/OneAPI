@@ -95,7 +95,9 @@ pub async fn setup(
         return Err(AppError::BadRequest(format!("password {violation}")));
     }
 
-    let password_hash = security::hash_password(password.as_str()).map_err(AppError::Internal)?;
+    let password_hash = security::hash_password_blocking(password)
+        .await
+        .map_err(AppError::Internal)?;
     let admin_id =
         match models::admin::create(&state.db, username, &password_hash, models::now_ms()).await {
             Ok(admin_id) => admin_id,
