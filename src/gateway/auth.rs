@@ -1,11 +1,15 @@
 use axum::{
     extract::FromRequestParts,
     http::{header, request::Parts, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 
 use crate::{
-    models::{self, api_key::ApiKey},
+    error::AppError,
+    models::{
+        self,
+        api_key::{ApiKey, ApiKeyLimits},
+    },
     security,
     state::AppState,
 };
@@ -14,6 +18,7 @@ use super::error::{client_error, protocol_for_path};
 
 pub struct ApiKeyAuth {
     pub key: ApiKey,
+    pub limits: ApiKeyLimits,
 }
 
 impl FromRequestParts<AppState> for ApiKeyAuth {
@@ -57,6 +62,25 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
             return Err(unauthorized(parts));
         }
 
+        // Parse the restrictions once and fail closed: a malformed allowlist
+        // must not be treated as an empty (unrestricted) list, so the request
+        // never reaches channel selection.
+        let limits = match record.parse_limits() {
+            Ok(limits) => limits,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    key_id = record.id,
+                    "failed to parse API key restrictions"
+                );
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "failed to parse restrictions for API key {}: {error}",
+                    record.id
+                ))
+                .into_response());
+            }
+        };
+
         if record
             .last_used_at
             .map(|last_used| now - last_used > 60_000)
@@ -67,7 +91,7 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
             }
         }
 
-        Ok(Self { key: record })
+        Ok(Self { key: record, limits })
     }
 }
 

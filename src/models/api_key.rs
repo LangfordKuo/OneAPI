@@ -1,3 +1,4 @@
+use serde::de::Error as _;
 use sqlx::{Executor, FromRow, Sqlite, SqlitePool};
 
 #[derive(Debug, Clone, FromRow)]
@@ -20,20 +21,31 @@ pub struct ApiKey {
     pub created_at: i64,
 }
 
-impl ApiKey {
-    /// Empty means "all channels".
-    pub fn channel_ids(&self) -> Vec<i64> {
-        serde_json::from_str(&self.allowed_channel_ids).unwrap_or_default()
-    }
+/// Parsed per-key restrictions. Both lists use the same convention: an empty
+/// list means "no restriction". Parsing is fallible so a malformed allowlist
+/// can never be mistaken for an empty (unrestricted) one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyLimits {
+    pub channel_ids: Vec<i64>,
+    pub models: Vec<String>,
+}
 
+impl ApiKeyLimits {
     /// Empty means "all models"; `*` also matches everything.
-    pub fn model_names(&self) -> Vec<String> {
-        serde_json::from_str(&self.allowed_models).unwrap_or_default()
-    }
-
     pub fn allows_model(&self, model: &str) -> bool {
-        let models = self.model_names();
-        models.is_empty() || models.iter().any(|item| item == "*" || item == model)
+        self.models.is_empty() || self.models.iter().any(|item| item == "*" || item == model)
+    }
+}
+
+impl ApiKey {
+    /// Parse both allowlists. Malformed JSON, or a non-positive channel id,
+    /// is an error: it must never degrade to "no restriction".
+    pub fn parse_limits(&self) -> Result<ApiKeyLimits, serde_json::Error> {
+        let channel_ids: Vec<i64> = serde_json::from_str(&self.allowed_channel_ids)?;
+        let channel_ids = parse_channel_ids(&channel_ids)
+            .map_err(|invalid| serde_json::Error::custom(format!("invalid channel id {invalid}")))?;
+        let models: Vec<String> = serde_json::from_str(&self.allowed_models)?;
+        Ok(ApiKeyLimits { channel_ids, models })
     }
 
     pub fn token_limit_reached(&self) -> bool {

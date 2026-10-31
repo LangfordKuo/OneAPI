@@ -9,7 +9,7 @@ use crate::{
     error::AppError,
     models::{
         self,
-        api_key::{self, ApiKey, ApiKeyCreate, ApiKeyUpdate},
+        api_key::{self, ApiKey, ApiKeyCreate, ApiKeyLimits, ApiKeyUpdate},
     },
     security,
     state::AppState,
@@ -38,8 +38,22 @@ pub struct KeyOutput {
 
 impl KeyOutput {
     fn from_row(row: ApiKey) -> Self {
-        let allowed_channel_ids = row.channel_ids();
-        let allowed_models = row.model_names();
+        // A malformed stored allowlist is shown as empty for display only; the
+        // gateway auth path treats it as an error and rejects the key.
+        let limits = match row.parse_limits() {
+            Ok(limits) => limits,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    key_id = row.id,
+                    "failed to parse API key restrictions; showing empty lists"
+                );
+                ApiKeyLimits {
+                    channel_ids: Vec::new(),
+                    models: Vec::new(),
+                }
+            }
+        };
         let daily_token_usage = row.usage_today(models::now_ms() / 86_400_000);
         Self {
             id: row.id,
@@ -48,8 +62,8 @@ impl KeyOutput {
             enabled: row.enabled != 0,
             expires_at: row.expires_at,
             last_used_at: row.last_used_at,
-            allowed_channel_ids,
-            allowed_models,
+            allowed_channel_ids: limits.channel_ids,
+            allowed_models: limits.models,
             token_limit: row.token_limit,
             token_usage: row.token_usage,
             daily_token_limit: row.daily_token_limit,
@@ -232,12 +246,40 @@ pub async fn update(
         None => existing.expires_at,
     };
 
-    let channel_ids = input
-        .allowed_channel_ids
-        .unwrap_or_else(|| existing.channel_ids());
-    let models = input
-        .allowed_models
-        .unwrap_or_else(|| existing.model_names());
+    // Falling back to the stored restrictions requires decoding them. A
+    // malformed allowlist is an error here as well: rewriting it as an empty
+    // (unrestricted) list would silently widen the key's scope.
+    let existing_limits = if input.allowed_channel_ids.is_none() || input.allowed_models.is_none() {
+        Some(existing.parse_limits().map_err(|error| {
+            tracing::error!(
+                error = %error,
+                key_id = existing.id,
+                "failed to parse existing API key restrictions"
+            );
+            AppError::Internal(anyhow::anyhow!(
+                "failed to parse existing restrictions for API key {}: {error}",
+                existing.id
+            ))
+        })?)
+    } else {
+        None
+    };
+    let channel_ids = match input.allowed_channel_ids {
+        Some(value) => value,
+        None => existing_limits
+            .as_ref()
+            .expect("existing limits parsed when a field is omitted")
+            .channel_ids
+            .clone(),
+    };
+    let models = match input.allowed_models {
+        Some(value) => value,
+        None => existing_limits
+            .as_ref()
+            .expect("existing limits parsed when a field is omitted")
+            .models
+            .clone(),
+    };
     let token_limit = input.token_limit.unwrap_or(existing.token_limit);
     let daily_token_limit = input
         .daily_token_limit

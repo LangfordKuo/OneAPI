@@ -2,7 +2,12 @@ use std::time::{Duration, Instant};
 
 use crate::{
     error::AppError,
-    models::{self, api_key::ApiKey, channel::Channel, now_ms},
+    models::{
+        self,
+        api_key::{ApiKey, ApiKeyLimits},
+        channel::Channel,
+        now_ms,
+    },
     protocol::{self, Protocol, UnifiedRequest, Usage},
     state::{AppState, ProbeAttempt},
     upstream,
@@ -80,12 +85,12 @@ pub struct ProxyIdentity {
 }
 
 impl ProxyIdentity {
-    pub fn gateway(key: &ApiKey) -> Self {
+    pub fn gateway(key: &ApiKey, limits: &ApiKeyLimits) -> Self {
         Self {
             api_key_id: Some(key.id),
             source: "gateway",
-            allowed_channel_ids: key.channel_ids(),
-            allowed_models: key.model_names(),
+            allowed_channel_ids: limits.channel_ids.clone(),
+            allowed_models: limits.models.clone(),
         }
     }
 
@@ -116,7 +121,7 @@ pub async fn proxy(
 ) -> Result<Response, AppError> {
     proxy_with_identity(
         state,
-        ProxyIdentity::gateway(&auth.key),
+        ProxyIdentity::gateway(&auth.key, &auth.limits),
         inbound,
         headers,
         body,

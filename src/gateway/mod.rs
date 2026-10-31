@@ -105,7 +105,7 @@ async fn count_tokens(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
     {
-        if !auth.key.allows_model(model) {
+        if !auth.limits.allows_model(model) {
             return Ok(error::client_error(
                 Protocol::Anthropic,
                 StatusCode::FORBIDDEN,
@@ -116,13 +116,13 @@ async fn count_tokens(
 
         let channels = state.cache.channels(&state.db).await?;
         let health = state.cache.channel_health();
-        let allowed_channels = auth.key.channel_ids();
+        let allowed_channels = &auth.limits.channel_ids;
         let candidates: Vec<_> = select::candidates(
             &channels,
             &health,
             model,
             Protocol::Anthropic,
-            &allowed_channels,
+            allowed_channels,
         )
         .into_iter()
         .filter(|candidate| candidate.upstream_kind == "anthropic")
@@ -267,7 +267,7 @@ async fn list_models(
     State(state): State<AppState>,
     auth: ApiKeyAuth,
 ) -> Result<Json<Value>, AppError> {
-    let models = available_models(&state, &auth.key).await?;
+    let models = available_models(&state, &auth.limits).await?;
     let first_id = models.first().cloned();
     let last_id = models.last().cloned();
     let data: Vec<Value> = models
@@ -296,7 +296,7 @@ async fn get_model(
     auth: ApiKeyAuth,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
-    let models = available_models(&state, &auth.key).await?;
+    let models = available_models(&state, &auth.limits).await?;
     if models.iter().any(|model| model == &id) {
         Ok(Json(json!({
             "id": id,
@@ -317,13 +317,13 @@ async fn get_model(
 
 async fn available_models(
     state: &AppState,
-    key: &models::api_key::ApiKey,
+    limits: &models::api_key::ApiKeyLimits,
 ) -> sqlx::Result<Vec<String>> {
     let channels = state.cache.channels(&state.db).await?;
     let mut result = BTreeSet::new();
     let mut has_wildcard = false;
-    // Parse the allowlist once instead of once per channel.
-    let allowed_channels = key.channel_ids();
+    // The allowlists were already parsed once on the auth path.
+    let allowed_channels = &limits.channel_ids;
     let channel_allowed =
         |channel_id: i64| allowed_channels.is_empty() || allowed_channels.contains(&channel_id);
 
@@ -352,7 +352,7 @@ async fn available_models(
 
     // A per-key model allowlist narrows the catalog to models that can actually
     // be served by the channels this key may use.
-    let allowed = key.model_names();
+    let allowed = &limits.models;
     if !allowed.is_empty() && !allowed.iter().any(|model| model == "*") {
         result.retain(|model| allowed.contains(model));
     }
