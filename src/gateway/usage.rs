@@ -35,6 +35,12 @@ pub struct UsageRecord<'a> {
     pub usage: &'a Usage,
     pub latency_ms: i64,
     pub first_token_ms: Option<i64>,
+    /// Tokens reserved at admission for this request, settled by the writer.
+    /// `0` means the request made no reservation.
+    pub reserved_tokens: i64,
+    /// UTC day the reservation belongs to; only meaningful with
+    /// `reserved_tokens > 0`.
+    pub reserved_day: i64,
     pub created_at: i64,
 }
 
@@ -56,6 +62,8 @@ pub struct OwnedUsageRecord {
     usage: Usage,
     latency_ms: i64,
     first_token_ms: Option<i64>,
+    reserved_tokens: i64,
+    reserved_day: i64,
     created_at: i64,
 }
 
@@ -78,8 +86,137 @@ impl From<&UsageRecord<'_>> for OwnedUsageRecord {
             usage: record.usage.clone(),
             latency_ms: record.latency_ms,
             first_token_ms: record.first_token_ms,
+            reserved_tokens: record.reserved_tokens,
+            reserved_day: record.reserved_day,
             created_at: record.created_at,
         }
+    }
+}
+
+/// Why a reservation was refused. Mapped to the protocol-shaped client error by
+/// the gateway; `Database` is an internal failure, not a quota decision.
+#[derive(Debug, thiserror::Error)]
+pub enum ReserveError {
+    #[error("API key token limit reached")]
+    TokenLimit,
+    #[error("API key daily token limit reached")]
+    DailyLimit,
+    #[error("API key is disabled")]
+    Disabled,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+/// In-flight admission reservation.
+///
+/// The guard is armed when the counters were incremented. Until [`disarm`] is
+/// called, dropping it (early return, cancellation, panic) spawns a release so
+/// a failed request cannot pin quota forever. Once the usage row carrying the
+/// reservation has been handed to the writer, the row itself settles it, so the
+/// guard is disarmed to avoid releasing twice.
+///
+/// [`disarm`]: Reservation::disarm
+pub struct Reservation {
+    state: AppState,
+    key_id: i64,
+    tokens: i64,
+    day: i64,
+    armed: bool,
+}
+
+impl Reservation {
+    pub fn tokens(&self) -> i64 {
+        self.tokens
+    }
+
+    pub fn day(&self) -> i64 {
+        self.day
+    }
+
+    /// The reservation was handed to a usage row (or deliberately abandoned
+    /// with a compensating release); do not release it on drop.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let state = self.state.clone();
+        let key_id = self.key_id;
+        let tokens = self.tokens;
+        let day = self.day;
+        // `Drop` cannot await. A detached release is enough: if it fails the
+        // janitor will clear the counters once the reservation goes stale.
+        let release = async move {
+            if let Err(error) =
+                models::api_key::release_reservation(&state.db, key_id, tokens, day).await
+            {
+                tracing::warn!(
+                    error = %error,
+                    key_id,
+                    tokens,
+                    "failed to release quota reservation"
+                );
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(release);
+            }
+            Err(_) => tracing::warn!(
+                key_id,
+                tokens,
+                "runtime is gone; quota reservation left for the janitor"
+            ),
+        }
+    }
+}
+
+/// Whether the emergency switch `ONEAPI_DISABLE_QUOTA_RESERVATION=1` is set.
+/// Read per request so an operator can turn reservation off without a rebuild.
+fn reservation_disabled() -> bool {
+    std::env::var("ONEAPI_DISABLE_QUOTA_RESERVATION")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Reserve `estimate` tokens for `key_id` before an upstream attempt.
+///
+/// Returns `Ok(None)` when reservation is disabled by the emergency switch, so
+/// the caller simply falls back to post-hoc accounting. `day` is the UTC day
+/// (milliseconds / 86_400_000) the request was admitted on; settlement uses the
+/// same value.
+pub async fn reserve(
+    state: &AppState,
+    key_id: i64,
+    estimate: i64,
+    day: i64,
+) -> Result<Option<Reservation>, ReserveError> {
+    if reservation_disabled() {
+        return Ok(None);
+    }
+
+    let tokens = estimate.max(1);
+    match models::api_key::reserve(&state.db, key_id, tokens, day, models::now_ms()).await? {
+        models::api_key::ReserveOutcome::Reserved => Ok(Some(Reservation {
+            state: state.clone(),
+            key_id,
+            tokens,
+            day,
+            armed: true,
+        })),
+        models::api_key::ReserveOutcome::TokenLimit => Err(ReserveError::TokenLimit),
+        models::api_key::ReserveOutcome::DailyLimit => Err(ReserveError::DailyLimit),
+        models::api_key::ReserveOutcome::Disabled => Err(ReserveError::Disabled),
     }
 }
 
@@ -375,6 +512,17 @@ pub async fn insert(pool: &SqlitePool, record: &UsageRecord<'_>) -> sqlx::Result
     let mut tx = pool.begin().await?;
     insert_one(&mut *tx, &owned).await?;
     if let Some(api_key_id) = owned.api_key_id {
+        // Settlement: give the reservation back before charging the actual
+        // usage, so the same request is never counted twice.
+        if owned.reserved_tokens > 0 {
+            models::api_key::release_reservation(
+                &mut *tx,
+                api_key_id,
+                owned.reserved_tokens,
+                owned.reserved_day,
+            )
+            .await?;
+        }
         models::api_key::add_usage(
             &mut *tx,
             api_key_id,
@@ -529,6 +677,10 @@ async fn write_loop(
 async fn write_batch(pool: &SqlitePool, batch: &[WriteJob], events: &EventBus) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
     let mut key_usage: HashMap<i64, i64> = HashMap::new();
+    // Per key, the reservations to give back, grouped by their UTC day. Rows
+    // from the same request are aggregated so settlement is one UPDATE per key
+    // and day instead of one per row.
+    let mut key_releases: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
     let mut usage_rows = 0usize;
     for job in batch {
         match job {
@@ -537,6 +689,16 @@ async fn write_batch(pool: &SqlitePool, batch: &[WriteJob], events: &EventBus) -
                 insert_one(&mut *tx, record).await?;
                 if let Some(api_key_id) = record.api_key_id {
                     *key_usage.entry(api_key_id).or_default() += total_tokens(&record.usage);
+                    if record.reserved_tokens > 0 {
+                        let releases = key_releases.entry(api_key_id).or_default();
+                        match releases
+                            .iter_mut()
+                            .find(|(day, _)| *day == record.reserved_day)
+                        {
+                            Some((_, tokens)) => *tokens += record.reserved_tokens,
+                            None => releases.push((record.reserved_day, record.reserved_tokens)),
+                        }
+                    }
                 }
             }
             WriteJob::Detail(record) => {
@@ -550,6 +712,14 @@ async fn write_batch(pool: &SqlitePool, batch: &[WriteJob], events: &EventBus) -
                 )
                 .await?;
             }
+        }
+    }
+    // Release reservations first, then charge actual usage: the counters are
+    // MAX(0, ...) guarded, and this ordering keeps a partially applied batch
+    // (rolled back as a whole anyway) from double counting.
+    for (api_key_id, releases) in key_releases {
+        for (day, tokens) in releases {
+            models::api_key::release_reservation(&mut *tx, api_key_id, tokens, day).await?;
         }
     }
     let now = models::now_ms();

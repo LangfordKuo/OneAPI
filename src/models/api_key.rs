@@ -20,7 +20,21 @@ pub struct ApiKey {
     pub daily_token_limit: Option<i64>,
     pub daily_token_usage: i64,
     pub daily_usage_day: i64,
+    /// Tokens held by in-flight requests. Settled (released) when their usage
+    /// row is written, or by the stale-reservation janitor after a crash.
+    pub reserved_tokens: i64,
+    pub reserved_daily_tokens: i64,
+    pub reserved_day: i64,
     pub created_at: i64,
+}
+
+/// Result of an admission-time quota reservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveOutcome {
+    Reserved,
+    TokenLimit,
+    DailyLimit,
+    Disabled,
 }
 
 /// Parsed per-key restrictions. Both lists use the same convention: an empty
@@ -44,10 +58,14 @@ impl ApiKey {
     /// is an error: it must never degrade to "no restriction".
     pub fn parse_limits(&self) -> Result<ApiKeyLimits, serde_json::Error> {
         let channel_ids: Vec<i64> = serde_json::from_str(&self.allowed_channel_ids)?;
-        let channel_ids = parse_channel_ids(&channel_ids)
-            .map_err(|invalid| serde_json::Error::custom(format!("invalid channel id {invalid}")))?;
+        let channel_ids = parse_channel_ids(&channel_ids).map_err(|invalid| {
+            serde_json::Error::custom(format!("invalid channel id {invalid}"))
+        })?;
         let models: Vec<String> = serde_json::from_str(&self.allowed_models)?;
-        Ok(ApiKeyLimits { channel_ids, models })
+        Ok(ApiKeyLimits {
+            channel_ids,
+            models,
+        })
     }
 
     pub fn token_limit_reached(&self) -> bool {
@@ -100,7 +118,8 @@ pub struct ApiKeyUpdate<'a> {
 
 const SELECT_COLUMNS: &str = "id, name, key_hash, key_hash_v2, key_prefix, enabled, expires_at,
     last_used_at, allowed_channel_ids, allowed_models, token_limit, token_usage, daily_token_limit,
-    daily_token_usage, daily_usage_day, created_at";
+    daily_token_usage, daily_usage_day, reserved_tokens, reserved_daily_tokens, reserved_day,
+    created_at";
 
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<ApiKey>> {
     let query = format!("SELECT {SELECT_COLUMNS} FROM api_keys ORDER BY id DESC");
@@ -117,9 +136,8 @@ pub async fn find_by_key_hash(
     v2_hash: &str,
     legacy_hash: &str,
 ) -> sqlx::Result<Option<ApiKey>> {
-    let query = format!(
-        "SELECT {SELECT_COLUMNS} FROM api_keys WHERE key_hash_v2 = ?1 OR key_hash = ?2"
-    );
+    let query =
+        format!("SELECT {SELECT_COLUMNS} FROM api_keys WHERE key_hash_v2 = ?1 OR key_hash = ?2");
     sqlx::query_as(&query)
         .bind(v2_hash)
         .bind(legacy_hash)
@@ -240,6 +258,155 @@ where
     .execute(executor)
     .await?;
     Ok(())
+}
+
+/// Admission-time reservation. A single conditional UPDATE keeps the quota
+/// check and the counter increment atomic, so concurrent requests cannot all
+/// pass the same preimage (the TOCTOU window the asynchronous usage writer
+/// used to leave open).
+///
+/// `token_limit`/`daily_token_limit` that are NULL or `<= 0` mean "unlimited";
+/// the daily counters only apply to the UTC day they were recorded for.
+pub async fn reserve(
+    pool: &SqlitePool,
+    id: i64,
+    estimate: i64,
+    day: i64,
+    now: i64,
+) -> sqlx::Result<ReserveOutcome> {
+    let estimate = estimate.max(1);
+    let result = sqlx::query(
+        "UPDATE api_keys
+         SET reserved_tokens = reserved_tokens + ?1,
+             reserved_daily_tokens = CASE WHEN reserved_day = ?2
+                 THEN reserved_daily_tokens + ?1 ELSE ?1 END,
+             reserved_day = ?2,
+             reserved_at = ?3
+         WHERE id = ?4
+           AND enabled = 1
+           AND (token_limit IS NULL OR token_limit <= 0
+                OR token_usage + reserved_tokens + ?1 <= token_limit)
+           AND (daily_token_limit IS NULL OR daily_token_limit <= 0
+                OR (CASE WHEN daily_usage_day = ?2 THEN daily_token_usage ELSE 0 END)
+                   + (CASE WHEN reserved_day = ?2 THEN reserved_daily_tokens ELSE 0 END)
+                   + ?1 <= daily_token_limit)",
+    )
+    .bind(estimate)
+    .bind(day)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 1 {
+        return Ok(ReserveOutcome::Reserved);
+    }
+
+    // The UPDATE matched no row: the key is missing/disabled, or one of the
+    // quota predicates failed. Read the row to report the actionable reason.
+    let Some(row) = get(pool, id).await? else {
+        return Ok(ReserveOutcome::Disabled);
+    };
+    if row.enabled == 0 {
+        return Ok(ReserveOutcome::Disabled);
+    }
+    let token_limit = row.token_limit.unwrap_or(0);
+    if token_limit > 0
+        && row
+            .token_usage
+            .saturating_add(row.reserved_tokens)
+            .saturating_add(estimate)
+            > token_limit
+    {
+        return Ok(ReserveOutcome::TokenLimit);
+    }
+    let daily_limit = row.daily_token_limit.unwrap_or(0);
+    let daily_usage = if row.daily_usage_day == day {
+        row.daily_token_usage
+    } else {
+        0
+    };
+    let daily_reserved = if row.reserved_day == day {
+        row.reserved_daily_tokens
+    } else {
+        0
+    };
+    if daily_limit > 0
+        && daily_usage
+            .saturating_add(daily_reserved)
+            .saturating_add(estimate)
+            > daily_limit
+    {
+        return Ok(ReserveOutcome::DailyLimit);
+    }
+
+    // No predicate explains the miss (for example the row changed between the
+    // UPDATE and this read), so fail closed without reserving.
+    Ok(ReserveOutcome::TokenLimit)
+}
+
+/// Release a reservation. The daily counter is only decremented when the
+/// reservation still belongs to `day`; both counters never go below zero.
+/// Accepts any executor so settlement can share the usage-log transaction.
+pub async fn release_reservation<'e, E>(
+    executor: E,
+    id: i64,
+    tokens: i64,
+    day: i64,
+) -> sqlx::Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    if tokens <= 0 {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE api_keys SET
+            reserved_tokens = MAX(0, reserved_tokens - ?1),
+            reserved_daily_tokens = CASE WHEN reserved_day = ?2
+                THEN MAX(0, reserved_daily_tokens - ?1)
+                ELSE reserved_daily_tokens END
+         WHERE id = ?3",
+    )
+    .bind(tokens)
+    .bind(day)
+    .bind(id)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Drop every reservation. Called once at startup: reservations are in-memory
+/// admission state for a single process, so a restart means no request is
+/// in flight and every counter must start at zero.
+pub async fn reset_reservations(pool: &SqlitePool) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE api_keys SET
+            reserved_tokens = 0,
+            reserved_daily_tokens = 0,
+            reserved_day = 0,
+            reserved_at = NULL",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Clear reservations older than `cutoff_now_ms`. Covers crashes, cancelled
+/// streams and any path that failed to settle; returns the number of keys reset.
+pub async fn clear_stale_reservations(pool: &SqlitePool, cutoff_now_ms: i64) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        "UPDATE api_keys SET
+            reserved_tokens = 0,
+            reserved_daily_tokens = 0,
+            reserved_day = 0,
+            reserved_at = NULL
+         WHERE reserved_at IS NOT NULL AND reserved_at < ?",
+    )
+    .bind(cutoff_now_ms)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn delete(pool: &SqlitePool, id: i64) -> sqlx::Result<bool> {

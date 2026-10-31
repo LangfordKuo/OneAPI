@@ -80,6 +80,12 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
     let db = db::connect(&config).await?;
     let crypto = Arc::new(security::Crypto::load_or_create(&config.data_dir)?);
     admin::bootstrap(&db).await?;
+    // Reservations describe requests in flight in this process only. After a
+    // restart nothing can be in flight, so every counter must start at zero;
+    // otherwise a crash would leave quota pinned forever.
+    models::api_key::reset_reservations(&db)
+        .await
+        .context("failed to reset quota reservations")?;
     // Precompute the constant-cost dummy hash before any login can reach it.
     let _ = security::dummy_password_hash();
 
@@ -115,6 +121,7 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
 
     maintenance::spawn(state.clone());
     recovery::spawn(state.clone());
+    spawn_reservation_janitor(state.db.clone());
 
     let updates = state.updates.clone();
     let shutdown_updates = updates.clone();
@@ -189,6 +196,34 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// How long a reservation may be held before the janitor reclaims it. A stream
+/// can legitimately run for several minutes, so the cutoff is generous; the
+/// 60 second sweep bounds how much longer a leaked entry survives.
+const STALE_RESERVATION_MS: i64 = 30 * 60 * 1000;
+const RESERVATION_JANITOR_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Reclaim admission reservations left behind by crashes, cancelled requests or
+/// failed settlements. Failures are logged and retried on the next tick; a
+/// missing sweep only delays recovery, it never rejects a request.
+fn spawn_reservation_janitor(db: sqlx::SqlitePool) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(RESERVATION_JANITOR_INTERVAL);
+        loop {
+            interval.tick().await;
+            let cutoff = models::now_ms() - STALE_RESERVATION_MS;
+            match models::api_key::clear_stale_reservations(&db, cutoff).await {
+                Ok(0) => {}
+                Ok(keys) => {
+                    tracing::warn!(keys, "cleared stale quota reservations");
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to clear stale quota reservations");
+                }
+            }
+        }
+    });
 }
 
 #[cfg(unix)]

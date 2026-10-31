@@ -96,6 +96,10 @@ pub struct StreamJob {
     /// have failure state recorded; a healthy channel would otherwise pay for a
     /// no-op UPDATE (and its SQLite write lock) on every request.
     pub clear_failure_state: bool,
+    /// Admission reservation for this request. The terminal usage row settles
+    /// it; if the task ends before that row is written, dropping the job
+    /// releases it.
+    pub reservation: Option<usage::Reservation>,
 }
 
 /// Clamp upstream error text before it reaches the client, the usage log, or
@@ -219,7 +223,7 @@ async fn wait_for_upstream(
 }
 
 async fn run(
-    job: StreamJob,
+    mut job: StreamJob,
     tx: mpsc::Sender<Bytes>,
     ready: oneshot::Sender<Result<(), StreamFailure>>,
 ) {
@@ -605,10 +609,26 @@ async fn run(
         usage: &recorded_usage,
         latency_ms: job.started.elapsed().as_millis() as i64,
         first_token_ms: first_token_at.map(|at| at.duration_since(job.started).as_millis() as i64),
+        reserved_tokens: job
+            .reservation
+            .as_ref()
+            .map(usage::Reservation::tokens)
+            .unwrap_or(0),
+        reserved_day: job
+            .reservation
+            .as_ref()
+            .map(usage::Reservation::day)
+            .unwrap_or(0),
         created_at: models::now_ms(),
     };
 
     usage::record(&job.state, &record).await;
+
+    // The usage row owns settlement now; dropping the guard armed would release
+    // the same reservation a second time.
+    if let Some(mut reservation) = job.reservation.take() {
+        reservation.disarm();
+    }
 
     // Keep the response body open until persistence is done so a client that has
     // consumed the stream can immediately fetch a stored Responses object.
@@ -1092,11 +1112,7 @@ fn frame_error(protocol: Protocol, frame: &SseFrame) -> Option<(String, String)>
     // carries bytes. It must never be committed to the client as a stream.
     // Comment-only heartbeats (`: ping`) and `event:`-only frames are valid SSE
     // and must keep flowing.
-    let comment_only = frame
-        .raw
-        .iter()
-        .find(|byte| !byte.is_ascii_whitespace())
-        == Some(&b':');
+    let comment_only = frame.raw.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b':');
     if frame.data.trim().is_empty()
         && !frame.raw.is_empty()
         && frame.event.is_none()

@@ -203,7 +203,7 @@ pub async fn proxy_with_identity(
     let started = Instant::now();
     let deadline = started + REQUEST_TOTAL_BUDGET;
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let log = AttemptLog {
+    let mut log = AttemptLog {
         request_id: &request_id,
         api_key_id: identity.api_key_id,
         source: identity.source,
@@ -211,6 +211,7 @@ pub async fn proxy_with_identity(
         inbound,
         stream: streaming,
         started,
+        reservation: None,
     };
     let mut attempts = 0u32;
 
@@ -240,13 +241,6 @@ pub async fn proxy_with_identity(
         .and_then(|value| value.get("include_usage"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    // Local fallback used when a stream is interrupted before the final usage
-    // frame arrives or the upstream never reports usage at all.
-    let input_token_estimate = if streaming {
-        usage::estimate_request_tokens(&body)
-    } else {
-        0
-    };
 
     let mut client_request: Option<Value> = None;
     let mut response_id: Option<String> = None;
@@ -343,6 +337,34 @@ pub async fn proxy_with_identity(
         false
     };
 
+    // Admission estimate: the expanded body (Responses history included) plus
+    // the worst-case completion size. Computed after `expand_previous` so the
+    // reserved amount covers the history the upstream is actually asked to
+    // process, not just the client's final turn.
+    let input_estimate = usage::estimate_request_tokens(&body);
+    // Local fallback used when a stream is interrupted before the final usage
+    // frame arrives or the upstream never reports usage at all.
+    let input_token_estimate = if streaming { input_estimate } else { 0 };
+    let max_tokens = body
+        .get("max_tokens")
+        .or_else(|| body.get("max_completion_tokens"))
+        .or_else(|| body.get("max_output_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::from(defaults.default_max_tokens));
+    let reservation_estimate =
+        i64::try_from(input_estimate.saturating_add(max_tokens).max(1)).unwrap_or(i64::MAX);
+    let reservation_day = now_ms() / 86_400_000;
+    let mut reservation = match identity.api_key_id {
+        Some(api_key_id) => {
+            match usage::reserve(state, api_key_id, reservation_estimate, reservation_day).await {
+                Ok(reservation) => reservation,
+                Err(usage::ReserveError::Database(error)) => return Err(AppError::Database(error)),
+                Err(refused) => return Ok(reserve_error_response(inbound, &refused)),
+            }
+        }
+        None => None,
+    };
+
     let channels = state.cache.channels(&state.db).await?;
     let health = state.cache.channel_health();
     let candidates = select::candidates(
@@ -412,9 +434,16 @@ pub async fn proxy_with_identity(
             detail_request.clone(),
             headers,
             defaults,
+            reservation.take(),
+            reservation_estimate,
+            reservation_day,
         )
         .await;
     }
+
+    // The non-stream path settles the reservation through its terminal usage
+    // row (success or failover), so the log owns it from here on.
+    log.reservation = reservation;
 
     let mut last_channel: Option<i64> = None;
     let mut last_upstream_model: Option<String> = None;
@@ -815,7 +844,7 @@ pub async fn proxy_with_identity(
 
     finish_failover(
         state,
-        &log,
+        &mut log,
         attempts,
         detail_request.as_deref(),
         FailoverState {
@@ -852,10 +881,13 @@ async fn proxy_stream(
     detail_request: Option<String>,
     headers: &HeaderMap,
     defaults: models::setting::GatewayDefaults,
+    mut reservation: Option<usage::Reservation>,
+    reservation_estimate: i64,
+    reservation_day: i64,
 ) -> Result<Response, AppError> {
     // Only the admin Playground may see internal routing metadata.
     let expose_route_headers = identity.source == "playground";
-    let log = AttemptLog {
+    let mut log = AttemptLog {
         request_id,
         api_key_id: identity.api_key_id,
         source: identity.source,
@@ -863,6 +895,7 @@ async fn proxy_stream(
         inbound,
         stream: true,
         started,
+        reservation: None,
     };
     let mut attempts = 0u32;
     let mut last_channel: Option<i64> = None;
@@ -1133,6 +1166,7 @@ async fn proxy_stream(
             stream: byte_stream,
             _probe: probe,
             clear_failure_state,
+            reservation: reservation.take(),
         };
 
         match stream::start(job).await {
@@ -1150,15 +1184,41 @@ async fn proxy_stream(
                 last_message = failure.message.clone();
                 last_provider_json = failure.provider_json;
 
+                // `start` consumed the job, so an armed guard was released when
+                // the stream task exited before writing usage. Re-arm it for the
+                // remaining candidates; if the quota is gone the request simply
+                // continues unreserved (and will be rejected by its usage row).
+                let rearm_key = if reservation.is_none() {
+                    identity.api_key_id
+                } else {
+                    None
+                };
+                if let Some(api_key_id) = rearm_key {
+                    match usage::reserve(state, api_key_id, reservation_estimate, reservation_day)
+                        .await
+                    {
+                        Ok(value) => reservation = value,
+                        Err(error) => tracing::warn!(
+                            error = %error,
+                            request_id,
+                            "failed to re-reserve quota after a stream attempt failed"
+                        ),
+                    }
+                }
+
                 // Nothing was written downstream yet, so try the next channel.
                 continue;
             }
         }
     }
 
+    // No candidate committed: the failover row settles any reservation still
+    // held here, exactly like a successful row would.
+    log.reservation = reservation.take();
+
     finish_failover(
         state,
-        &log,
+        &mut log,
         attempts,
         detail_request.as_deref(),
         FailoverState {
@@ -1185,12 +1245,16 @@ struct AttemptLog<'a> {
     inbound: Protocol,
     stream: bool,
     started: Instant,
+    /// Admission reservation, settled by the usage row this log writes. Kept
+    /// here so every return path (success or any failover outcome) releases it
+    /// exactly once.
+    reservation: Option<usage::Reservation>,
 }
 
 impl AttemptLog<'_> {
     #[allow(clippy::too_many_arguments)]
     async fn record(
-        &self,
+        &mut self,
         state: &AppState,
         channel_id: Option<i64>,
         upstream_model: Option<&str>,
@@ -1200,6 +1264,10 @@ impl AttemptLog<'_> {
         error: Option<(&str, &str)>,
         usage: Usage,
     ) {
+        let (reserved_tokens, reserved_day) = match &self.reservation {
+            Some(reservation) => (reservation.tokens(), reservation.day()),
+            None => (0, 0),
+        };
         let record = UsageRecord {
             request_id: self.request_id,
             source: self.source,
@@ -1217,10 +1285,18 @@ impl AttemptLog<'_> {
             usage: &usage,
             latency_ms: self.started.elapsed().as_millis() as i64,
             first_token_ms: None,
+            reserved_tokens,
+            reserved_day,
             created_at: now_ms(),
         };
 
         usage::record(state, &record).await;
+
+        // The row now owns settlement; dropping it here would release a second
+        // time from under the writer.
+        if let Some(mut reservation) = self.reservation.take() {
+            reservation.disarm();
+        }
     }
 }
 
@@ -1246,7 +1322,7 @@ struct FailoverState {
 /// upstream rejected -> that upstream's status, otherwise 502.
 async fn finish_failover(
     state: &AppState,
-    log: &AttemptLog<'_>,
+    log: &mut AttemptLog<'_>,
     attempts: u32,
     detail_request: Option<&str>,
     failover: FailoverState,
@@ -1352,6 +1428,39 @@ async fn finish_failover(
         client_message,
         &failover.last_error_type,
     ))
+}
+
+/// Map a refused admission reservation to the protocol-shaped client error.
+/// Status codes mirror the pre-existing auth checks: lifetime quota is 403,
+/// daily quota is 429, and a key disabled between auth and admission is 401.
+fn reserve_error_response(protocol: Protocol, cause: &usage::ReserveError) -> Response {
+    match cause {
+        usage::ReserveError::TokenLimit => error::client_error(
+            protocol,
+            StatusCode::FORBIDDEN,
+            "API key token limit reached",
+            "permission_error",
+        ),
+        usage::ReserveError::DailyLimit => error::client_error(
+            protocol,
+            StatusCode::TOO_MANY_REQUESTS,
+            "API key daily token limit reached; it resets at 00:00 UTC",
+            "rate_limit_error",
+        ),
+        usage::ReserveError::Disabled => error::client_error(
+            protocol,
+            StatusCode::UNAUTHORIZED,
+            "invalid or missing API key",
+            "authentication_error",
+        ),
+        // Callers convert the database case to `AppError` instead.
+        usage::ReserveError::Database(_) => error::client_error(
+            protocol,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "quota service unavailable",
+            "api_error",
+        ),
+    }
 }
 
 /// Per-iteration limits shared by both failover loops. A `Some` value means the
