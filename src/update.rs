@@ -1,6 +1,6 @@
 use std::{fs, path::Path, sync::atomic::Ordering, time::Duration};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,127 @@ pub struct UpdateResult {
     pub message: String,
 }
 
+/// What failed during an update. The kind decides how loudly the UI reports it:
+/// transport problems are usually fixed by switching the update source, while
+/// integrity and replacement failures need manual inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateErrorKind {
+    /// Metadata or download could not be fetched from the update source.
+    Network,
+    /// The downloaded package or its checksum cannot be trusted.
+    Integrity,
+    /// This platform has no installable asset.
+    Platform,
+    /// The new binary could not be installed over the running one.
+    Replace,
+    /// The update directory or the database could not be used.
+    Storage,
+    /// The request cannot run now (already running, already current, container).
+    State,
+}
+
+impl UpdateErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpdateErrorKind::Network => "network",
+            UpdateErrorKind::Integrity => "integrity",
+            UpdateErrorKind::Platform => "platform",
+            UpdateErrorKind::Replace => "replace",
+            UpdateErrorKind::Storage => "storage",
+            UpdateErrorKind::State => "state",
+        }
+    }
+}
+
+/// A classified update failure. `hint` is the troubleshooting step shown to the
+/// administrator, so it names what to check instead of restating the error.
+#[derive(Debug)]
+pub struct UpdateError {
+    pub kind: UpdateErrorKind,
+    pub message: String,
+    pub hint: &'static str,
+}
+
+impl UpdateError {
+    fn network(message: impl Into<String>) -> Self {
+        Self {
+            kind: UpdateErrorKind::Network,
+            message: message.into(),
+            hint: "可在「设置 → 更新源」切换为国内加速后重试；若仍然失败，请检查服务器能否访问 GitHub 或代理地址。",
+        }
+    }
+
+    fn integrity(message: impl Into<String>) -> Self {
+        Self {
+            kind: UpdateErrorKind::Integrity,
+            message: message.into(),
+            hint:
+                "请切换更新源后重试；若仍失败，请手动下载发布包并核对 SHA256SUMS 后再替换二进制。",
+        }
+    }
+
+    fn platform(message: impl Into<String>) -> Self {
+        Self {
+            kind: UpdateErrorKind::Platform,
+            message: message.into(),
+            hint: "当前平台没有可用的发布包，请改用 Docker 镜像或手动下载对应平台的可执行文件。",
+        }
+    }
+
+    fn replace(message: impl Into<String>) -> Self {
+        Self {
+            kind: UpdateErrorKind::Replace,
+            message: message.into(),
+            hint: "请确认程序所在目录可写、磁盘空间充足、没有其他进程占用该二进制；容器部署请改为拉取新镜像。",
+        }
+    }
+
+    fn storage(message: impl Into<String>) -> Self {
+        Self {
+            kind: UpdateErrorKind::Storage,
+            message: message.into(),
+            hint: "请检查数据目录下 updates/ 的写入权限与磁盘剩余空间后重试。",
+        }
+    }
+
+    fn database(message: impl Into<String>) -> Self {
+        Self {
+            kind: UpdateErrorKind::Storage,
+            message: message.into(),
+            hint: "读取更新设置失败，请检查数据库是否可读写（见仪表盘「数据库」状态）；必要时从备份恢复后重试。",
+        }
+    }
+
+    fn state(message: impl Into<String>) -> Self {
+        Self {
+            kind: UpdateErrorKind::State,
+            message: message.into(),
+            hint: "请稍后重试；也可以在发布页手动下载安装包完成更新。",
+        }
+    }
+
+    /// `warning` is recoverable by retrying or switching the update source;
+    /// `error` means the install itself failed and needs manual checks.
+    pub fn severity(&self) -> &'static str {
+        match self.kind {
+            UpdateErrorKind::Network | UpdateErrorKind::Platform | UpdateErrorKind::State => {
+                "warning"
+            }
+            UpdateErrorKind::Integrity | UpdateErrorKind::Replace | UpdateErrorKind::Storage => {
+                "error"
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for UpdateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UpdateError {}
+
 #[derive(Debug, Deserialize)]
 struct GithubRelease {
     tag_name: String,
@@ -55,12 +176,17 @@ struct GithubAsset {
 }
 
 pub async fn check(state: &AppState) -> Result<UpdateInfo> {
-    let source = configured_source(state).await?;
+    let source = configured_source(state)
+        .await
+        .map_err(|error| UpdateError::database(error.to_string()))?;
     let client = client()?;
-    let release = fetch_release(&client, &source).await?;
+    let release = fetch_release(&client, &source)
+        .await
+        .map_err(|error| UpdateError::network(error.to_string()))?;
 
     let current = current_version()?;
-    let latest = parse_version(&release.tag_name)?;
+    let latest = parse_version(&release.tag_name)
+        .map_err(|error| UpdateError::network(error.to_string()))?;
     let (asset_name, asset_url, checksums_url) = select_assets(&release, &source)?;
 
     Ok(UpdateInfo {
@@ -79,11 +205,11 @@ pub async fn check(state: &AppState) -> Result<UpdateInfo> {
 
 pub async fn apply(state: &AppState) -> Result<UpdateResult> {
     if self_update_disabled_in_container() {
-        bail!("self-update is disabled inside a container; pull the new image instead");
+        return Err(UpdateError::state("容器内不支持自动更新，请拉取新镜像后重建容器").into());
     }
 
     if state.updates.in_progress.swap(true, Ordering::SeqCst) {
-        bail!("an update is already in progress");
+        return Err(UpdateError::state("已有更新正在进行，请稍后再试").into());
     }
 
     let result = apply_inner(state).await;
@@ -96,57 +222,71 @@ pub async fn apply(state: &AppState) -> Result<UpdateResult> {
 async fn apply_inner(state: &AppState) -> Result<UpdateResult> {
     let info = check(state).await?;
     if !info.update_available {
-        bail!("already on the latest version ({})", info.current_version);
+        return Err(
+            UpdateError::state(format!("当前已是最新版本（{}）", info.current_version)).into(),
+        );
     }
 
     let asset_name = info
         .asset_name
         .clone()
-        .ok_or_else(|| anyhow!("this platform is not supported by the latest release"))?;
-    validate_asset_name(&asset_name)?;
+        .ok_or_else(|| UpdateError::platform("最新版本没有提供当前平台的安装包"))?;
+    validate_asset_name(&asset_name).map_err(|error| UpdateError::integrity(error.to_string()))?;
     let asset_url = info
         .asset_url
         .clone()
-        .ok_or_else(|| anyhow!("release asset URL is missing"))?;
+        .ok_or_else(|| UpdateError::integrity("发布信息缺少安装包下载地址"))?;
     let checksums_url = info
         .checksums_url
         .clone()
-        .ok_or_else(|| anyhow!("release does not provide SHA256SUMS; refusing to update"))?;
+        .ok_or_else(|| UpdateError::integrity("发布页缺少 SHA256SUMS，已拒绝更新"))?;
 
     let client = client()?;
-    let checksums = download(&client, &checksums_url).await?;
-    let checksums = String::from_utf8(checksums).context("SHA256SUMS is not valid UTF-8")?;
+    let checksums = download(&client, &checksums_url)
+        .await
+        .map_err(|error| UpdateError::network(error.to_string()))?;
+    let checksums = String::from_utf8(checksums)
+        .map_err(|_| UpdateError::integrity("SHA256SUMS 不是合法的 UTF-8 文本"))?;
     let expected = checksum_for(&checksums, &asset_name)
-        .ok_or_else(|| anyhow!("SHA256SUMS does not contain {asset_name}"))?;
-    let bytes = download(&client, &asset_url).await?;
+        .ok_or_else(|| UpdateError::integrity(format!("SHA256SUMS 中找不到 {asset_name}")))?;
+    let bytes = download(&client, &asset_url)
+        .await
+        .map_err(|error| UpdateError::network(error.to_string()))?;
     let actual = sha256_hex(&bytes);
     if actual != expected {
-        bail!("checksum mismatch for {asset_name}; refusing to update");
+        return Err(
+            UpdateError::integrity(format!("{asset_name} 的校验和不匹配，已拒绝更新")).into(),
+        );
     }
 
     let temp_dir = state.config.data_dir.join("updates");
-    fs::create_dir_all(&temp_dir)
-        .with_context(|| format!("failed to create {}", temp_dir.display()))?;
+    fs::create_dir_all(&temp_dir).map_err(|error| {
+        UpdateError::storage(format!("无法创建更新目录 {}：{error}", temp_dir.display()))
+    })?;
     let archive = temp_dir.join(&asset_name);
-    fs::write(&archive, &bytes)
-        .with_context(|| format!("failed to write {}", archive.display()))?;
+    fs::write(&archive, &bytes).map_err(|error| {
+        UpdateError::storage(format!("无法写入 {}：{error}", archive.display()))
+    })?;
 
     let new_binary = temp_dir.join(if cfg!(windows) {
         "oneapi.exe"
     } else {
         "oneapi"
     });
-    extract_binary(&archive, &new_binary)?;
+    extract_binary(&archive, &new_binary)
+        .map_err(|error| UpdateError::integrity(format!("安装包解压失败：{error}")))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&new_binary, fs::Permissions::from_mode(0o755))
-            .context("failed to mark the new binary executable")?;
+            .map_err(|error| UpdateError::replace(format!("无法设置新二进制权限：{error}")))?;
     }
 
-    let executable = std::env::current_exe().context("failed to locate current executable")?;
-    self_replace::self_replace(&new_binary).context("failed to replace the running binary")?;
+    let executable = std::env::current_exe()
+        .map_err(|error| UpdateError::replace(format!("无法定位当前可执行文件：{error}")))?;
+    self_replace::self_replace(&new_binary)
+        .map_err(|error| UpdateError::replace(format!("替换运行中的二进制失败：{error}")))?;
     if let Ok(mut slot) = state.updates.restart_exe.lock() {
         *slot = Some(executable);
     }
@@ -172,7 +312,7 @@ async fn apply_inner(state: &AppState) -> Result<UpdateResult> {
 async fn configured_source(state: &AppState) -> Result<String> {
     let value = setting::get(&state.db, "update_source")
         .await
-        .context("failed to read update source setting")?;
+        .context("无法读取更新源设置")?;
     Ok(match value.as_deref() {
         Some("ghproxy") => "ghproxy".to_string(),
         _ => "github".to_string(),
@@ -194,7 +334,7 @@ fn client() -> Result<Client> {
             }
         }))
         .build()
-        .context("failed to build update HTTP client")
+        .context("无法创建更新 HTTP 客户端")
 }
 
 async fn fetch_release(client: &Client, source: &str) -> Result<GithubRelease> {
@@ -204,13 +344,13 @@ async fn fetch_release(client: &Client, source: &str) -> Result<GithubRelease> {
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .with_context(|| format!("failed to query update metadata from {source}"))?;
+        .with_context(|| format!("无法从 {source} 获取更新信息"))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         bail!(
-            "update metadata request failed with {status}: {}",
+            "更新信息请求失败（{status}）：{}",
             body.chars().take(200).collect::<String>()
         );
     }
@@ -218,7 +358,7 @@ async fn fetch_release(client: &Client, source: &str) -> Result<GithubRelease> {
     response
         .json::<GithubRelease>()
         .await
-        .context("failed to parse GitHub release metadata")
+        .context("无法解析 GitHub 发布信息")
 }
 
 fn api_url(source: &str) -> Result<String> {
@@ -257,7 +397,7 @@ fn validate_asset_name(name: &str) -> Result<()> {
         || name.chars().any(char::is_control)
         || Path::new(name).file_name().and_then(|part| part.to_str()) != Some(name);
     if invalid {
-        bail!("refusing to use update asset name `{name}`");
+        bail!("拒绝使用更新包文件名 `{name}`");
     }
     Ok(())
 }
@@ -306,12 +446,12 @@ fn platform_asset() -> Option<(&'static str, &'static str)> {
 }
 
 fn current_version() -> Result<Version> {
-    Version::parse(env!("CARGO_PKG_VERSION")).context("current binary version is not valid semver")
+    Version::parse(env!("CARGO_PKG_VERSION")).context("当前版本号不是合法的 semver")
 }
 
 fn parse_version(tag: &str) -> Result<Version> {
     Version::parse(tag.trim_start_matches('v'))
-        .with_context(|| format!("release tag `{tag}` is not a valid semver version"))
+        .with_context(|| format!("发布标签 `{tag}` 不是合法的版本号"))
 }
 
 fn checksum_for(checksums: &str, asset_name: &str) -> Option<String> {
@@ -338,23 +478,23 @@ async fn download(client: &Client, url: &str) -> Result<Vec<u8>> {
         .get(url)
         .send()
         .await
-        .with_context(|| format!("failed to download {url}"))?;
+        .with_context(|| format!("下载失败：{url}"))?;
 
     if !response.status().is_success() {
-        bail!("download failed with {} for {url}", response.status());
+        bail!("下载失败（{}）：{url}", response.status());
     }
     if let Some(length) = response.content_length() {
         if length > MAX_DOWNLOAD_BYTES {
-            bail!("download is too large ({length} bytes)");
+            bail!("安装包过大（{length} 字节）");
         }
     }
 
     let bytes = response
         .bytes()
         .await
-        .with_context(|| format!("failed to read {url}"))?;
+        .with_context(|| format!("读取下载内容失败：{url}"))?;
     if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
-        bail!("download is too large ({} bytes)", bytes.len());
+        bail!("安装包过大（{} 字节）", bytes.len());
     }
     Ok(bytes.to_vec())
 }
@@ -362,54 +502,50 @@ async fn download(client: &Client, url: &str) -> Result<Vec<u8>> {
 #[cfg(unix)]
 fn extract_binary(archive: &Path, output: &Path) -> Result<()> {
     let file =
-        fs::File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
+        fs::File::open(archive).with_context(|| format!("无法打开升级包 {}", archive.display()))?;
     let decoder = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
 
-    for entry in archive.entries().context("failed to read tar archive")? {
+    for entry in archive.entries().context("无法读取 tar 升级包")? {
         let mut entry = entry.context("failed to read tar entry")?;
-        let path = entry.path().context("tar entry has an invalid path")?;
+        let path = entry.path().context("tar 条目路径非法")?;
         if path.file_name().and_then(|name| name.to_str()) == Some("oneapi") {
             let mut output = fs::File::create(output)
-                .with_context(|| format!("failed to create {}", output.display()))?;
-            std::io::copy(&mut entry, &mut output)
-                .context("failed to extract the oneapi binary")?;
+                .with_context(|| format!("无法创建 {}", output.display()))?;
+            std::io::copy(&mut entry, &mut output).context("解压 oneapi 可执行文件失败")?;
             return Ok(());
         }
     }
 
-    bail!("archive does not contain the oneapi binary")
+    bail!("升级包中不包含 oneapi 可执行文件")
 }
 
 #[cfg(windows)]
 fn extract_binary(archive: &Path, output: &Path) -> Result<()> {
     let file =
-        fs::File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
-    let mut archive = zip::ZipArchive::new(file).context("failed to read zip archive")?;
+        fs::File::open(archive).with_context(|| format!("无法打开升级包 {}", archive.display()))?;
+    let mut archive = zip::ZipArchive::new(file).context("无法读取 zip 升级包")?;
 
     for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .context("failed to read zip entry")?;
+        let mut entry = archive.by_index(index).context("无法读取 zip 条目")?;
         if Path::new(entry.name())
             .file_name()
             .and_then(|name| name.to_str())
             == Some("oneapi.exe")
         {
             let mut output = fs::File::create(output)
-                .with_context(|| format!("failed to create {}", output.display()))?;
-            std::io::copy(&mut entry, &mut output)
-                .context("failed to extract the oneapi.exe binary")?;
+                .with_context(|| format!("无法创建 {}", output.display()))?;
+            std::io::copy(&mut entry, &mut output).context("解压 oneapi.exe 失败")?;
             return Ok(());
         }
     }
 
-    bail!("archive does not contain the oneapi.exe binary")
+    bail!("升级包中不包含 oneapi.exe")
 }
 
 #[cfg(not(any(unix, windows)))]
 fn extract_binary(_archive: &Path, _output: &Path) -> Result<()> {
-    bail!("self-update is not supported on this platform")
+    bail!("当前平台不支持自动更新")
 }
 
 fn self_update_disabled_in_container() -> bool {
@@ -421,4 +557,37 @@ fn self_update_disabled_in_container() -> bool {
     }
 
     Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_failures_are_warnings() {
+        let error = UpdateError::network("connection refused");
+        assert_eq!(error.kind.as_str(), "network");
+        assert_eq!(error.severity(), "warning");
+        // The hint must actually point at the fix the UI promises.
+        assert!(error.hint.contains("更新源"));
+    }
+
+    #[test]
+    fn install_failures_are_errors() {
+        for error in [
+            UpdateError::integrity("checksum mismatch"),
+            UpdateError::replace("self_replace failed"),
+            UpdateError::storage("updates dir is read-only"),
+            UpdateError::database("settings unavailable"),
+        ] {
+            assert_eq!(error.severity(), "error");
+            assert!(!error.hint.is_empty());
+        }
+    }
+
+    #[test]
+    fn request_state_failures_stay_warnings() {
+        assert_eq!(UpdateError::state("already current").severity(), "warning");
+        assert_eq!(UpdateError::platform("no asset").severity(), "warning");
+    }
 }

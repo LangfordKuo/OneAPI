@@ -1,7 +1,16 @@
+/** Extra fields the backend may attach to `error` for actionable failures. */
+export interface ApiErrorDetails {
+  type?: string;
+  severity?: 'warning' | 'error' | string;
+  kind?: string;
+  hint?: string;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly details?: ApiErrorDetails,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -42,7 +51,8 @@ function isAuthPath(path: string): boolean {
   return (
     path.startsWith('/api/auth/login') ||
     path.startsWith('/api/auth/me') ||
-    path.startsWith('/api/auth/password')
+    path.startsWith('/api/auth/password') ||
+    path.startsWith('/api/auth/account')
   );
 }
 
@@ -76,13 +86,17 @@ export async function requestRaw(
     }
 
     let message = response.statusText || `HTTP ${response.status}`;
+    let details: ApiErrorDetails | undefined;
     try {
-      const body = (await response.json()) as { error?: { message?: string } };
+      const body = (await response.json()) as {
+        error?: { message?: string } & ApiErrorDetails;
+      };
       message = body.error?.message ?? message;
+      details = body.error;
     } catch {
       // Response body is not JSON; keep the status text.
     }
-    throw new ApiError(response.status, message);
+    throw new ApiError(response.status, message, details);
   }
 
   return response;

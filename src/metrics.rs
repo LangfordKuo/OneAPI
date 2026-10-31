@@ -19,6 +19,23 @@ const SHARDS: usize = 16;
 pub struct LiveMetrics {
     global: ShardedWindow,
     channels: [RwLock<HashMap<i64, Arc<ShardedWindow>>>; SHARDS],
+    /// Gateway requests currently producing output. The snapshot reports it so
+    /// the dashboard can show how many conversations run at the same time.
+    active_sessions: AtomicUsize,
+}
+
+/// One in-flight gateway session. The counter goes down when the guard is
+/// dropped, so a failed request or a cancelled stream releases its slot on
+/// every exit path without the callers having to remember it.
+#[derive(Debug)]
+pub struct SessionGuard {
+    metrics: Arc<LiveMetrics>,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.metrics.active_sessions.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Instantaneous rate with one-second buckets. `rate(second)` reports the tokens
@@ -140,12 +157,24 @@ pub struct ChannelRate {
 pub struct LiveSnapshot {
     pub timestamp: i64,
     pub global_tok_s: f64,
+    /// Number of gateway requests currently producing output (streams plus
+    /// in-flight non-streaming requests).
+    pub active_sessions: usize,
     pub channels: Vec<ChannelRate>,
 }
 
 impl LiveMetrics {
     fn shard_index(channel_id: i64) -> usize {
         channel_id.rem_euclid(SHARDS as i64) as usize
+    }
+
+    /// Marks the start of a gateway session. Hold the guard for the whole
+    /// request; dropping it returns the counter to its previous value.
+    pub fn session(self: &Arc<Self>) -> SessionGuard {
+        self.active_sessions.fetch_add(1, Ordering::Relaxed);
+        SessionGuard {
+            metrics: self.clone(),
+        }
     }
 
     pub fn add_tokens(&self, channel_id: Option<i64>, tokens: u64) {
@@ -221,6 +250,7 @@ impl LiveMetrics {
         LiveSnapshot {
             timestamp: second * 1000,
             global_tok_s: round_one(self.global.rate(second)),
+            active_sessions: self.active_sessions.load(Ordering::Relaxed),
             channels: rates,
         }
     }
@@ -228,4 +258,24 @@ impl LiveMetrics {
 
 fn round_one(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_guard_tracks_active_requests() {
+        let metrics = Arc::new(LiveMetrics::default());
+        assert_eq!(metrics.snapshot_at(0).active_sessions, 0);
+
+        let first = metrics.session();
+        let second = metrics.session();
+        assert_eq!(metrics.snapshot_at(0).active_sessions, 2);
+
+        drop(first);
+        assert_eq!(metrics.snapshot_at(0).active_sessions, 1);
+        drop(second);
+        assert_eq!(metrics.snapshot_at(0).active_sessions, 0);
+    }
 }

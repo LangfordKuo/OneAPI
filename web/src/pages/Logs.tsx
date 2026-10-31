@@ -460,127 +460,125 @@ export default function Logs() {
                 />
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="whitespace-nowrap">时间</TableHead>
-                      <TableHead className="hidden 2xl:table-cell">
-                        请求 ID
-                      </TableHead>
-                      <TableHead>模型</TableHead>
-                      <TableHead className="hidden md:table-cell">协议</TableHead>
-                      <TableHead className="hidden lg:table-cell">来源</TableHead>
-                      <TableHead className="hidden lg:table-cell">渠道</TableHead>
-                      <TableHead className="hidden 2xl:table-cell">
-                        API Key
-                      </TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead className="hidden 2xl:table-cell">模式</TableHead>
-                      <TableHead className="hidden sm:table-cell">Tokens</TableHead>
-                      <TableHead>总耗时</TableHead>
-                      <TableHead className="hidden md:table-cell">
-                        首字延迟
-                      </TableHead>
-                      <TableHead className="hidden 2xl:table-cell">速度</TableHead>
-                      <TableHead className="hidden 2xl:table-cell">尝试</TableHead>
-                      <TableHead>错误</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {logs.map((entry) => (
-                      <TableRow
-                        key={entry.id}
-                        className="cursor-pointer"
-                        onClick={() => setSelected(entry)}
-                      >
-                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                          {formatDateTime(entry.created_at)}
-                        </TableCell>
-                        <TableCell className="hidden 2xl:table-cell">
-                          <span
-                            className="font-mono text-xs text-muted-foreground"
-                            title={entry.request_id}
-                          >
-                            {entry.request_id.slice(0, 12)}…
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="whitespace-nowrap">时间</TableHead>
+                    <TableHead>
+                      请求 ID
+                    </TableHead>
+                    <TableHead>模型</TableHead>
+                    <TableHead>协议</TableHead>
+                    <TableHead>来源</TableHead>
+                    <TableHead>渠道</TableHead>
+                    <TableHead>
+                      API Key
+                    </TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead>模式</TableHead>
+                    <TableHead>Tokens</TableHead>
+                    <TableHead>总耗时</TableHead>
+                    <TableHead>
+                      首字延迟
+                    </TableHead>
+                    <TableHead>速度</TableHead>
+                    <TableHead>尝试</TableHead>
+                    <TableHead>错误</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {logs.map((entry) => (
+                    <TableRow
+                      key={entry.id}
+                      className="cursor-pointer"
+                      onClick={() => setSelected(entry)}
+                    >
+                      <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                        {formatDateTime(entry.created_at)}
+                      </TableCell>
+                      <TableCell>
+                        <span
+                          className="font-mono text-xs text-muted-foreground"
+                          title={entry.request_id}
+                        >
+                          {entry.request_id.slice(0, 12)}…
+                        </span>
+                      </TableCell>
+                      <TableCell className="max-w-[160px] truncate font-mono text-xs">
+                        {entry.model}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1 whitespace-nowrap">
+                          <ProtocolBadge protocol={entry.inbound_protocol} />
+                          <span className="text-xs text-muted-foreground">
+                            →
                           </span>
-                        </TableCell>
-                        <TableCell className="max-w-[160px] truncate font-mono text-xs">
-                          {entry.model}
-                        </TableCell>
-                        <TableCell className="hidden md:table-cell">
-                          <div className="flex items-center gap-1 whitespace-nowrap">
-                            <ProtocolBadge protocol={entry.inbound_protocol} />
-                            <span className="text-xs text-muted-foreground">
-                              →
-                            </span>
-                            <ProtocolBadge protocol={entry.upstream_protocol} />
-                          </div>
-                        </TableCell>
-                        <TableCell className="hidden lg:table-cell">
-                          <SourceBadge source={entry.source} />
-                        </TableCell>
-                        <TableCell className="hidden max-w-[140px] truncate text-xs lg:table-cell">
-                          {entry.channel_name ??
-                            (entry.channel_id ? `#${entry.channel_id}` : '-')}
-                        </TableCell>
-                        <TableCell className="hidden max-w-[130px] truncate text-xs 2xl:table-cell">
-                          {entry.api_key_name ??
-                            (entry.api_key_id ? `#${entry.api_key_id}` : '-')}
-                        </TableCell>
-                        <TableCell>
-                          <StatusCodeBadge code={entry.status_code} />
-                        </TableCell>
-                        <TableCell className="hidden 2xl:table-cell">
-                          <StreamBadge stream={entry.stream} />
-                        </TableCell>
-                        <TableCell
-                          className="hidden whitespace-nowrap text-xs tabular-nums sm:table-cell"
-                          title={`输入 ${formatNumber(entry.prompt_tokens)} / 输出 ${formatNumber(
-                            entry.completion_tokens,
-                          )}`}
-                        >
-                          {formatTokens(entry.total_tokens)}
-                        </TableCell>
-                        <TableCell
-                          className="whitespace-nowrap text-xs tabular-nums"
-                          title="请求开始到响应结束"
-                        >
-                          {formatSeconds(entry.latency_ms)}
-                        </TableCell>
-                        <TableCell
-                          className="hidden whitespace-nowrap text-xs tabular-nums md:table-cell"
-                          title="首个可见事件（思考或正文）"
-                        >
-                          {formatSeconds(entry.first_token_ms)}
-                        </TableCell>
-                        <TableCell
-                          className="hidden whitespace-nowrap text-xs tabular-nums 2xl:table-cell"
-                          title="输出 tokens ÷（总耗时 − 首字延迟）"
-                        >
-                          {formatTokensPerSecond(entry.tokens_per_second)}
-                        </TableCell>
-                        <TableCell className="hidden text-xs tabular-nums 2xl:table-cell">
-                          {entry.attempts}
-                        </TableCell>
-                        <TableCell className="max-w-[200px] truncate text-xs">
-                          {entry.error_message ? (
-                            <span
-                              className="text-destructive"
-                              title={entry.error_message}
-                            >
-                              {entry.error_type ?? 'error'}:{' '}
-                              {entry.error_message}
-                            </span>
-                          ) : (
-                            '-'
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
+                          <ProtocolBadge protocol={entry.upstream_protocol} />
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <SourceBadge source={entry.source} />
+                      </TableCell>
+                      <TableCell className="max-w-[140px] truncate text-xs">
+                        {entry.channel_name ??
+                          (entry.channel_id ? `#${entry.channel_id}` : '-')}
+                      </TableCell>
+                      <TableCell className="max-w-[130px] truncate text-xs">
+                        {entry.api_key_name ??
+                          (entry.api_key_id ? `#${entry.api_key_id}` : '-')}
+                      </TableCell>
+                      <TableCell>
+                        <StatusCodeBadge code={entry.status_code} />
+                      </TableCell>
+                      <TableCell>
+                        <StreamBadge stream={entry.stream} />
+                      </TableCell>
+                      <TableCell
+                        className="whitespace-nowrap text-xs tabular-nums"
+                        title={`输入 ${formatNumber(entry.prompt_tokens)} / 输出 ${formatNumber(
+                          entry.completion_tokens,
+                        )}`}
+                      >
+                        {formatTokens(entry.total_tokens)}
+                      </TableCell>
+                      <TableCell
+                        className="whitespace-nowrap text-xs tabular-nums"
+                        title="请求开始到响应结束"
+                      >
+                        {formatSeconds(entry.latency_ms)}
+                      </TableCell>
+                      <TableCell
+                        className="whitespace-nowrap text-xs tabular-nums"
+                        title="首个可见事件（思考或正文）"
+                      >
+                        {formatSeconds(entry.first_token_ms)}
+                      </TableCell>
+                      <TableCell
+                        className="whitespace-nowrap text-xs tabular-nums"
+                        title="输出 tokens ÷（总耗时 − 首字延迟）"
+                      >
+                        {formatTokensPerSecond(entry.tokens_per_second)}
+                      </TableCell>
+                      <TableCell className="text-xs tabular-nums">
+                        {entry.attempts}
+                      </TableCell>
+                      <TableCell className="max-w-[200px] truncate text-xs">
+                        {entry.error_message ? (
+                          <span
+                            className="text-destructive"
+                            title={entry.error_message}
+                          >
+                            {entry.error_type ?? 'error'}:{' '}
+                            {entry.error_message}
+                          </span>
+                        ) : (
+                          '-'
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
             )}
 
             <div className="px-4 pb-4">

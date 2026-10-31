@@ -25,6 +25,7 @@ const Channels = lazy(() => import('./pages/Channels'));
 const Keys = lazy(() => import('./pages/Keys'));
 const Logs = lazy(() => import('./pages/Logs'));
 const Playground = lazy(() => import('./pages/Playground'));
+const Account = lazy(() => import('./pages/Account'));
 const SettingsPage = lazy(() => import('./pages/Settings'));
 
 function CenteredShell({ children }: { children: ReactNode }) {
@@ -154,6 +155,7 @@ export default function App() {
             <Route path="/keys" element={<Keys />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/playground" element={<Playground />} />
+            <Route path="/account" element={<Account />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

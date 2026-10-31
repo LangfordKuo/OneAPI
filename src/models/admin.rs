@@ -58,3 +58,12 @@ pub async fn update_password(
         .await?;
     Ok(())
 }
+
+pub async fn update_username(pool: &SqlitePool, admin_id: i64, username: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE admin SET username = ? WHERE id = ?")
+        .bind(username)
+        .bind(admin_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}

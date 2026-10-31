@@ -7,7 +7,7 @@ import {
   PlugZap,
   Trash2,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '@/api/client';
 import type {
@@ -63,7 +63,6 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { useLiveMetrics } from '@/hooks/useLiveMetrics';
 import { errorMessage } from '@/lib/error';
 
 
@@ -346,12 +345,6 @@ function channelModels(channel: Channel): string[] {
 
 export default function Channels() {
   const queryClient = useQueryClient();
-  const live = useLiveMetrics();
-  const liveRates = useMemo(
-    () => new Map(live.channels.map((item) => [item.channel_id, item.tok_s])),
-    [live],
-  );
-
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Channel | null>(null);
   const [draft, setDraft] = useState<ChannelDraft>(emptyDraft);
@@ -641,22 +634,10 @@ export default function Channels() {
         title="渠道"
         description="同一个模型可以配置多个渠道，请求会按优先级和权重路由。"
         actions={
-          <>
-            <Badge
-              variant="outline"
-              className={
-                live.global_tok_s > 0
-                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-                  : 'text-muted-foreground'
-              }
-            >
-              全站实时 {live.global_tok_s.toFixed(1)} tok/s
-            </Badge>
-            <Button onClick={openCreate}>
-              <Plus />
-              新建渠道
-            </Button>
-          </>
+          <Button onClick={openCreate}>
+            <Plus />
+            新建渠道
+          </Button>
         }
       />
 
@@ -696,15 +677,11 @@ export default function Channels() {
                       优先级 / 权重
                     </TableHead>
                     <TableHead>状态</TableHead>
-                    <TableHead className="hidden lg:table-cell">
-                      实时 tok/s
-                    </TableHead>
                     <TableHead className="text-right">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {channels.map((channel) => {
-                    const rate = liveRates.get(channel.id) ?? 0;
                     const models = channelModels(channel);
                     return (
                       <TableRow key={channel.id}>
@@ -762,18 +739,6 @@ export default function Channels() {
                               {channel.last_error}
                             </p>
                           ) : null}
-                        </TableCell>
-                        <TableCell className="hidden lg:table-cell">
-                          <Badge
-                            variant="outline"
-                            className={
-                              rate > 0
-                                ? 'border-emerald-500/30 bg-emerald-500/10 font-mono text-emerald-700 dark:text-emerald-300'
-                                : 'font-mono text-muted-foreground'
-                            }
-                          >
-                            {rate.toFixed(1)} tok/s
-                          </Badge>
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center justify-end gap-1">

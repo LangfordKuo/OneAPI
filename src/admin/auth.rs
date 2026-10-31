@@ -279,21 +279,14 @@ pub struct ChangePasswordInput {
     pub new_password: String,
 }
 
-pub async fn change_password(
-    State(state): State<AppState>,
-    session: AdminSession,
-    jar: CookieJar,
-    client_addr: ClientAddr,
-    Json(input): Json<ChangePasswordInput>,
-) -> Result<(CookieJar, Json<AdminOutput>), AppError> {
-    let ChangePasswordInput {
-        current_password,
-        new_password,
-    } = input;
-    // Wipe both plaintext passwords when this handler returns.
-    let current_password = Zeroizing::new(current_password);
-    let new_password = Zeroizing::new(new_password);
-
+/// Verify the administrator's current password, sharing the login limiter so
+/// both password and username changes are rate limited against guessing.
+async fn verify_current_password(
+    state: &AppState,
+    session: &AdminSession,
+    client_addr: &ClientAddr,
+    current_password: &str,
+) -> Result<(), AppError> {
     let client_ip = client_addr
         .0
         .map(|ip| ip.to_string())
@@ -317,6 +310,25 @@ pub async fn change_password(
         return Err(AppError::Unauthorized);
     }
     state.login_limiter.record_success(&limiter_key);
+    Ok(())
+}
+
+pub async fn change_password(
+    State(state): State<AppState>,
+    session: AdminSession,
+    jar: CookieJar,
+    client_addr: ClientAddr,
+    Json(input): Json<ChangePasswordInput>,
+) -> Result<(CookieJar, Json<AdminOutput>), AppError> {
+    let ChangePasswordInput {
+        current_password,
+        new_password,
+    } = input;
+    // Wipe both plaintext passwords when this handler returns.
+    let current_password = Zeroizing::new(current_password);
+    let new_password = Zeroizing::new(new_password);
+
+    verify_current_password(&state, &session, &client_addr, current_password.as_str()).await?;
 
     if let Some(violation) = security::password_violation(new_password.as_str()) {
         return Err(AppError::BadRequest(format!("new password {violation}")));
@@ -330,6 +342,95 @@ pub async fn change_password(
 
     let jar = issue_session(&state, jar, session.admin.id).await?;
     Ok((jar, Json(AdminOutput::from(&session.admin))))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangeAccountInput {
+    pub current_password: String,
+    /// New username; omitted when only the password changes.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// New password; omitted when only the username changes.
+    #[serde(default)]
+    pub new_password: Option<String>,
+}
+
+/// Update the administrator's username and/or password after re-verifying the
+/// current password.
+pub async fn change_account(
+    State(state): State<AppState>,
+    session: AdminSession,
+    jar: CookieJar,
+    client_addr: ClientAddr,
+    Json(input): Json<ChangeAccountInput>,
+) -> Result<(CookieJar, Json<AdminOutput>), AppError> {
+    let current_password = Zeroizing::new(input.current_password);
+    let username = input
+        .username
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    // An empty password field means "leave it unchanged".
+    let new_password = input
+        .new_password
+        .filter(|value| !value.is_empty())
+        .map(Zeroizing::new);
+
+    if username.is_none() && new_password.is_none() {
+        return Err(AppError::BadRequest(
+            "username or new_password is required".to_string(),
+        ));
+    }
+
+    // Verify first so validation errors never leak whether the supplied
+    // current password was correct.
+    verify_current_password(&state, &session, &client_addr, current_password.as_str()).await?;
+
+    if let Some(username) = username.as_deref() {
+        // Bound the value the same way login does; control characters would
+        // corrupt the admin UI and the limiter key.
+        if username.chars().count() > 64 {
+            return Err(AppError::BadRequest("username is too long".to_string()));
+        }
+        if username.chars().any(char::is_control) {
+            return Err(AppError::BadRequest(
+                "username must not contain control characters".to_string(),
+            ));
+        }
+    }
+    if let Some(password) = new_password.as_deref() {
+        if let Some(violation) = security::password_violation(password) {
+            return Err(AppError::BadRequest(format!("new password {violation}")));
+        }
+    }
+
+    // Validate everything before the first write so a rejected password can
+    // never leave a half-applied username change behind.
+    let mut updated_username = session.admin.username.clone();
+    if let Some(username) = username {
+        if username != updated_username {
+            models::admin::update_username(&state.db, session.admin.id, &username).await?;
+            updated_username = username;
+        }
+    }
+
+    let jar = if let Some(password) = new_password {
+        let password_hash = security::hash_password_blocking(Zeroizing::new(password.to_string()))
+            .await
+            .map_err(AppError::Internal)?;
+        models::admin::update_password(&state.db, session.admin.id, &password_hash).await?;
+        models::session::delete_all_for_admin(&state.db, session.admin.id).await?;
+        issue_session(&state, jar, session.admin.id).await?
+    } else {
+        jar
+    };
+
+    Ok((
+        jar,
+        Json(AdminOutput {
+            username: updated_username,
+            created_at: session.admin.created_at,
+        }),
+    ))
 }
 
 pub(crate) async fn issue_session(

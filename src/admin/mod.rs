@@ -29,6 +29,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(auth::me))
         .route("/api/auth/password", put(auth::change_password))
+        .route("/api/auth/account", put(auth::change_account))
         .route("/api/channels", get(channels::list).post(channels::create))
         .route(
             "/api/channels/{id}",

@@ -153,7 +153,10 @@ pub async fn start(job: StreamJob) -> Result<Response, Box<StreamStartError>> {
     let (tx, rx) = mpsc::channel::<Bytes>(32);
     let (ready_tx, ready_rx) = oneshot::channel();
 
-    tokio::spawn(run(job, tx, ready_tx));
+    // The session guard travels with the task so the live concurrency count
+    // covers the whole stream and every early return.
+    let session = job.state.live.session();
+    tokio::spawn(run(job, tx, ready_tx, session));
 
     match ready_rx.await {
         Ok(Ok(())) => Ok(sse_response(rx)),
@@ -264,6 +267,8 @@ async fn run(
     mut job: StreamJob,
     tx: mpsc::Sender<Bytes>,
     ready: oneshot::Sender<Result<(), StreamStartError>>,
+    // Released when this task ends, on success, failure or cancellation.
+    _session: crate::metrics::SessionGuard,
 ) {
     let mut parser = SseParser::new();
     let mut upstream = job.stream;

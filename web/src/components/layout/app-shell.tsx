@@ -7,15 +7,17 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MessagesSquare,
   Moon,
   Server,
   Settings,
   Sparkles,
   Sun,
+  UserRound,
 } from 'lucide-react';
 import { useTheme } from 'next-themes';
 import { useState, type ReactNode } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -34,6 +36,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { useLiveMetrics } from '@/hooks/useLiveMetrics';
+import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import { cn } from '@/lib/utils';
 
 const NAV_ITEMS = [
@@ -42,6 +45,7 @@ const NAV_ITEMS = [
   { to: '/keys', label: 'API Keys', icon: KeyRound },
   { to: '/logs', label: '日志', icon: FileText },
   { to: '/playground', label: 'Playground', icon: Sparkles },
+  { to: '/account', label: '账户', icon: UserRound },
   { to: '/settings', label: '设置', icon: Settings },
 ];
 
@@ -51,6 +55,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/keys': 'API Keys',
   '/logs': '请求日志',
   '/playground': 'Playground',
+  '/account': '账户设置',
   '/settings': '设置',
 };
 
@@ -71,6 +76,10 @@ function SidebarContent({
   version?: string;
   onNavigate?: () => void;
 }) {
+  const navigate = useNavigate();
+  const update = useUpdateCheck(version);
+  const hasUpdate = update.data?.update_available === true;
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-14 shrink-0 items-center gap-2.5 border-b px-4">
@@ -109,9 +118,27 @@ function SidebarContent({
 
       <div className="shrink-0 border-t p-3">
         <div className="flex items-center justify-between rounded-lg bg-sidebar-accent/50 px-3 py-2 text-xs">
-          <span className="text-muted-foreground">
-            {version ? `v${version}` : 'OneAPI'}
-          </span>
+          <button
+            type="button"
+            onClick={() => {
+              onNavigate?.();
+              navigate('/settings#update');
+            }}
+            className="-mx-1 inline-flex items-center gap-1.5 rounded px-1 py-0.5 text-muted-foreground transition-colors hover:text-foreground"
+            title={
+              hasUpdate
+                ? `发现新版本 ${update.data?.latest_version}，点击前往更新`
+                : '当前版本'
+            }
+          >
+            <span>{version ? `v${version}` : 'OneAPI'}</span>
+            {hasUpdate ? (
+              <span className="relative flex size-2" aria-label="有新版本">
+                <span className="absolute inline-flex size-full animate-ping rounded-full bg-red-500 opacity-75" />
+                <span className="relative inline-flex size-2 rounded-full bg-red-500" />
+              </span>
+            ) : null}
+          </button>
           <span className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
             <span className="size-1.5 rounded-full bg-current" />
             运行中
@@ -122,25 +149,41 @@ function SidebarContent({
   );
 }
 
-function LiveRateBadge() {
+function LiveMetricsBadge() {
   const live = useLiveMetrics();
   const active = live.global_tok_s > 0;
+  const sessions = live.active_sessions ?? 0;
 
   return (
     <div
-      className="hidden items-center gap-1.5 rounded-full border bg-card px-2.5 py-1 text-xs text-muted-foreground sm:flex"
-      title="全站实时输出速度"
+      className="flex shrink-0 items-center gap-1.5 rounded-full border bg-card px-2 py-1 text-[11px] text-muted-foreground sm:gap-2.5 sm:px-2.5 sm:py-1"
+      title="全站实时输出速度与并行会话数"
     >
-      <Activity
-        className={cn(
-          'size-3.5',
-          active ? 'text-emerald-500' : 'text-muted-foreground/50',
-        )}
-      />
-      <span className="font-mono tabular-nums text-foreground">
-        {live.global_tok_s.toFixed(1)}
+      <span className="flex items-center gap-1">
+        <Activity
+          className={cn(
+            'size-3.5',
+            active ? 'text-emerald-500' : 'text-muted-foreground/50',
+          )}
+        />
+        <span className="font-mono tabular-nums text-foreground">
+          {live.global_tok_s.toFixed(1)}
+        </span>
+        <span className="hidden sm:inline">tok/s</span>
       </span>
-      <span>tok/s</span>
+      <span className="h-3 w-px bg-border" aria-hidden />
+      <span className="flex items-center gap-1" title="当前并行会话数">
+        <MessagesSquare
+          className={cn(
+            'size-3.5',
+            sessions > 0 ? 'text-sky-500' : 'text-muted-foreground/50',
+          )}
+        />
+        <span className="font-mono tabular-nums text-foreground">
+          {sessions}
+        </span>
+        <span className="hidden sm:inline">会话</span>
+      </span>
     </div>
   );
 }
@@ -153,6 +196,7 @@ export function AppShell({
   children,
 }: AppShellProps) {
   const location = useLocation();
+  const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
   const { resolvedTheme, setTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
@@ -195,7 +239,7 @@ export function AppShell({
             <h1 className="truncate text-sm font-semibold">{title}</h1>
           </div>
 
-          <LiveRateBadge />
+          <LiveMetricsBadge />
 
           <Button
             type="button"
@@ -227,6 +271,10 @@ export function AppShell({
                 </div>
               </DropdownMenuGroup>
               <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => navigate('/account')}>
+                <UserRound className="size-4" />
+                账户设置
+              </DropdownMenuItem>
               <DropdownMenuItem onClick={onLogout}>
                 <LogOut className="size-4" />
                 退出登录
