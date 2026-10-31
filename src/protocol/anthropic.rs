@@ -2,10 +2,10 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::{
-    budget_for_effort, clamp_token_count, get_bool, get_f64, get_str, get_string, get_u32,
-    get_u64, text_content, ContentPart, ImageSource, ProtocolError, ReasoningConfig,
-    ResponseFormat, Role, StopReason, ToolChoice, ToolDef, UnifiedMessage, UnifiedRequest,
-    UnifiedResponse, Usage,
+    budget_for_effort, clamp_token_count, get_bool, get_str, get_string, get_u32, get_u64,
+    parse_bounded_f64, parse_max_tokens, text_content, ContentPart, ImageSource, ProtocolError,
+    ReasoningConfig, ResponseFormat, Role, StopReason, ToolChoice, ToolDef, UnifiedMessage,
+    UnifiedRequest, UnifiedResponse, Usage, MAX_TEMPERATURE, MAX_TOP_P, MIN_TEMPERATURE, MIN_TOP_P,
 };
 
 pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
@@ -18,11 +18,8 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         .ok_or_else(|| ProtocolError::invalid_request("anthropic", "model is required"))?
         .to_string();
 
-    let max_tokens = get_u32(obj, "max_tokens")
-        .filter(|value| *value > 0)
-        .ok_or_else(|| {
-            ProtocolError::invalid_request("anthropic", "max_tokens must be a positive integer")
-        })?;
+    let max_tokens = parse_max_tokens(obj, "max_tokens", "anthropic")?
+        .ok_or_else(|| ProtocolError::invalid_request("anthropic", "max_tokens is required"))?;
 
     let mut system = Vec::new();
     if let Some(system_value) = obj.get("system") {
@@ -159,10 +156,16 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         tool_choice,
         parallel_tool_calls,
         max_tokens: Some(max_tokens),
-        temperature: get_f64(obj, "temperature"),
-        top_p: get_f64(obj, "top_p"),
+        temperature: parse_bounded_f64(
+            obj,
+            "temperature",
+            "anthropic",
+            MIN_TEMPERATURE,
+            MAX_TEMPERATURE,
+        )?,
+        top_p: parse_bounded_f64(obj, "top_p", "anthropic", MIN_TOP_P, MAX_TOP_P)?,
         top_k: get_u32(obj, "top_k"),
-        stop: super::parse_stop(obj.get("stop_sequences")),
+        stop: super::parse_stop(obj.get("stop_sequences"), "anthropic")?,
         stream: get_bool(obj, "stream").unwrap_or(false),
         reasoning,
         response_format,
@@ -221,9 +224,16 @@ fn parse_content_parts(value: Option<&Value>) -> Result<Vec<ContentPart>, Protoc
                         }
                     }
                     "image" => {
-                        if let Some(source) = block.get("source").and_then(parse_image_source) {
-                            result.push(ContentPart::Image { source });
-                        }
+                        let source = block
+                            .get("source")
+                            .and_then(parse_image_source)
+                            .ok_or_else(|| {
+                                ProtocolError::unsupported(
+                                    "image without valid source",
+                                    "anthropic",
+                                )
+                            })?;
+                        result.push(ContentPart::Image { source });
                     }
                     "tool_use" => {
                         let id = get_str(block, "id").unwrap_or_default().to_string();
@@ -257,7 +267,12 @@ fn parse_content_parts(value: Option<&Value>) -> Result<Vec<ContentPart>, Protoc
                             });
                         }
                     }
-                    _ => {}
+                    other => {
+                        return Err(ProtocolError::unsupported(
+                            format!("content block type `{other}`"),
+                            "anthropic",
+                        ))
+                    }
                 }
             }
             Ok(result)
