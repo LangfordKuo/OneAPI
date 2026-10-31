@@ -1,6 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Archive, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
-import { useState } from 'react';
+import {
+  AlertCircle,
+  Archive,
+  CheckCircle2,
+  Loader2,
+  RefreshCw,
+  ShieldCheck,
+  TriangleAlert,
+} from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api, ApiError } from '@/api/client';
 import type {
@@ -32,6 +41,7 @@ import {
 } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
+import { refreshUpdateCheck } from '@/hooks/useUpdateCheck';
 import { errorMessage } from '@/lib/error';
 import { formatBytes, formatDateTime } from '@/lib/format';
 
@@ -55,6 +65,26 @@ const UPDATE_SOURCE_OPTIONS = [
   { value: 'github', label: 'GitHub 官方' },
   { value: 'ghproxy', label: '国内加速（gh-proxy.com）' },
 ];
+
+interface UpdateFailure {
+  message: string;
+  hint: string;
+  severity: 'warning' | 'error';
+}
+
+/**
+ * Map an update API failure to the presentation it deserves. The backend
+ * classifies recoverable transport/metadata problems as `warning`; anything
+ * that failed while installing is `error`.
+ */
+function updateFailureOf(error: unknown): UpdateFailure {
+  const details = error instanceof ApiError ? error.details : undefined;
+  return {
+    message: errorMessage(error),
+    hint: details?.hint ?? '请查看服务端日志定位原因后重试。',
+    severity: details?.severity === 'warning' ? 'warning' : 'error',
+  };
+}
 
 /// Numeric defaults. Used both to seed an empty draft and as the fallback when
 /// a field is cleared, so the two can never disagree.
@@ -182,6 +212,7 @@ function toSettingsPatch(
 
 export default function SettingsPage() {
   const queryClient = useQueryClient();
+  const location = useLocation();
   const [draftOverride, setDraftOverride] = useState<SettingsDraft | null>(
     null,
   );
@@ -192,7 +223,12 @@ export default function SettingsPage() {
   );
   const [siteNameError, setSiteNameError] = useState('');
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [updateResult, setUpdateResult] = useState<UpdateApplyResult | null>(
+    null,
+  );
+  const [updateFailure, setUpdateFailure] = useState<UpdateFailure | null>(
+    null,
+  );
 
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -205,6 +241,18 @@ export default function SettingsPage() {
     queryKey: ['settings'],
     queryFn: () => api.get<Settings>('/api/settings'),
   });
+
+  function reportUpdateFailure(error: unknown) {
+    const failure = updateFailureOf(error);
+    setUpdateResult(null);
+    setUpdateFailure(failure);
+    const options = { description: failure.hint, duration: 10000 };
+    if (failure.severity === 'warning') {
+      toast.warning(failure.message, options);
+    } else {
+      toast.error(failure.message, options);
+    }
+  }
 
   const backupsQuery = useQuery({
     queryKey: ['backups'],
@@ -251,24 +299,38 @@ export default function SettingsPage() {
   });
 
   const checkUpdateMutation = useMutation({
-    mutationFn: () => api.get<UpdateInfo>('/api/update/check'),
+    mutationFn: () => refreshUpdateCheck(queryClient),
     onSuccess: (data) => {
       setUpdateInfo(data);
-      setUpdateMessage(null);
+      setUpdateResult(null);
+      setUpdateFailure(null);
     },
-    onError: (error) =>
-      toast.error(errorMessage(error)),
+    onError: (error) => reportUpdateFailure(error),
   });
 
   const applyUpdateMutation = useMutation({
     mutationFn: () => api.post<UpdateApplyResult>('/api/update/apply'),
     onSuccess: (data) => {
-      setUpdateMessage(data.message);
+      setUpdateResult(data);
+      setUpdateFailure(null);
+      toast.success('更新成功', {
+        description: '服务正在重启，页面将在几秒后自动刷新。',
+      });
       window.setTimeout(() => window.location.assign('/'), 3000);
     },
-    onError: (error) =>
-      toast.error(errorMessage(error)),
+    onError: (error) => reportUpdateFailure(error),
   });
+
+  // The version-badge red dot links here with `#update`; the sticky header
+  // needs `scroll-mt` so the card title is not hidden behind it.
+  useEffect(() => {
+    if (location.hash !== '#update') {
+      return;
+    }
+    document
+      .getElementById('software-update')
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [location.hash]);
 
   const passwordMutation = useMutation({
     mutationFn: (values: { current: string; next: string }) =>
@@ -700,7 +762,7 @@ export default function SettingsPage() {
         </Card>
       </div>
 
-      <Card className="mt-4">
+      <Card id="software-update" className="mt-4 scroll-mt-20">
         <CardHeader>
           <CardTitle>软件更新</CardTitle>
         </CardHeader>
@@ -776,26 +838,64 @@ export default function SettingsPage() {
 
               {updateInfo.update_available ? (
                 <Button
-                  variant="destructive"
+                  variant={updateResult ? 'default' : 'destructive'}
+                  className={
+                    updateResult
+                      ? 'bg-emerald-600 text-white hover:bg-emerald-600/90'
+                      : undefined
+                  }
                   onClick={() => applyUpdateMutation.mutate()}
                   disabled={
-                    applyUpdateMutation.isPending || !updateInfo.asset_name
+                    applyUpdateMutation.isPending ||
+                    updateResult != null ||
+                    !updateInfo.asset_name
                   }
                 >
                   {applyUpdateMutation.isPending ? (
                     <Loader2 className="animate-spin" />
+                  ) : updateResult ? (
+                    <CheckCircle2 />
                   ) : null}
-                  一键更新并重启
+                  {applyUpdateMutation.isPending
+                    ? '正在更新…'
+                    : updateResult
+                      ? '更新成功'
+                      : '一键更新并重启'}
                 </Button>
               ) : null}
             </>
           ) : null}
 
-          {updateMessage ? (
-            <Alert>
-              <AlertTitle>{updateMessage}</AlertTitle>
+          {updateResult ? (
+            <Alert variant="success">
+              <CheckCircle2 />
+              <AlertTitle>更新成功</AlertTitle>
               <AlertDescription>
-                服务会自动重启，页面将在几秒后刷新。
+                已更新到 {updateResult.updated_to}。
+                {updateResult.message}，页面将在几秒后自动刷新。
+              </AlertDescription>
+            </Alert>
+          ) : null}
+
+          {updateFailure ? (
+            <Alert
+              variant={
+                updateFailure.severity === 'warning' ? 'warning' : 'destructive'
+              }
+            >
+              {updateFailure.severity === 'warning' ? (
+                <TriangleAlert />
+              ) : (
+                <AlertCircle />
+              )}
+              <AlertTitle>
+                {updateFailure.severity === 'warning'
+                  ? '更新未完成，可尝试修复后重试'
+                  : '更新失败，需要手动排查'}
+              </AlertTitle>
+              <AlertDescription>
+                <p>{updateFailure.message}</p>
+                <p className="mt-1">{updateFailure.hint}</p>
               </AlertDescription>
             </Alert>
           ) : null}
