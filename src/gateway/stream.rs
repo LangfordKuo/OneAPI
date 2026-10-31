@@ -64,6 +64,17 @@ impl StreamFailure {
     }
 }
 
+/// A stream attempt that failed before any byte reached the client, together
+/// with the admission reservation it was holding.
+///
+/// Returning the guard in-band (instead of letting it drop and release
+/// asynchronously) lets the caller hand it to the next candidate without a
+/// reserve/release race that could double count or be refused.
+pub struct StreamStartError {
+    pub failure: StreamFailure,
+    pub reservation: Option<usage::Reservation>,
+}
+
 pub struct StreamJob {
     pub state: AppState,
     pub request_id: String,
@@ -123,9 +134,22 @@ fn client_stream_message(error_type: &str, message: &str, provider_json: bool) -
     error::client_safe_upstream_message(error_type, message, provider_json)
 }
 
+/// Build the pre-commit failure value, moving the job's reservation into it so
+/// the guard is handed back to the caller instead of being released by the
+/// stream task.
+fn start_error(
+    reservation: &mut Option<usage::Reservation>,
+    failure: StreamFailure,
+) -> StreamStartError {
+    StreamStartError {
+        failure,
+        reservation: reservation.take(),
+    }
+}
+
 /// Commit the stream to the client only after the first upstream SSE frame has
 /// been inspected, so an immediate error event can still trigger failover.
-pub async fn start(job: StreamJob) -> Result<Response, StreamFailure> {
+pub async fn start(job: StreamJob) -> Result<Response, Box<StreamStartError>> {
     let (tx, rx) = mpsc::channel::<Bytes>(32);
     let (ready_tx, ready_rx) = oneshot::channel();
 
@@ -133,11 +157,11 @@ pub async fn start(job: StreamJob) -> Result<Response, StreamFailure> {
 
     match ready_rx.await {
         Ok(Ok(())) => Ok(sse_response(rx)),
-        Ok(Err(failure)) => Err(failure),
-        Err(_) => Err(StreamFailure::new(
-            "upstream_stream_closed",
-            "stream task exited before starting",
-        )),
+        Ok(Err(start_error)) => Err(Box::new(start_error)),
+        Err(_) => Err(Box::new(StreamStartError {
+            failure: StreamFailure::new("upstream_unreachable", "stream task ended before commit"),
+            reservation: None,
+        })),
     }
 }
 
@@ -154,7 +178,12 @@ fn sse_response(rx: mpsc::Receiver<Bytes>) -> Response {
         .header(header::CACHE_CONTROL, "no-cache")
         .header("x-accel-buffering", "no")
         .body(Body::from_stream(body_stream))
-        .expect("streaming response is well formed")
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "failed to build SSE response");
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        })
 }
 
 enum FrameOutcome {
@@ -234,7 +263,7 @@ async fn wait_for_upstream(
 async fn run(
     mut job: StreamJob,
     tx: mpsc::Sender<Bytes>,
-    ready: oneshot::Sender<Result<(), StreamFailure>>,
+    ready: oneshot::Sender<Result<(), StreamStartError>>,
 ) {
     let mut parser = SseParser::new();
     let mut upstream = job.stream;
@@ -250,9 +279,12 @@ async fn run(
         }
         let now = Instant::now();
         if now >= job.commit_deadline {
-            let _ = ready.send(Err(StreamFailure::new(
-                "upstream_stream_timeout",
-                "upstream did not send the first event before the commit deadline",
+            let _ = ready.send(Err(start_error(
+                &mut job.reservation,
+                StreamFailure::new(
+                    "upstream_stream_timeout",
+                    "upstream did not send the first event before the commit deadline",
+                ),
             )));
             return;
         }
@@ -264,17 +296,20 @@ async fn run(
             Ok(Some(Ok(chunk))) => {
                 pending.extend(parser.push(&chunk));
                 if parser.buffered_len() > MAX_SSE_BUFFER {
-                    let _ = ready.send(Err(StreamFailure::new(
-                        "upstream_stream_too_large",
-                        "upstream stream frame exceeded the size limit",
+                    let _ = ready.send(Err(start_error(
+                        &mut job.reservation,
+                        StreamFailure::new(
+                            "upstream_stream_too_large",
+                            "upstream stream frame exceeded the size limit",
+                        ),
                     )));
                     return;
                 }
             }
             Ok(Some(Err(error))) => {
-                let _ = ready.send(Err(StreamFailure::new(
-                    "upstream_unreachable",
-                    error.to_string(),
+                let _ = ready.send(Err(start_error(
+                    &mut job.reservation,
+                    StreamFailure::new("upstream_unreachable", error.to_string()),
                 )));
                 return;
             }
@@ -284,13 +319,16 @@ async fn run(
             }
             Err(_) => {
                 let committed_late = Instant::now() >= job.commit_deadline;
-                let _ = ready.send(Err(StreamFailure::new(
-                    "upstream_stream_timeout",
-                    if committed_late {
-                        "upstream did not send the first event before the commit deadline"
-                    } else {
-                        "upstream did not send a stream event before the idle timeout"
-                    },
+                let _ = ready.send(Err(start_error(
+                    &mut job.reservation,
+                    StreamFailure::new(
+                        "upstream_stream_timeout",
+                        if committed_late {
+                            "upstream did not send the first event before the commit deadline"
+                        } else {
+                            "upstream did not send a stream event before the idle timeout"
+                        },
+                    ),
                 )));
                 return;
             }
@@ -298,16 +336,22 @@ async fn run(
     };
 
     let Some(first) = first else {
-        let _ = ready.send(Err(StreamFailure::new(
-            "upstream_stream_empty",
-            "upstream returned an empty event stream",
+        let _ = ready.send(Err(start_error(
+            &mut job.reservation,
+            StreamFailure::new(
+                "upstream_stream_empty",
+                "upstream returned an empty event stream",
+            ),
         )));
         return;
     };
 
     if let Some((error_type, message)) = frame_error(job.upstream, &first) {
         let (error_type, message) = bounded_error(error_type, message);
-        let _ = ready.send(Err(StreamFailure::from_provider(error_type, message)));
+        let _ = ready.send(Err(start_error(
+            &mut job.reservation,
+            StreamFailure::from_provider(error_type, message),
+        )));
         return;
     }
 
@@ -1051,12 +1095,19 @@ fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObser
         }
         Protocol::Anthropic => match name {
             "message_start" => {
-                if let Some(usage) = value
-                    .get("message")
-                    .and_then(|message| message.get("usage"))
-                    .and_then(Value::as_object)
-                {
-                    observation.usage = Some(anthropic::parse_usage(usage));
+                if let Some(message) = value.get("message") {
+                    // A `message_start` whose message object is not an
+                    // Anthropic message is malformed; the frame itself is still
+                    // forwarded, but the stream is reported as invalid.
+                    if message
+                        .get("type")
+                        .is_some_and(|kind| kind.as_str() != Some("message"))
+                    {
+                        observation.error = Some(invalid_response_error());
+                    }
+                    if let Some(usage) = message.get("usage").and_then(Value::as_object) {
+                        observation.usage = Some(anthropic::parse_usage(usage));
+                    }
                 }
             }
             "message_delta" => {
@@ -1084,6 +1135,17 @@ fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObser
                 "response.completed" | "response.incomplete" => {
                     observation.terminal = true;
                     observation.saw_terminal = true;
+                    // A terminal event that does carry a status must agree with
+                    // the event name. A bare terminal frame without the full
+                    // response object is still accepted as-is.
+                    if let Some(status) = value
+                        .get("response")
+                        .and_then(|response| response.get("status"))
+                    {
+                        if !matches!(status.as_str(), Some("completed") | Some("incomplete")) {
+                            observation.error = Some(invalid_response_error());
+                        }
+                    }
                 }
                 "error" => observation.error = Some(observed_error(&value)),
                 "response.failed" => {
@@ -1114,6 +1176,15 @@ fn char_count(value: Option<&Value>) -> u64 {
         .and_then(Value::as_str)
         .map(|text| text.chars().count() as u64)
         .unwrap_or(0)
+}
+
+/// Classification for a stream frame whose payload is structurally valid SSE
+/// but semantically invalid for its protocol.
+fn invalid_response_error() -> (String, String) {
+    (
+        "upstream_invalid_response".to_string(),
+        "upstream response status is invalid".to_string(),
+    )
 }
 
 /// Same field extraction as the converted-stream decoder, so passthrough and

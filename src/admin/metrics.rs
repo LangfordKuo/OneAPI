@@ -176,5 +176,10 @@ pub async fn stream(
         .header(header::CACHE_CONTROL, "no-cache")
         .header("x-accel-buffering", "no")
         .body(Body::from_stream(body))
-        .expect("valid SSE response"))
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "failed to build SSE response");
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        }))
 }

@@ -440,8 +440,6 @@ pub async fn proxy_with_identity(
             headers,
             defaults,
             reservation.take(),
-            reservation_estimate,
-            reservation_day,
         )
         .await;
     }
@@ -644,6 +642,20 @@ pub async fn proxy_with_identity(
                     continue;
                 }
             }
+            // A same-protocol 2xx body is forwarded to the client as-is, so its
+            // terminal status must actually mean success. Cross-protocol bodies
+            // are rebuilt from the IR below and validated by the parser.
+            if upstream == inbound {
+                if let Some(value) = upstream_value.as_ref() {
+                    if let Some((error_type, message)) = validate_same_protocol(inbound, value) {
+                        state.mark_channel_failure(channel.id, &message).await;
+                        last_error_type = error_type;
+                        last_message = message;
+                        last_provider_json = false;
+                        continue;
+                    }
+                }
+            }
 
             let mut client_json: Option<Value> = None;
             let usage = if upstream == inbound {
@@ -712,6 +724,14 @@ pub async fn proxy_with_identity(
             };
 
             let (client_body, client_bytes) = if inbound == Protocol::Responses {
+                let Some(response_id) = response_id.as_ref() else {
+                    let message = "responses response is missing an id";
+                    state.mark_channel_failure(channel.id, message).await;
+                    last_error_type = "upstream_error".to_string();
+                    last_message = message.to_string();
+                    last_provider_json = false;
+                    continue;
+                };
                 let mut value = client_json.unwrap_or(Value::Null);
                 if !value.is_object() {
                     let message = "failed to build a Responses response";
@@ -723,12 +743,7 @@ pub async fn proxy_with_identity(
                 }
 
                 if let Some(object) = value.as_object_mut() {
-                    object.insert(
-                        "id".into(),
-                        json!(response_id
-                            .as_ref()
-                            .expect("responses request has a response id")),
-                    );
+                    object.insert("id".into(), json!(response_id));
                     object.insert("object".into(), json!("response"));
                     object.insert("store".into(), json!(should_store));
                     if !object.contains_key("created_at") {
@@ -913,8 +928,6 @@ async fn proxy_stream(
     headers: &HeaderMap,
     defaults: models::setting::GatewayDefaults,
     mut reservation: Option<usage::Reservation>,
-    reservation_estimate: i64,
-    reservation_day: i64,
 ) -> Result<Response, AppError> {
     // Only the admin Playground may see internal routing metadata.
     let expose_route_headers = identity.source == "playground";
@@ -1207,7 +1220,11 @@ async fn proxy_stream(
                 }
                 return Ok(response);
             }
-            Err(failure) => {
+            Err(start_error) => {
+                let stream::StreamStartError {
+                    failure,
+                    reservation: returned_reservation,
+                } = *start_error;
                 state
                     .mark_channel_failure(channel.id, &failure.message)
                     .await;
@@ -1215,26 +1232,15 @@ async fn proxy_stream(
                 last_message = failure.message.clone();
                 last_provider_json = failure.provider_json;
 
-                // `start` consumed the job, so an armed guard was released when
-                // the stream task exited before writing usage. Re-arm it for the
-                // remaining candidates; if the quota is gone the request simply
-                // continues unreserved (and will be rejected by its usage row).
-                let rearm_key = if reservation.is_none() {
-                    identity.api_key_id
-                } else {
-                    None
-                };
-                if let Some(api_key_id) = rearm_key {
-                    match usage::reserve(state, api_key_id, reservation_estimate, reservation_day)
-                        .await
-                    {
-                        Ok(value) => reservation = value,
-                        Err(error) => tracing::warn!(
-                            error = %error,
-                            request_id,
-                            "failed to re-reserve quota after a stream attempt failed"
-                        ),
-                    }
+                // The attempt failed before any byte reached the client, so the
+                // reservation travels back in-band. Carry it into the next
+                // candidate instead of releasing and re-reserving: the old
+                // asynchronous drop could double count or be refused. A failed
+                // attempt that lost its guard (the task ended, or the job was
+                // dropped) leaves the request unreserved, matching the semantics
+                // of a released reservation.
+                if let Some(value) = returned_reservation {
+                    reservation = Some(value);
                 }
 
                 // Nothing was written downstream yet, so try the next channel.
@@ -1558,10 +1564,17 @@ fn prepare_attempt_body(
             Err(error) => return AttemptBody::InvalidRequest(error.to_string()),
         });
     }
-    let mut ir = if last_candidate {
-        unified_request.take().expect("parsed above")
+    let mut ir = match if last_candidate {
+        unified_request.take()
     } else {
-        unified_request.clone().expect("parsed above")
+        unified_request.clone()
+    } {
+        Some(ir) => ir,
+        None => {
+            // Unreachable: the IR was populated immediately above. Kept as a
+            // non-panicking fallback so a future change cannot abort the server.
+            return AttemptBody::InvalidRequest("failed to build the upstream request".to_string());
+        }
     };
     if upstream == Protocol::Anthropic && ir.max_tokens.is_none() {
         ir.max_tokens = Some(default_max_tokens);
@@ -1659,6 +1672,39 @@ fn response_usage(protocol: Protocol, value: &Value) -> Usage {
         Protocol::Chat => crate::protocol::chat::parse_usage(usage),
         Protocol::Responses => crate::protocol::responses::parse_usage(usage),
         Protocol::Anthropic => crate::protocol::anthropic::parse_usage(usage),
+    }
+}
+
+/// Semantic validation for a same-protocol 2xx body that will be forwarded to
+/// the client unchanged.
+///
+/// A structurally valid JSON body can still describe a failed or unfinished
+/// response (for example a Responses object with `status: "failed"`). Returning
+/// it as 200 would hide the failure and skip failover, so it is reclassified as
+/// a channel failure instead. Chat has no terminal status field to check.
+fn validate_same_protocol(inbound: Protocol, value: &Value) -> Option<(String, String)> {
+    let invalid = || {
+        (
+            "upstream_invalid_response".to_string(),
+            "upstream response status is invalid".to_string(),
+        )
+    };
+
+    match inbound {
+        Protocol::Responses => match value.get("status").and_then(Value::as_str) {
+            Some("completed") | Some("incomplete") => None,
+            _ => Some(invalid()),
+        },
+        Protocol::Anthropic => {
+            if value.get("type").and_then(Value::as_str) != Some("message") {
+                return Some(invalid());
+            }
+            if !value.get("stop_reason").is_some_and(Value::is_string) {
+                return Some(invalid());
+            }
+            None
+        }
+        Protocol::Chat => None,
     }
 }
 

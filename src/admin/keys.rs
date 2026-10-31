@@ -268,19 +268,25 @@ pub async fn update(
     };
     let channel_ids = match input.allowed_channel_ids {
         Some(value) => value,
-        None => existing_limits
-            .as_ref()
-            .expect("existing limits parsed when a field is omitted")
-            .channel_ids
-            .clone(),
+        None => match existing_limits.as_ref() {
+            Some(limits) => limits.channel_ids.clone(),
+            None => {
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "existing API key restrictions were not parsed"
+                )))
+            }
+        },
     };
     let models = match input.allowed_models {
         Some(value) => value,
-        None => existing_limits
-            .as_ref()
-            .expect("existing limits parsed when a field is omitted")
-            .models
-            .clone(),
+        None => match existing_limits.as_ref() {
+            Some(limits) => limits.models.clone(),
+            None => {
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "existing API key restrictions were not parsed"
+                )))
+            }
+        },
     };
     let token_limit = input.token_limit.unwrap_or(existing.token_limit);
     let daily_token_limit = input
