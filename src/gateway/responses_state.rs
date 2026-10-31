@@ -181,7 +181,7 @@ pub async fn store(
         .unwrap_or("completed")
         .to_string();
 
-    models::response::insert(
+    let stored = models::response::insert(
         &state.db,
         &id,
         api_key_id,
@@ -193,7 +193,15 @@ pub async fn store(
     )
     .await?;
 
-    Ok(true)
+    if !stored {
+        tracing::warn!(
+            response_id = %id,
+            api_key_id,
+            "response id is owned by another API key; skipping persistence"
+        );
+    }
+
+    Ok(stored)
 }
 
 pub async fn get(

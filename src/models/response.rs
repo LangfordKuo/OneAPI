@@ -22,18 +22,18 @@ pub async fn insert(
     response_json: &str,
     status: &str,
     created_at: i64,
-) -> sqlx::Result<()> {
-    sqlx::query(
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
         "INSERT INTO responses
          (id, api_key_id, model, request_json, response_json, status, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
-            api_key_id = excluded.api_key_id,
             model = excluded.model,
             request_json = excluded.request_json,
             response_json = excluded.response_json,
             status = excluded.status,
-            created_at = excluded.created_at",
+            created_at = excluded.created_at
+         WHERE responses.api_key_id = excluded.api_key_id",
     )
     .bind(id)
     .bind(api_key_id)
@@ -45,7 +45,7 @@ pub async fn insert(
     .execute(pool)
     .await?;
 
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn get(
