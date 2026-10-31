@@ -288,7 +288,7 @@ impl ChatDecoder {
         if !self.stopped {
             self.stopped = true;
             events.push(StreamEvent::Stop {
-                reason: self.finish_reason,
+                reason: self.finish_reason.clone(),
                 stop_sequence: None,
             });
         }
@@ -713,7 +713,7 @@ impl ResponsesDecoder {
         if !self.stopped {
             self.stopped = true;
             events.push(StreamEvent::Stop {
-                reason: self.stop,
+                reason: self.stop.clone(),
                 stop_sequence: None,
             });
         }
@@ -954,13 +954,13 @@ impl ChatEncoder {
             StreamEvent::Stop {
                 reason,
                 stop_sequence: _,
-            } => self.stop = *reason,
+            } => self.stop = reason.clone(),
             StreamEvent::Done => {
                 self.ensure_role_chunk(&mut frames);
                 frames.push(sse_data(&self.chunk(json!({
                     "index": 0,
                     "delta": {},
-                    "finish_reason": chat_finish_reason(self.stop),
+                    "finish_reason": chat_finish_reason(self.stop.clone()),
                 }))));
                 if self.include_usage && !self.usage.is_empty() {
                     frames.push(sse_data(&json!({
@@ -1015,12 +1015,15 @@ impl ChatEncoder {
     }
 }
 
-fn chat_finish_reason(reason: Option<StopReason>) -> &'static str {
+fn chat_finish_reason(reason: Option<StopReason>) -> String {
     match reason {
-        Some(StopReason::MaxTokens) => "length",
-        Some(StopReason::ToolUse) => "tool_calls",
-        Some(StopReason::ContentFilter) => "content_filter",
-        _ => "stop",
+        Some(StopReason::MaxTokens) => "length".to_string(),
+        Some(StopReason::ToolUse) => "tool_calls".to_string(),
+        Some(StopReason::ContentFilter) => "content_filter".to_string(),
+        // Preserve an unrecognized upstream value instead of disguising it as
+        // a normal `stop`.
+        Some(StopReason::Unknown(raw)) => raw,
+        _ => "stop".to_string(),
     }
 }
 
@@ -1231,7 +1234,7 @@ impl AnthropicEncoder {
                 reason,
                 stop_sequence,
             } => {
-                self.stop = *reason;
+                self.stop = reason.clone();
                 self.stop_sequence = stop_sequence.clone();
             }
             StreamEvent::Done => {
@@ -1247,7 +1250,7 @@ impl AnthropicEncoder {
                     &json!({
                         "type": "message_delta",
                         "delta": {
-                            "stop_reason": anthropic_stop_reason(self.stop),
+                            "stop_reason": anthropic_stop_reason(self.stop.clone()),
                             "stop_sequence": self.stop_sequence,
                         },
                         "usage": anthropic_usage_delta(&self.usage),
@@ -1626,7 +1629,7 @@ impl ResponsesEncoder {
                 reason,
                 stop_sequence,
             } => {
-                self.stop = *reason;
+                self.stop = reason.clone();
                 self.stop_sequence = stop_sequence.clone();
             }
             StreamEvent::Done => {

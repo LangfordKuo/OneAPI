@@ -11,7 +11,12 @@ use serde_json::Value;
 use sqlx::{Executor, Sqlite, SqlitePool};
 use tokio::sync::mpsc;
 
-use crate::{events::EventBus, models, protocol::Usage, state::AppState};
+use crate::{
+    events::EventBus,
+    models,
+    protocol::{Usage, MAX_TOKEN_COUNT},
+    state::AppState,
+};
 
 pub struct UsageRecord<'a> {
     pub request_id: &'a str,
@@ -565,16 +570,34 @@ fn total_tokens(usage: &Usage) -> i64 {
     let total = usage
         .total_tokens
         .or_else(|| match (usage.input_tokens, usage.output_tokens) {
-            (Some(input), Some(output)) => Some(input + output),
+            (Some(input), Some(output)) => Some(input.saturating_add(output)),
             _ => None,
         });
-    total
-        .and_then(|value| i64::try_from(value).ok())
-        .unwrap_or(0)
+    match total {
+        Some(value) => i64::try_from(value).unwrap_or_else(|_| {
+            // A total outside i64 cannot be billed faithfully. Fall back to the
+            // per-field counters (already filled with local estimates when the
+            // upstream omitted usage) rather than recording zero tokens.
+            let estimate = usage
+                .input_tokens
+                .unwrap_or(0)
+                .saturating_add(usage.output_tokens.unwrap_or(0));
+            token_i64(estimate).max(1)
+        }),
+        None => 0,
+    }
 }
 
 fn token(value: Option<u64>) -> Option<i64> {
-    value.and_then(|value| i64::try_from(value).ok())
+    value.map(token_i64)
+}
+
+/// Clamp a token counter to the same ceiling used when parsing upstream usage,
+/// so a value that does not fit in the database's i64 column is still recorded
+/// (bounded) instead of being dropped as NULL/zero.
+fn token_i64(value: u64) -> i64 {
+    let bounded = value.min(MAX_TOKEN_COUNT);
+    i64::try_from(bounded).unwrap_or(MAX_TOKEN_COUNT as i64)
 }
 
 /// Approximate token count for free text (roughly four characters per token).

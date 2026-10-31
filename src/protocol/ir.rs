@@ -123,7 +123,7 @@ pub struct UnifiedResponse {
     pub usage: Usage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
     EndTurn,
     MaxTokens,
@@ -131,6 +131,20 @@ pub enum StopReason {
     ContentFilter,
     StopSequence,
     Other,
+    /// An upstream `finish_reason`/`stop_reason` value the gateway does not
+    /// recognise. The raw string is preserved so a Chat client receives the
+    /// upstream value instead of a silently rewritten one.
+    Unknown(String),
+}
+
+/// Upper bound for a single token counter parsed from an upstream response.
+/// Upstreams are untrusted, so a bogus `usage` block must not be able to drive
+/// billing or statistics toward `u64::MAX`.
+pub const MAX_TOKEN_COUNT: u64 = 1_000_000_000;
+
+/// Clamp one upstream token counter to [`MAX_TOKEN_COUNT`].
+pub fn clamp_token_count(value: u64) -> u64 {
+    value.min(MAX_TOKEN_COUNT)
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -330,7 +344,9 @@ impl Usage {
     pub(crate) fn chat_json(&self) -> Value {
         let mut map = Map::new();
         let prompt = self.input_tokens.map(|input| {
-            input + self.cached_tokens.unwrap_or(0) + self.cache_creation_tokens.unwrap_or(0)
+            input
+                .saturating_add(self.cached_tokens.unwrap_or(0))
+                .saturating_add(self.cache_creation_tokens.unwrap_or(0))
         });
         if let Some(prompt) = prompt {
             map.insert("prompt_tokens".into(), json!(prompt));
@@ -341,7 +357,7 @@ impl Usage {
         if let Some(total) = self.total_tokens.or_else(|| {
             prompt
                 .zip(self.output_tokens)
-                .map(|(input, output)| input + output)
+                .map(|(input, output)| input.saturating_add(output))
         }) {
             map.insert("total_tokens".into(), json!(total));
         }
@@ -364,7 +380,9 @@ impl Usage {
     pub(crate) fn responses_json(&self) -> Value {
         let mut map = Map::new();
         let input = self.input_tokens.map(|input| {
-            input + self.cached_tokens.unwrap_or(0) + self.cache_creation_tokens.unwrap_or(0)
+            input
+                .saturating_add(self.cached_tokens.unwrap_or(0))
+                .saturating_add(self.cache_creation_tokens.unwrap_or(0))
         });
         if let Some(input) = input {
             map.insert("input_tokens".into(), json!(input));
@@ -375,7 +393,7 @@ impl Usage {
         if let Some(total) = self.total_tokens.or_else(|| {
             input
                 .zip(self.output_tokens)
-                .map(|(input, output)| input + output)
+                .map(|(input, output)| input.saturating_add(output))
         }) {
             map.insert("total_tokens".into(), json!(total));
         }

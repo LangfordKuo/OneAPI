@@ -1,10 +1,11 @@
 use serde_json::{json, Map, Value};
 
 use super::{
-    effort_for_budget, effort_name, ensure_text_only, get_bool, get_f64, get_str, get_string,
-    get_u32, get_u64, image_url, parse_arguments, parse_effort, parse_image_string, parse_stop,
-    reasoning_text, text_content, ContentPart, ProtocolError, ReasoningConfig, ResponseFormat,
-    Role, StopReason, ToolChoice, ToolDef, UnifiedMessage, UnifiedRequest, UnifiedResponse, Usage,
+    clamp_token_count, effort_for_budget, effort_name, ensure_text_only, get_bool, get_f64,
+    get_str, get_string, get_u32, get_u64, image_url, parse_arguments, parse_effort,
+    parse_image_string, parse_stop, reasoning_text, text_content, ContentPart, ProtocolError,
+    ReasoningConfig, ResponseFormat, Role, StopReason, ToolChoice, ToolDef, UnifiedMessage,
+    UnifiedRequest, UnifiedResponse, Usage,
 };
 
 pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
@@ -585,6 +586,7 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
 
     let mut content = Vec::new();
     let mut stop_reason = None;
+    let mut refused = false;
 
     if let Some(choice) = choice {
         if let Some(message) = choice.get("message").and_then(Value::as_object) {
@@ -599,6 +601,18 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
                 }
             }
             content.extend(parse_output_content(message.get("content"))?);
+
+            // Some upstreams report a refusal as structured metadata rather
+            // than as message content. Surface the text and mark the stop
+            // reason so a client cannot mistake the refusal for a completion.
+            if let Some(refusal) = get_str(message, "refusal") {
+                refused = true;
+                if !refusal.is_empty() {
+                    content.push(ContentPart::Text {
+                        text: refusal.to_string(),
+                    });
+                }
+            }
 
             if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
                 for call in tool_calls {
@@ -622,7 +636,11 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
             }
         }
 
-        stop_reason = get_str(choice, "finish_reason").map(parse_finish_reason);
+        stop_reason = if refused {
+            Some(StopReason::ContentFilter)
+        } else {
+            get_str(choice, "finish_reason").map(parse_finish_reason)
+        };
     }
 
     let usage = obj
@@ -648,26 +666,31 @@ pub(crate) fn parse_finish_reason(value: &str) -> StopReason {
         "length" => StopReason::MaxTokens,
         "tool_calls" | "function_call" => StopReason::ToolUse,
         "content_filter" => StopReason::ContentFilter,
-        _ => StopReason::Other,
+        other => StopReason::Unknown(other.to_string()),
     }
 }
 
 pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
-    let prompt = get_u64(usage, "prompt_tokens");
-    let output = get_u64(usage, "completion_tokens");
+    let prompt = get_u64(usage, "prompt_tokens").map(clamp_token_count);
+    let output = get_u64(usage, "completion_tokens").map(clamp_token_count);
     let cached = usage
         .get("prompt_tokens_details")
         .and_then(Value::as_object)
-        .and_then(|details| get_u64(details, "cached_tokens"));
+        .and_then(|details| get_u64(details, "cached_tokens"))
+        .map(clamp_token_count);
     let input = match (prompt, cached) {
         (Some(prompt), Some(cached)) => Some(prompt.saturating_sub(cached)),
         (Some(prompt), None) => Some(prompt),
         _ => None,
     };
-    let total = get_u64(usage, "total_tokens").or_else(|| match (prompt, output) {
-        (Some(prompt), Some(output)) => Some(prompt + output),
-        _ => None,
-    });
+    let total = get_u64(usage, "total_tokens")
+        .map(clamp_token_count)
+        .or_else(|| match (prompt, output) {
+            (Some(prompt), Some(output)) => {
+                Some(clamp_token_count(prompt.saturating_add(output)))
+            }
+            _ => None,
+        });
 
     Usage {
         input_tokens: input,
@@ -678,7 +701,8 @@ pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
         reasoning_tokens: usage
             .get("completion_tokens_details")
             .and_then(Value::as_object)
-            .and_then(|details| get_u64(details, "reasoning_tokens")),
+            .and_then(|details| get_u64(details, "reasoning_tokens"))
+            .map(clamp_token_count),
     }
 }
 
@@ -722,12 +746,14 @@ pub fn encode_response(response: &UnifiedResponse) -> Result<Value, ProtocolErro
 
     let finish_reason = response
         .stop_reason
+        .as_ref()
         .map(|reason| match reason {
             StopReason::EndTurn | StopReason::StopSequence => "stop",
             StopReason::MaxTokens => "length",
             StopReason::ToolUse => "tool_calls",
             StopReason::ContentFilter => "content_filter",
             StopReason::Other => "stop",
+            StopReason::Unknown(raw) => raw.as_str(),
         })
         .unwrap_or("stop");
 

@@ -2,10 +2,11 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::{
-    effort_for_budget, effort_name, ensure_text_only, get_bool, get_f64, get_str, get_string,
-    get_u32, get_u64, image_url, parse_arguments, parse_effort, parse_image_string, text_content,
-    ContentPart, ProtocolError, ReasoningConfig, ResponseFormat, Role, StopReason, ToolChoice,
-    ToolDef, UnifiedMessage, UnifiedRequest, UnifiedResponse, Usage,
+    clamp_token_count, effort_for_budget, effort_name, ensure_text_only, get_bool, get_f64,
+    get_str, get_string, get_u32, get_u64, image_url, parse_arguments, parse_effort,
+    parse_image_string, text_content, ContentPart, ProtocolError, ReasoningConfig,
+    ResponseFormat, Role, StopReason, ToolChoice, ToolDef, UnifiedMessage, UnifiedRequest,
+    UnifiedResponse, Usage,
 };
 
 pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
@@ -662,7 +663,15 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
         }
     }
 
-    let status = get_str(obj, "status").unwrap_or("completed");
+    let status = get_str(obj, "status").ok_or_else(|| {
+        ProtocolError::invalid_response("responses", "status is required")
+    })?;
+    if !matches!(status, "completed" | "incomplete") {
+        return Err(ProtocolError::invalid_response(
+            "responses",
+            format!("unsupported response status `{status}`"),
+        ));
+    }
     let has_tool_use = content
         .iter()
         .any(|part| matches!(part, ContentPart::ToolUse { .. }));
@@ -701,21 +710,26 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
 }
 
 pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
-    let input_total = get_u64(usage, "input_tokens");
-    let output = get_u64(usage, "output_tokens");
+    let input_total = get_u64(usage, "input_tokens").map(clamp_token_count);
+    let output = get_u64(usage, "output_tokens").map(clamp_token_count);
     let cached = usage
         .get("input_tokens_details")
         .and_then(Value::as_object)
-        .and_then(|details| get_u64(details, "cached_tokens"));
+        .and_then(|details| get_u64(details, "cached_tokens"))
+        .map(clamp_token_count);
     let input = match (input_total, cached) {
         (Some(total), Some(cached)) => Some(total.saturating_sub(cached)),
         (Some(total), None) => Some(total),
         _ => None,
     };
-    let total = get_u64(usage, "total_tokens").or_else(|| match (input_total, output) {
-        (Some(input), Some(output)) => Some(input + output),
-        _ => None,
-    });
+    let total = get_u64(usage, "total_tokens")
+        .map(clamp_token_count)
+        .or_else(|| match (input_total, output) {
+            (Some(input), Some(output)) => {
+                Some(clamp_token_count(input.saturating_add(output)))
+            }
+            _ => None,
+        });
 
     Usage {
         input_tokens: input,
@@ -726,7 +740,8 @@ pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
         reasoning_tokens: usage
             .get("output_tokens_details")
             .and_then(Value::as_object)
-            .and_then(|details| get_u64(details, "reasoning_tokens")),
+            .and_then(|details| get_u64(details, "reasoning_tokens"))
+            .map(clamp_token_count),
     }
 }
 
@@ -799,12 +814,14 @@ pub fn encode_response(response: &UnifiedResponse) -> Result<Value, ProtocolErro
     }
     flush_text(&mut output, &mut text_buffer);
 
-    let status = match response.stop_reason {
-        Some(StopReason::MaxTokens) => "incomplete",
-        Some(StopReason::ContentFilter) => "incomplete",
+    let status = match response.stop_reason.as_ref() {
+        Some(StopReason::MaxTokens)
+        | Some(StopReason::ContentFilter)
+        | Some(StopReason::Other)
+        | Some(StopReason::Unknown(_)) => "incomplete",
         _ => "completed",
     };
-    let incomplete_reason = match response.stop_reason {
+    let incomplete_reason = match response.stop_reason.as_ref() {
         Some(StopReason::MaxTokens) => Some("max_output_tokens"),
         Some(StopReason::ContentFilter) => Some("content_filter"),
         _ => None,
