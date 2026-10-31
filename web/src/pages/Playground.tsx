@@ -33,7 +33,7 @@ import {
   TabsTrigger,
 } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
-import { formatLatency } from '@/lib/format';
+import { formatSeconds } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { errorMessage } from '@/lib/error';
 
@@ -807,13 +807,13 @@ export default function Playground() {
               />
               <Stat label="结束原因" value={result.stopReason ?? '-'} />
               <Stat
-                label="耗时"
-                value={elapsedMs == null ? '-' : formatLatency(elapsedMs)}
+                label="总耗时"
+                value={elapsedMs == null ? '-' : formatSeconds(elapsedMs)}
               />
               <Stat
-                label="首 token"
+                label="首字延迟"
                 value={
-                  firstTokenMs == null ? '-' : formatLatency(firstTokenMs)
+                  firstTokenMs == null ? '-' : formatSeconds(firstTokenMs)
                 }
               />
               {result.responseId ? (

@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   Cpu,
-  Timer,
   Zap,
 } from 'lucide-react';
 import {
@@ -28,6 +27,7 @@ import {
   formatBytes,
   formatDateTime,
   formatNumber,
+  formatSeconds,
   formatTokens,
   formatUptime,
 } from '@/lib/format';
@@ -301,7 +301,7 @@ export default function Dashboard() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
         <StatCard
           title="请求数"
           value={summary ? formatNumber(summary.requests) : '—'}
@@ -327,20 +327,14 @@ export default function Dashboard() {
           icon={Cpu}
         />
         <StatCard
-          title="平均延迟"
-          value={
-            summary ? `${Math.round(summary.avg_latency_ms)} ms` : '—'
-          }
-          icon={Timer}
-        />
-        <StatCard
-          title="平均首 Token"
+          title="平均首字延迟"
           value={
             summary?.avg_first_token_ms == null
               ? '—'
-              : `${Math.round(summary.avg_first_token_ms)} ms`
+              : formatSeconds(summary.avg_first_token_ms)
           }
           icon={Zap}
+          tooltip="首个可见事件（思考或正文）"
         />
       </div>
 

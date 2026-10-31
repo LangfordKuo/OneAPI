@@ -49,8 +49,8 @@ import {
 } from '@/components/ui/table';
 import {
   formatDateTime,
-  formatLatency,
   formatNumber,
+  formatSeconds,
   formatTokens,
   formatTokensPerSecond,
 } from '@/lib/format';
@@ -478,7 +478,10 @@ export default function Logs() {
                       <TableHead>状态</TableHead>
                       <TableHead className="hidden 2xl:table-cell">模式</TableHead>
                       <TableHead className="hidden sm:table-cell">Tokens</TableHead>
-                      <TableHead>延迟</TableHead>
+                      <TableHead>总耗时</TableHead>
+                      <TableHead className="hidden md:table-cell">
+                        首字延迟
+                      </TableHead>
                       <TableHead className="hidden 2xl:table-cell">速度</TableHead>
                       <TableHead className="hidden 2xl:table-cell">尝试</TableHead>
                       <TableHead>错误</TableHead>
@@ -541,13 +544,19 @@ export default function Logs() {
                         </TableCell>
                         <TableCell
                           className="whitespace-nowrap text-xs tabular-nums"
-                          title={`首 token ${formatLatency(entry.first_token_ms)}`}
+                          title="请求开始到响应结束"
                         >
-                          {formatLatency(entry.latency_ms)}
+                          {formatSeconds(entry.latency_ms)}
+                        </TableCell>
+                        <TableCell
+                          className="hidden whitespace-nowrap text-xs tabular-nums md:table-cell"
+                          title="首个可见事件（思考或正文）"
+                        >
+                          {formatSeconds(entry.first_token_ms)}
                         </TableCell>
                         <TableCell
                           className="hidden whitespace-nowrap text-xs tabular-nums 2xl:table-cell"
-                          title="输出 tokens ÷ 生成耗时；流式已扣除首 token 等待"
+                          title="输出 tokens ÷（总耗时 − 首字延迟）"
                         >
                           {formatTokensPerSecond(entry.tokens_per_second)}
                         </TableCell>
@@ -702,10 +711,13 @@ export default function Logs() {
                         : '-')
                     }
                   />
-                  <DetailRow label="延迟" value={formatLatency(detailQuery.data.latency_ms)} />
                   <DetailRow
-                    label="首 token"
-                    value={formatLatency(detailQuery.data.first_token_ms)}
+                    label="总耗时"
+                    value={formatSeconds(detailQuery.data.latency_ms)}
+                  />
+                  <DetailRow
+                    label="首字延迟"
+                    value={formatSeconds(detailQuery.data.first_token_ms)}
                   />
                   <DetailRow
                     label="生成速度"
