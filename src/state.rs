@@ -286,7 +286,8 @@ pub struct UpdateState {
 
 const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const AUTH_FAILURE_PER_IP_LIMIT: usize = 20;
-/// Cap the per-peer vector so concurrent failures cannot grow it without bound.
+/// Cap the per-client vector so concurrent failures cannot grow it without
+/// bound.
 const AUTH_FAILURE_MAX_TRACKED: usize = 128;
 
 /// Sliding-window limiter for failed API key authentication. Keys come from
@@ -294,6 +295,12 @@ const AUTH_FAILURE_MAX_TRACKED: usize = 128;
 /// header is authoritative, otherwise trusted-proxy XFF or the TCP peer is
 /// used. Under a CDN the header must keep distinct clients separate so the
 /// shared origin address is never rate-limited.
+///
+/// A request whose client IP cannot be resolved (`None`) is counted in one
+/// shared "unknown client" bucket instead of being exempt. That keeps the
+/// limiter closed when the configured header is missing or malformed, without
+/// ever charging those failures to the TCP peer, which under a CDN is the
+/// shared origin address.
 #[derive(Debug, Default)]
 pub struct AuthFailureLimiter {
     state: Mutex<AuthFailureState>,
@@ -301,7 +308,8 @@ pub struct AuthFailureLimiter {
 
 #[derive(Debug, Default)]
 struct AuthFailureState {
-    per_ip: HashMap<IpAddr, Vec<Instant>>,
+    /// Failures per resolved client; `None` is the shared unknown bucket.
+    clients: HashMap<Option<IpAddr>, Vec<Instant>>,
 }
 
 impl AuthFailureLimiter {
@@ -311,60 +319,51 @@ impl AuthFailureLimiter {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Whether the peer may still attempt authentication. Only the peer's own
-    /// failures count: a global gate would let one attacker lock every tenant
-    /// out of the gateway.
-    pub fn check(&self, peer: Option<IpAddr>) -> bool {
+    /// Whether the client may still attempt authentication. Only that client's
+    /// own failures count: a global gate would let one attacker lock every
+    /// tenant out of the gateway.
+    pub fn check(&self, client: Option<IpAddr>) -> bool {
         let now = Instant::now();
         let mut state = self.lock();
         state.retain_recent(now);
 
-        match peer {
-            Some(peer) => {
-                let mut expired = false;
-                let allowed = match state.per_ip.get_mut(&peer) {
-                    Some(failures) => {
-                        retain_recent(failures, now);
-                        expired = failures.is_empty();
-                        failures.len() < AUTH_FAILURE_PER_IP_LIMIT
-                    }
-                    None => true,
-                };
-                if expired {
-                    state.per_ip.remove(&peer);
-                }
-                allowed
+        let mut expired = false;
+        let allowed = match state.clients.get_mut(&client) {
+            Some(failures) => {
+                retain_recent(failures, now);
+                expired = failures.is_empty();
+                failures.len() < AUTH_FAILURE_PER_IP_LIMIT
             }
             None => true,
+        };
+        if expired {
+            state.clients.remove(&client);
         }
+        allowed
     }
 
-    pub fn record_failure(&self, peer: Option<IpAddr>) {
+    pub fn record_failure(&self, client: Option<IpAddr>) {
         let now = Instant::now();
         let mut state = self.lock();
         state.retain_recent(now);
-        if let Some(peer) = peer {
-            let failures = state.per_ip.entry(peer).or_default();
-            retain_recent(failures, now);
-            if failures.len() < AUTH_FAILURE_MAX_TRACKED {
-                failures.push(now);
-            }
+        let failures = state.clients.entry(client).or_default();
+        retain_recent(failures, now);
+        if failures.len() < AUTH_FAILURE_MAX_TRACKED {
+            failures.push(now);
         }
     }
 
-    pub fn record_success(&self, peer: Option<IpAddr>) {
-        if let Some(peer) = peer {
-            self.lock().per_ip.remove(&peer);
-        }
+    pub fn record_success(&self, client: Option<IpAddr>) {
+        self.lock().clients.remove(&client);
     }
 }
 
 impl AuthFailureState {
     fn retain_recent(&mut self, now: Instant) {
-        // Drop fully expired peers, but only scan the whole map when it grows
+        // Drop fully expired clients, but only scan the whole map when it grows
         // large so the common case stays cheap.
-        if self.per_ip.len() > 10_000 {
-            self.per_ip.retain(|_, failures| {
+        if self.clients.len() > 10_000 {
+            self.clients.retain(|_, failures| {
                 retain_recent(failures, now);
                 !failures.is_empty()
             });

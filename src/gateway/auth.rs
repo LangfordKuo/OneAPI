@@ -44,7 +44,9 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
             Ok(configured) => client_ip::resolve_client_ip(&parts.headers, &configured, peer),
             Err(error) => {
                 // Without the setting we cannot tell whether a header is in
-                // effect; skip per-IP limiting instead of blaming the peer.
+                // effect. Report an unknown client: the limiter still counts
+                // those failures in its shared bucket instead of exempting
+                // them or blaming the TCP peer.
                 tracing::warn!(error = %error, "failed to load client_ip_header setting");
                 None
             }

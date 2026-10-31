@@ -436,10 +436,14 @@ impl UsageWriter {
 }
 
 /// Write a usage row, through the queue when available.
-pub async fn record(state: &AppState, record: &UsageRecord<'_>) {
+///
+/// Returns whether the row was handed to the writer (or written synchronously).
+/// `false` means the row was not persisted, so the caller must keep a quota
+/// reservation armed instead of disarming it: nothing else will settle it.
+pub async fn record(state: &AppState, record: &UsageRecord<'_>) -> bool {
     if let Some(writer) = &state.usage_writer {
         if writer.try_enqueue(OwnedUsageRecord::from(record)) {
-            return;
+            return true;
         }
         writer.note_sync_fallback();
         tracing::warn!(
@@ -457,8 +461,10 @@ pub async fn record(state: &AppState, record: &UsageRecord<'_>) {
             request_id = record.request_id,
             "failed to write usage log"
         );
+        false
     } else {
         state.events.usage_written(1);
+        true
     }
 }
 
@@ -582,6 +588,11 @@ where
         .as_deref()
         .map(|value| truncate_field("error_message", value, MAX_ERROR_MESSAGE_LEN));
 
+    // The two foreign keys are normalized through an existence check instead of
+    // binding the id directly. A key or channel deleted between admission and
+    // this batch write would otherwise make the whole 100-row transaction fail
+    // on the FK constraint; a missing row now stores NULL, which is exactly
+    // what the schema's ON DELETE SET NULL produces for already-written rows.
     sqlx::query(
         "INSERT INTO usage_logs
          (request_id, source, api_key_id, detail_api_key_id, channel_id, model, upstream_model,
@@ -589,7 +600,8 @@ where
           error_type, error_message, prompt_tokens, completion_tokens, total_tokens,
           cached_tokens, cache_creation_tokens, reasoning_tokens, latency_ms, first_token_ms,
           created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, (SELECT id FROM api_keys WHERE id = ?), ?,
+                 (SELECT id FROM channels WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&record.request_id)
     .bind(&record.source)

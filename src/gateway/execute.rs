@@ -179,8 +179,13 @@ pub async fn proxy_with_identity(
 
     let defaults = state.cache.defaults(&state.db).await?;
     let store_request_bodies = defaults.store_request_bodies;
-    let detail_request =
-        store_request_bodies.then(|| serde_json::to_string(&body).unwrap_or_default());
+    // Truncate as soon as the body is serialized: this string is cloned into
+    // `StreamJob`, and the non-stream retry paths keep it alive for the whole
+    // request. Holding the untruncated body would pin a full extra copy of a
+    // large payload; the detail write applies the same bound anyway.
+    let detail_request = store_request_bodies.then(|| {
+        models::request_detail::truncate_detail(&serde_json::to_string(&body).unwrap_or_default())
+    });
 
     let Some(model) = requested_model else {
         let message = "model is required";
@@ -581,6 +586,13 @@ pub async fn proxy_with_identity(
         };
 
         let status = response.status();
+        // Capture the content type before the response is consumed by the body
+        // read; a same-protocol 2xx is only forwarded when it is JSON.
+        let upstream_content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_ascii_lowercase());
         let body_bytes = match upstream::read_body_limited_bytes(response).await {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -598,6 +610,23 @@ pub async fn proxy_with_identity(
                 let message = "upstream returned an empty response";
                 state.mark_channel_failure(channel.id, message).await;
                 last_error_type = "upstream_error".to_string();
+                last_message = message.to_string();
+                last_provider_json = false;
+                continue;
+            }
+            // Same protocol: the payload is forwarded to the client as-is, so a
+            // 2xx carrying HTML, a plain-text error page or malformed JSON must
+            // not be echoed back as a successful response. Another channel may
+            // still answer the request.
+            if upstream == inbound
+                && (upstream_content_type
+                    .as_deref()
+                    .is_some_and(|value| !value.contains("json"))
+                    || upstream_value.is_none())
+            {
+                let message = "upstream returned an invalid response";
+                state.mark_channel_failure(channel.id, message).await;
+                last_error_type = "upstream_invalid_response".to_string();
                 last_message = message.to_string();
                 last_provider_json = false;
                 continue;
@@ -788,7 +817,9 @@ pub async fn proxy_with_identity(
             .await;
 
             if detail_request.is_some() {
-                let response_text = String::from_utf8_lossy(&client_bytes);
+                let captured = String::from_utf8_lossy(&client_bytes);
+                // Bound the body before it enters the write queue.
+                let response_text = models::request_detail::truncate_detail(&captured);
                 store_request_detail(
                     state,
                     &request_id,
@@ -1290,12 +1321,15 @@ impl AttemptLog<'_> {
             created_at: now_ms(),
         };
 
-        usage::record(state, &record).await;
+        let written = usage::record(state, &record).await;
 
-        // The row now owns settlement; dropping it here would release a second
-        // time from under the writer.
-        if let Some(mut reservation) = self.reservation.take() {
-            reservation.disarm();
+        // Only a row that reached the writer (or the database) owns settlement.
+        // A failed write leaves the guard armed so dropping this log releases
+        // the reservation instead of pinning the quota forever.
+        if written {
+            if let Some(mut reservation) = self.reservation.take() {
+                reservation.disarm();
+            }
         }
     }
 }

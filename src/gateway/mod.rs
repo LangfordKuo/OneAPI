@@ -194,15 +194,27 @@ async fn count_tokens(
                 let bytes = upstream::read_body_limited_bytes(response)
                     .await
                     .unwrap_or_default();
+                let value = serde_json::from_slice::<Value>(&bytes).ok();
                 if status.is_success() {
-                    return Ok(
-                        (status, [(header::CONTENT_TYPE, "application/json")], bytes)
-                            .into_response(),
-                    );
+                    // Only a well-formed count response is forwarded; a 200
+                    // carrying an HTML page or unrelated JSON must not be
+                    // echoed to the client as a token count.
+                    let has_count = value
+                        .as_ref()
+                        .and_then(|value| value.get("input_tokens"))
+                        .is_some();
+                    if has_count {
+                        return Ok(
+                            (status, [(header::CONTENT_TYPE, "application/json")], bytes)
+                                .into_response(),
+                        );
+                    }
+                    last_message = "upstream returned an invalid count_tokens response".to_string();
+                    last_provider_json = false;
+                    continue;
                 }
 
                 let text = String::from_utf8_lossy(&bytes);
-                let value = serde_json::from_slice::<Value>(&bytes).ok();
                 let (error_type, message) = execute::upstream_error_info(value.as_ref(), &text);
                 let provider_json = value.is_some();
                 // count_tokens is an auxiliary endpoint that not every

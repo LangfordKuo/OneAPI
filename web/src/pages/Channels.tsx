@@ -597,6 +597,10 @@ export default function Channels() {
   }
 
   function submit() {
+    // Ignore a second Enter/click while the create/update is in flight.
+    if (saveMutation.isPending) {
+      return;
+    }
     const nextErrors = validateDraft(draft, editing);
     if (Object.keys(nextErrors).length > 0) {
       showErrors(nextErrors);

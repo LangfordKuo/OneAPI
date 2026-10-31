@@ -111,14 +111,18 @@ impl FromRequestParts<AppState> for ClientAddr {
         // in for a CDN/proxy). An empty setting defaults to X-Forwarded-For
         // only for loopback/private peers, so a direct public client cannot
         // spoof it.
-        let configured = state
-            .cache
-            .client_ip_header(&state.db)
-            .await
-            .unwrap_or_else(|error| {
+        let configured = match state.cache.client_ip_header(&state.db).await {
+            Ok(configured) => configured,
+            Err(error) => {
+                // We cannot tell whether a header is in effect. An empty
+                // setting would fall back to the TCP peer, which behind a CDN
+                // is the shared origin address; report an unknown client
+                // instead so limiting keeps applying to an unattributable peer
+                // without ever blaming that address.
                 tracing::warn!(error = %error, "failed to load client_ip_header setting");
-                String::new()
-            });
+                return Ok(Self(None));
+            }
+        };
 
         Ok(Self(client_ip::resolve_client_ip(
             &parts.headers,

@@ -34,7 +34,7 @@ pub async fn snapshot(
     let _snapshot_guard = state
         .backup_lock
         .try_lock()
-        .map_err(|_| AppError::BadRequest("a backup is already in progress".to_string()))?;
+        .map_err(|_| AppError::Conflict("a backup is already in progress".to_string()))?;
 
     // Rate limit attempts rather than successes so a failing snapshot (for
     // example a full disk) cannot be retried in a tight loop.

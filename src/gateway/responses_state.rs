@@ -180,8 +180,38 @@ pub async fn store(
     request: &Value,
     response: &Value,
 ) -> sqlx::Result<bool> {
-    let request_json = serde_json::to_string(request).unwrap_or_default();
-    let response_json = serde_json::to_string(response).unwrap_or_default();
+    // Every skipped persistence counts as a rejection so operators can see
+    // quota pressure and payload problems in one place.
+    let reject = || {
+        state
+            .response_store_rejected
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    };
+
+    let request_json = match serde_json::to_string(request) {
+        Ok(value) => value,
+        Err(error) => {
+            reject();
+            tracing::warn!(
+                api_key_id,
+                error = %error,
+                "request payload is not serializable; skipping response persistence"
+            );
+            return Ok(false);
+        }
+    };
+    let response_json = match serde_json::to_string(response) {
+        Ok(value) => value,
+        Err(error) => {
+            reject();
+            tracing::warn!(
+                api_key_id,
+                error = %error,
+                "response payload is not serializable; skipping response persistence"
+            );
+            return Ok(false);
+        }
+    };
 
     let id = response
         .get("id")
@@ -189,6 +219,11 @@ pub async fn store(
         .unwrap_or_default()
         .to_string();
     if id.is_empty() {
+        reject();
+        tracing::warn!(
+            api_key_id,
+            "response has no id; skipping response persistence"
+        );
         return Ok(false);
     }
 

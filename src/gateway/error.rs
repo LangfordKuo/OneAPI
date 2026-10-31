@@ -65,17 +65,47 @@ pub fn truncate_message(value: &str, max_chars: usize) -> String {
 /// which reveals internal hosts, ports and routing paths. Those parts are never
 /// useful to an API key client, so they are redacted before the text is echoed
 /// back.
+///
+/// A URL is not necessarily a whole whitespace-delimited token: it commonly
+/// appears as `(https://...)`, `url=https://...` or `<https://...>`. The scan
+/// therefore looks inside each token and replaces everything from the scheme
+/// onward, keeping the prefix and all surrounding whitespace intact.
 pub(crate) fn redact_urls(text: &str) -> String {
-    text.split_whitespace()
-        .map(|token| {
-            if token.starts_with("http://") || token.starts_with("https://") {
-                "[url]"
-            } else {
-                token
+    let mut output = String::with_capacity(text.len());
+    let mut token_start: Option<usize> = None;
+
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() {
+            if let Some(start) = token_start.take() {
+                redact_token(&mut output, &text[start..index]);
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            output.push(character);
+        } else if token_start.is_none() {
+            token_start = Some(index);
+        }
+    }
+    if let Some(start) = token_start {
+        redact_token(&mut output, &text[start..]);
+    }
+
+    output
+}
+
+fn redact_token(output: &mut String, token: &str) {
+    // ASCII lowercasing does not change byte offsets, so the match index is
+    // valid for slicing the original token.
+    let lower = token.to_ascii_lowercase();
+    let scheme = [lower.find("http://"), lower.find("https://")]
+        .into_iter()
+        .flatten()
+        .min();
+    match scheme {
+        Some(index) => {
+            output.push_str(&token[..index]);
+            output.push_str("[url]");
+        }
+        None => output.push_str(token),
+    }
 }
 
 /// Wording that is safe to return to an API key client for an upstream failure.
@@ -93,9 +123,9 @@ pub(crate) fn client_safe_upstream_message(
         "upstream_unreachable" => "upstream request failed".to_string(),
         "upstream_configuration_error" => "upstream channel is misconfigured".to_string(),
         "upstream_stream_timeout" => "upstream stream timed out".to_string(),
-        "upstream_invalid_content_type" | "upstream_invalid_frame" => {
-            "upstream returned an invalid response".to_string()
-        }
+        "upstream_invalid_content_type"
+        | "upstream_invalid_frame"
+        | "upstream_invalid_response" => "upstream returned an invalid response".to_string(),
         _ if !provider_json => "upstream returned an invalid response".to_string(),
         _ => truncate_message(&redact_urls(raw), 300),
     }

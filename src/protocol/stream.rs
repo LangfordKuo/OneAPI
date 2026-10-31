@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use super::sse::SseFrame;
 use super::{
-    anthropic, chat, responses, BlockKind, Protocol, ProtocolError, StopReason, StreamBlock,
-    StreamEvent, Usage,
+    anthropic, chat, has_error, responses, BlockKind, Protocol, ProtocolError, StopReason,
+    StreamBlock, StreamEvent, Usage,
 };
 
 fn parse_frame(frame: &SseFrame, protocol: &'static str) -> Result<Value, ProtocolError> {
@@ -131,7 +131,7 @@ impl ChatDecoder {
         let value = parse_frame(frame, "chat")?;
         let mut events = Vec::new();
 
-        if value.get("error").is_some() {
+        if has_error(&value) {
             events.push(error_event(&value));
             return Ok(events);
         }

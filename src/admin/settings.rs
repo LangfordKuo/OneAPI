@@ -169,11 +169,7 @@ pub async fn update(
     }
 
     if let Some(value) = input.usage_log_retention_days {
-        if value < 0 {
-            return Err(AppError::BadRequest(
-                "usage_log_retention_days cannot be negative".to_string(),
-            ));
-        }
+        check_range("usage_log_retention_days", value, 0, MAX_RETENTION_DAYS)?;
         updates.push(("usage_log_retention_days", value.to_string()));
     }
 
@@ -188,11 +184,7 @@ pub async fn update(
     }
 
     if let Some(value) = input.response_retention_days {
-        if value < 0 {
-            return Err(AppError::BadRequest(
-                "response_retention_days cannot be negative".to_string(),
-            ));
-        }
+        check_range("response_retention_days", value, 0, MAX_RETENTION_DAYS)?;
         updates.push(("response_retention_days", value.to_string()));
     }
 

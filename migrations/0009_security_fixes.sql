@@ -30,9 +30,12 @@ CREATE TABLE IF NOT EXISTS response_usage (
     bytes INTEGER NOT NULL DEFAULT 0,
     rows INTEGER NOT NULL DEFAULT 0
 );
+-- Sizes are bytes, matching the Rust-side quota checks: `length()` counts
+-- characters for TEXT, so each column is cast to BLOB before measuring.
 INSERT OR IGNORE INTO response_usage (api_key_id, bytes, rows)
 SELECT api_key_id,
-       SUM(length(COALESCE(request_json, '')) + length(COALESCE(response_json, ''))),
+       SUM(length(CAST(COALESCE(request_json, '') AS BLOB))
+           + length(CAST(COALESCE(response_json, '') AS BLOB))),
        COUNT(*)
 FROM responses
 GROUP BY api_key_id;

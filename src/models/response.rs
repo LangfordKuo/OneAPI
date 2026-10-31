@@ -29,46 +29,6 @@ pub struct StoredResponse {
     pub created_at: i64,
 }
 
-/// Legacy unconditional upsert kept for callers that do not need quota
-/// accounting. Library users that persist gateway responses must use
-/// [`store_with_quota`] so `response_usage` stays in sync.
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-pub async fn insert(
-    pool: &SqlitePool,
-    id: &str,
-    api_key_id: i64,
-    model: &str,
-    request_json: &str,
-    response_json: &str,
-    status: &str,
-    created_at: i64,
-) -> sqlx::Result<bool> {
-    let result = sqlx::query(
-        "INSERT INTO responses
-         (id, api_key_id, model, request_json, response_json, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-            model = excluded.model,
-            request_json = excluded.request_json,
-            response_json = excluded.response_json,
-            status = excluded.status,
-            created_at = excluded.created_at
-         WHERE responses.api_key_id = excluded.api_key_id",
-    )
-    .bind(id)
-    .bind(api_key_id)
-    .bind(model)
-    .bind(request_json)
-    .bind(response_json)
-    .bind(status)
-    .bind(created_at)
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected() > 0)
-}
-
 /// Persist a Responses object while enforcing per-key and global quotas.
 ///
 /// The ownership lookup, quota check, upsert and `response_usage` update all
@@ -101,8 +61,13 @@ pub async fn store_with_quota(
 
     let mut tx = pool.begin().await?;
 
+    // `length()` counts characters for TEXT and bytes for BLOB. The quotas are
+    // enforced in bytes (Rust `.len()`), so the column is cast before measuring;
+    // otherwise multi-byte content would be under-counted and could exceed the
+    // configured budget.
     let old_row: Option<i64> = sqlx::query_scalar(
-        "SELECT length(COALESCE(request_json, '')) + length(COALESCE(response_json, ''))
+        "SELECT length(CAST(COALESCE(request_json, '') AS BLOB))
+              + length(CAST(COALESCE(response_json, '') AS BLOB))
          FROM responses WHERE id = ? AND api_key_id = ?",
     )
     .bind(id)
@@ -206,7 +171,8 @@ pub async fn delete_before(pool: &SqlitePool, cutoff: i64, batch: i64) -> sqlx::
              WHERE rowid IN
                  (SELECT rowid FROM responses WHERE created_at < ? LIMIT ?)
              RETURNING api_key_id,
-                 length(COALESCE(request_json, '')) + length(COALESCE(response_json, ''))",
+                 length(CAST(COALESCE(request_json, '') AS BLOB))
+                     + length(CAST(COALESCE(response_json, '') AS BLOB))",
         )
         .bind(cutoff)
         .bind(batch)
@@ -269,7 +235,8 @@ pub async fn delete(pool: &SqlitePool, id: &str, api_key_id: i64) -> sqlx::Resul
 
     let bytes: Option<i64> = sqlx::query_scalar(
         "DELETE FROM responses WHERE id = ? AND api_key_id = ?
-         RETURNING length(COALESCE(request_json, '')) + length(COALESCE(response_json, ''))",
+         RETURNING length(CAST(COALESCE(request_json, '') AS BLOB))
+             + length(CAST(COALESCE(response_json, '') AS BLOB))",
     )
     .bind(id)
     .bind(api_key_id)

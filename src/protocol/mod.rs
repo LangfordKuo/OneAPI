@@ -40,6 +40,16 @@ pub(crate) fn error_fields(value: &Value, code_first: bool) -> (Option<String>, 
     (error_type.map(str::to_string), message.map(str::to_string))
 }
 
+/// Whether a payload carries a non-null `error` member.
+///
+/// `"error": null` is a normal successful frame for several OpenAI-compatible
+/// upstreams; only the presence of a non-null value signals failure. Stream
+/// frames and passthrough observation share this predicate so both paths agree
+/// with the non-stream body check.
+pub fn has_error(value: &Value) -> bool {
+    value.get("error").is_some_and(|error| !error.is_null())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Chat,

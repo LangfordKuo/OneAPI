@@ -189,6 +189,26 @@ export interface SiteInfo {
   version: string;
 }
 
+export interface SystemInfo {
+  name: string;
+  version: string;
+  uptime_seconds: number;
+  database: string;
+  data_dir: string;
+  database_bytes: number;
+  wal_bytes: number;
+  last_backup_at: number | null;
+  usage_queue_depth: number;
+  /** Responses objects skipped by storage limits or id conflicts. */
+  response_store_rejected?: number;
+  /** Request details dropped after the detail queue exceeded its budget. */
+  detail_dropped?: number;
+  /** Bytes currently held by queued request details. */
+  detail_queue_bytes?: number;
+  cooling_channels: number;
+  failovers_24h: number;
+}
+
 export interface SetupStatus {
   initialized: boolean;
   version: string;
