@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-31T12:16:06Z",
+  "updated_at": "2026-10-31T12:21:51Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -41,9 +41,9 @@
     },
     "AGENTS.md": {
       "role": "index",
-      "sha256": "3a6735af1bce9d34e379c0ae2770b1168b1112ad8d199cc5b313d852ed165894",
-      "size": 14021,
-      "normalized_sha256": "3a6735af1bce9d34e379c0ae2770b1168b1112ad8d199cc5b313d852ed165894"
+      "sha256": "550b034aa4a84df9f0f8d693f8406ffca0f961902223aade2a14d748e2653e99",
+      "size": 14012,
+      "normalized_sha256": "550b034aa4a84df9f0f8d693f8406ffca0f961902223aade2a14d748e2653e99"
     },
     "Cargo.lock": {
       "role": "index",
@@ -89,9 +89,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "06cbd2f9d4dd77e00b2f67b83b8741b70e115e2c8f6f1c2098f4bb91115d8db8",
-      "size": 89731,
-      "normalized_sha256": "06cbd2f9d4dd77e00b2f67b83b8741b70e115e2c8f6f1c2098f4bb91115d8db8"
+      "sha256": "b0cb03228f91f27170950a942855c21789c744e20d60926a5607507325673a24",
+      "size": 88546,
+      "normalized_sha256": "b0cb03228f91f27170950a942855c21789c744e20d60926a5607507325673a24"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -123,6 +123,12 @@
       "size": 47791,
       "normalized_sha256": "eefca4494f9b433405614a72da7d27793484f4617e0ac3999577efe59448f2fc"
     },
+    "docs/KNOWN_LIMITATIONS.md": {
+      "role": "index",
+      "sha256": "6fc3ffe055cd0a6ae947cc76d6f77fd536843e01b74f89fc20d599b1a205bc71",
+      "size": 1813,
+      "normalized_sha256": "6fc3ffe055cd0a6ae947cc76d6f77fd536843e01b74f89fc20d599b1a205bc71"
+    },
     "docs/OPTIMIZATION_PLAN.md": {
       "role": "index",
       "sha256": "c78470a7fc43c5b97157fa3c03fb9a69e78182fad58e7d0194faa2f3786c18b0",
@@ -131,9 +137,9 @@
     },
     "docs/PROGRESS.md": {
       "role": "index",
-      "sha256": "fa64397ce7a551be34264b9a5625e1cd4d4a4d5351f501816d648c111857d878",
-      "size": 82271,
-      "normalized_sha256": "fa64397ce7a551be34264b9a5625e1cd4d4a4d5351f501816d648c111857d878"
+      "sha256": "3eeb69a18f8dde473b2f655b317b183f4a47cf5eebe3f8bf4ef1b792b89658a3",
+      "size": 81713,
+      "normalized_sha256": "3eeb69a18f8dde473b2f655b317b183f4a47cf5eebe3f8bf4ef1b792b89658a3"
     },
     "docs/REVIEW_PLAN.md": {
       "role": "index",
