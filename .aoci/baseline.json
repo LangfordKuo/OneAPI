@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-26T16:13:10Z",
-  "updated_at": "2026-10-31T12:29:48Z",
+  "updated_at": "2026-10-31T13:16:18Z",
   "files": {
     ".dockerignore": {
       "role": "index",
@@ -47,15 +47,15 @@
     },
     "Cargo.lock": {
       "role": "index",
-      "sha256": "dac422211c3d9b5b4e01737d4e5f3d875231001b615c9fa08454a1aa91069553",
+      "sha256": "757e519f9761d626c7ac67524fb3d67b635f8afe3ac9805a9dab978011c5be54",
       "size": 83963,
-      "normalized_sha256": "dac422211c3d9b5b4e01737d4e5f3d875231001b615c9fa08454a1aa91069553"
+      "normalized_sha256": "757e519f9761d626c7ac67524fb3d67b635f8afe3ac9805a9dab978011c5be54"
     },
     "Cargo.toml": {
       "role": "index",
-      "sha256": "2aa3b3143e2744410f49beaacc8672aa15eff2203c0da6972ca956ee63aaff0c",
+      "sha256": "5ac7de66ba529bfd57178f7449600d1c9d3d7a2f51b9e9e1a0162cff433f9cc7",
       "size": 1542,
-      "normalized_sha256": "2aa3b3143e2744410f49beaacc8672aa15eff2203c0da6972ca956ee63aaff0c"
+      "normalized_sha256": "5ac7de66ba529bfd57178f7449600d1c9d3d7a2f51b9e9e1a0162cff433f9cc7"
     },
     "Dockerfile": {
       "role": "index",
@@ -89,9 +89,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "294fb41773d5f2b3641f299019a5c323b774275e0b00b3ebcf57272b1c0b2f66",
-      "size": 88136,
-      "normalized_sha256": "294fb41773d5f2b3641f299019a5c323b774275e0b00b3ebcf57272b1c0b2f66"
+      "sha256": "715d24674ffbb84a96c5daa92c39465026c2ee7572447604078b59065896c5ad",
+      "size": 91252,
+      "normalized_sha256": "715d24674ffbb84a96c5daa92c39465026c2ee7572447604078b59065896c5ad"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -125,9 +125,9 @@
     },
     "docs/KNOWN_LIMITATIONS.md": {
       "role": "index",
-      "sha256": "6fc3ffe055cd0a6ae947cc76d6f77fd536843e01b74f89fc20d599b1a205bc71",
-      "size": 1813,
-      "normalized_sha256": "6fc3ffe055cd0a6ae947cc76d6f77fd536843e01b74f89fc20d599b1a205bc71"
+      "sha256": "e9a266acab0e29028440d41553b6894dabf040cc252e53a0c15db4852464b429",
+      "size": 1999,
+      "normalized_sha256": "e9a266acab0e29028440d41553b6894dabf040cc252e53a0c15db4852464b429"
     },
     "docs/OPTIMIZATION_PLAN.md": {
       "role": "index",
@@ -207,6 +207,12 @@
       "size": 3640,
       "normalized_sha256": "e922cfaff81e909c32f349a1fc62a2690ca28a03e895fedbec62708af791e80f"
     },
+    "migrations/0010_playground_sessions.sql": {
+      "role": "index",
+      "sha256": "bbf38cd7d1f149bb21dff9c48a2e861557a823d7d265cf589f2d6a2a03701891",
+      "size": 1352,
+      "normalized_sha256": "bbf38cd7d1f149bb21dff9c48a2e861557a823d7d265cf589f2d6a2a03701891"
+    },
     "rust-toolchain.toml": {
       "role": "index",
       "sha256": "a6a0bbd29ffaa8182dc22d1d9149709f1091e47df40ed96eb8a78a711c66a4ce",
@@ -269,15 +275,21 @@
     },
     "src/admin/mod.rs": {
       "role": "index",
-      "sha256": "dc4f263e44067c9d30d9c7d7facdf2d328171b341c9bf581f0a1302fa716e621",
-      "size": 2456,
-      "normalized_sha256": "dc4f263e44067c9d30d9c7d7facdf2d328171b341c9bf581f0a1302fa716e621"
+      "sha256": "2cfcb7530e658d0d8e636e1c7e7c7d562751d531439107fd3c82b97275409a19",
+      "size": 2771,
+      "normalized_sha256": "2cfcb7530e658d0d8e636e1c7e7c7d562751d531439107fd3c82b97275409a19"
     },
     "src/admin/playground.rs": {
       "role": "index",
       "sha256": "f0afddab5b94ae14ce824ec84c11fbebf66f6ca70f1926047b50cfc7a537c3f3",
       "size": 1660,
       "normalized_sha256": "f0afddab5b94ae14ce824ec84c11fbebf66f6ca70f1926047b50cfc7a537c3f3"
+    },
+    "src/admin/playground_sessions.rs": {
+      "role": "index",
+      "sha256": "a4f3f73aa0df6c8ee1e6c35c484aa444c7e98cf17f3bfd3afc904de864ccd988",
+      "size": 2545,
+      "normalized_sha256": "a4f3f73aa0df6c8ee1e6c35c484aa444c7e98cf17f3bfd3afc904de864ccd988"
     },
     "src/admin/query.rs": {
       "role": "index",
@@ -437,9 +449,15 @@
     },
     "src/models/mod.rs": {
       "role": "index",
-      "sha256": "ab63f89c3e1b7c90664b9f6db4b9f3bcc630767f84c1640dd6a0419e60923b37",
-      "size": 214,
-      "normalized_sha256": "ab63f89c3e1b7c90664b9f6db4b9f3bcc630767f84c1640dd6a0419e60923b37"
+      "sha256": "abebf9912e9d8815dc39f35c51655514a6d40b1d2c31df0eb9ccab468b0a1e4b",
+      "size": 242,
+      "normalized_sha256": "abebf9912e9d8815dc39f35c51655514a6d40b1d2c31df0eb9ccab468b0a1e4b"
+    },
+    "src/models/playground_session.rs": {
+      "role": "index",
+      "sha256": "8710aa544e24db8afb78050c3250ba2c5a6cccb4100d9e0ed91b17300b0b5f99",
+      "size": 14907,
+      "normalized_sha256": "8710aa544e24db8afb78050c3250ba2c5a6cccb4100d9e0ed91b17300b0b5f99"
     },
     "src/models/request_detail.rs": {
       "role": "index",
@@ -587,15 +605,15 @@
     },
     "web/package-lock.json": {
       "role": "index",
-      "sha256": "4c63babc2ff5fb56fd4ce6b5a976b5605b82659317acdd974c51d846d179a34f",
-      "size": 239333,
-      "normalized_sha256": "4c63babc2ff5fb56fd4ce6b5a976b5605b82659317acdd974c51d846d179a34f"
+      "sha256": "3a51270fd9d8abf2de2e79408490d1729e29912640523d23fb211fb9bf5bab94",
+      "size": 296386,
+      "normalized_sha256": "3a51270fd9d8abf2de2e79408490d1729e29912640523d23fb211fb9bf5bab94"
     },
     "web/package.json": {
       "role": "index",
-      "sha256": "c5abda23a7d3e0ad746131c6c004dd7714e8647dceb111aed1426fd215297c0b",
-      "size": 1222,
-      "normalized_sha256": "c5abda23a7d3e0ad746131c6c004dd7714e8647dceb111aed1426fd215297c0b"
+      "sha256": "10b551216f980d5f7ed02ef13dc5856af399a3c815fc37948e55b95da62963e7",
+      "size": 1283,
+      "normalized_sha256": "10b551216f980d5f7ed02ef13dc5856af399a3c815fc37948e55b95da62963e7"
     },
     "web/src/App.tsx": {
       "role": "index",
@@ -617,9 +635,9 @@
     },
     "web/src/api/types.ts": {
       "role": "index",
-      "sha256": "898bdaceb87ac79b6ada0e7c656cdeaf3c2193ff84248d18e65de0488e859c57",
-      "size": 5966,
-      "normalized_sha256": "898bdaceb87ac79b6ada0e7c656cdeaf3c2193ff84248d18e65de0488e859c57"
+      "sha256": "9f4004e51cdac81c8c8f0bb28afd2f2417b7dc52ac025d729d5cf356fb085b90",
+      "size": 7387,
+      "normalized_sha256": "9f4004e51cdac81c8c8f0bb28afd2f2417b7dc52ac025d729d5cf356fb085b90"
     },
     "web/src/components/DashboardCharts.tsx": {
       "role": "index",
@@ -669,6 +687,12 @@
       "size": 1767,
       "normalized_sha256": "3a463fbadead9f0e993e27c9079001afbdae23efb203d9aa660b05c9e8606276"
     },
+    "web/src/components/common/markdown.tsx": {
+      "role": "index",
+      "sha256": "466a926eba73da6f9449b53edc74a2e28c885cd87e7f2d151839f06e9f6d8beb",
+      "size": 2993,
+      "normalized_sha256": "466a926eba73da6f9449b53edc74a2e28c885cd87e7f2d151839f06e9f6d8beb"
+    },
     "web/src/components/common/page-header.tsx": {
       "role": "index",
       "sha256": "44b8430096de851d997486a9dec24f1c8a2c861f4538d971a9eae97409337517",
@@ -695,9 +719,9 @@
     },
     "web/src/components/layout/app-shell.tsx": {
       "role": "index",
-      "sha256": "c61682ba9b09043ab6d6d7ccffb6155abf361c356b7558daaf0d33e9c250ea77",
-      "size": 9440,
-      "normalized_sha256": "c61682ba9b09043ab6d6d7ccffb6155abf361c356b7558daaf0d33e9c250ea77"
+      "sha256": "ceba8048da04faaf865ee5b21f2fa473a16ca534b21a913b666aae6ea665d89b",
+      "size": 9743,
+      "normalized_sha256": "ceba8048da04faaf865ee5b21f2fa473a16ca534b21a913b666aae6ea665d89b"
     },
     "web/src/components/ui/alert-dialog.tsx": {
       "role": "index",
@@ -861,6 +885,12 @@
       "size": 2616,
       "normalized_sha256": "9a31fda3c2c0f5e4855b30b13a8701d1d839309cdea33afc8d3d360f20f38b3c"
     },
+    "web/src/lib/playground-stream.ts": {
+      "role": "index",
+      "sha256": "dba6d85dd6a9ee94c022027f06e7815808d9707198deb4679ea7a822cf5241f0",
+      "size": 14308,
+      "normalized_sha256": "dba6d85dd6a9ee94c022027f06e7815808d9707198deb4679ea7a822cf5241f0"
+    },
     "web/src/lib/utils.ts": {
       "role": "index",
       "sha256": "14300d758170c270c75b057f38fedb3793a5920ea872f0477e29fb131185e8a7",
@@ -917,9 +947,9 @@
     },
     "web/src/pages/Playground.tsx": {
       "role": "index",
-      "sha256": "5ddbd888b71dfe0c67ee7bad5706eeb8b36d8400b0c6deef075d7435b77228c7",
-      "size": 30504,
-      "normalized_sha256": "5ddbd888b71dfe0c67ee7bad5706eeb8b36d8400b0c6deef075d7435b77228c7"
+      "sha256": "cd9e492977833de1804b7cfba96682f3bd7f27aa5bd30dfb32f980038c8fb5a8",
+      "size": 42037,
+      "normalized_sha256": "cd9e492977833de1804b7cfba96682f3bd7f27aa5bd30dfb32f980038c8fb5a8"
     },
     "web/src/pages/Settings.tsx": {
       "role": "index",

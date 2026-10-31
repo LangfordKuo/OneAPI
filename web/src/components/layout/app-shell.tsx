@@ -201,6 +201,9 @@ export function AppShell({
   const { resolvedTheme, setTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
   const title = PAGE_TITLES[location.pathname] ?? '管理后台';
+  // Playground owns the full content area so its chat sidebar and composer can
+  // use the viewport height without the standard page padding.
+  const isPlayground = location.pathname === '/playground';
 
   return (
     <div className="min-h-full bg-muted/30">
@@ -283,7 +286,12 @@ export function AppShell({
           </DropdownMenu>
         </header>
 
-        <main className="mx-auto w-full max-w-[1600px] p-4 lg:p-6">
+        <main
+          className={cn(
+            'mx-auto w-full',
+            isPlayground ? 'max-w-none p-0' : 'max-w-[1600px] p-4 lg:p-6',
+          )}
+        >
           {children}
         </main>
       </div>
