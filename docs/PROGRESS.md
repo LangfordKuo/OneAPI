@@ -1,9 +1,9 @@
 # OneAPI 进度
 
 - 最后更新：2026-10-31
-- 当前阶段：v0.1.21 前端体验与更新流程优化已实现（待合并/发布）
-- 当前分支：`feature/ui-polish-0.1.21`
-- 最近发布：`v0.1.20`
+- 当前阶段：v0.1.21 已发布，后续开发在 `develop` 长期分支进行
+- 当前分支：`develop`
+- 最近发布：`v0.1.21`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
 ## 里程碑
@@ -635,3 +635,12 @@
 - 新会话开始先读 `AGENTS.md`、本文档和 `docs/IMPLEMENTATION_PLAN.md`。
 - 每个里程碑结束更新本文档；计划或决策变化同步更新 `docs/IMPLEMENTATION_PLAN.md`。
 - 不提交 AOCI 的机器运行时资产；`aoci.txt`、`aoci.meta.txt`、`aoci.code.txt`、`.aoci/config.json`、`.aoci/baseline.json`、`AGENTS.md`、`.gitattributes` 属于应纳入版本管理的认知资产。
+
+## 分支约定
+
+- `develop`：长期开发与集成分支，日常功能、修复和文档变更都在此进行；默认从 `develop` 切出工作分支。
+- `feature/*`、`fix/*`、`security/*`：短期工作分支，从 `develop` 切出，完成后合回 `develop` 并删除；命名沿用 `feature/<主题>-<版本>`、`fix/<主题>`、`security/<主题>-<版本>`。
+- `main`：发布基线，只合入已验证的 `develop` 内容；不直接在 `main` 上开发。
+- `release/*`：发布前冻结或补丁需要时从 `develop` 临时切出，发布后合回 `main`，并按需回合并到 `develop` 后删除。
+- 版本发布：`main` 上的 `Cargo.toml` 版本与 `v*` Tag 必须一致，Tag 触发 Release 流水线；发布后在 `develop` 同步版本号与文档。
+- 已合并分支应及时删除（本地与远端），历史由 Tag 与 `main` 保留。
