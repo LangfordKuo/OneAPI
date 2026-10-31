@@ -1363,13 +1363,17 @@ async fn store_request_detail(
     let Some(request) = request else {
         return;
     };
+    // Truncate before building the record so an oversized body is never copied
+    // around in full; `OwnedDetailRecord` re-applies the same bound.
+    let request = models::request_detail::truncate_detail(request);
+    let response = models::request_detail::truncate_detail(response);
     usage::record_detail(
         state,
         &usage::DetailRecord {
             request_id,
             api_key_id: api_key_id.unwrap_or(0),
-            request_body: request,
-            response_body: response,
+            request_body: &request,
+            response_body: &response,
             created_at: now_ms(),
         },
     )

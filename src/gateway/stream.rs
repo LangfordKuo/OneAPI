@@ -441,7 +441,9 @@ async fn run(
 
     if job.store_request_detail {
         if let Some(request) = &job.detail_request {
-            let response = String::from_utf8_lossy(&response_capture);
+            let captured = String::from_utf8_lossy(&response_capture);
+            // Bound the body before the record copies it into the write queue.
+            let response = models::request_detail::truncate_detail(&captured);
             usage::record_detail(
                 &job.state,
                 &usage::DetailRecord {

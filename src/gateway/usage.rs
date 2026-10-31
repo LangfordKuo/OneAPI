@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -94,18 +94,36 @@ struct OwnedDetailRecord {
     request_body: String,
     response_body: String,
     created_at: i64,
+    /// Bytes this record holds in the queue, measured after truncation. Kept
+    /// with the record so the writer can release exactly what it reserved.
+    size: usize,
 }
 
 impl From<&DetailRecord<'_>> for OwnedDetailRecord {
     fn from(record: &DetailRecord<'_>) -> Self {
+        // Truncate before copying so an oversized body is never duplicated in
+        // full just to be discarded by `request_detail::insert` later.
+        let request_body = models::request_detail::truncate_detail(record.request_body);
+        let response_body = models::request_detail::truncate_detail(record.response_body);
+        let size = record.request_id.len() + request_body.len() + response_body.len();
         Self {
             request_id: record.request_id.to_string(),
             api_key_id: record.api_key_id,
-            request_body: record.request_body.to_string(),
-            response_body: record.response_body.to_string(),
+            request_body,
+            response_body,
             created_at: record.created_at,
+            size,
         }
     }
+}
+
+/// Outcome of queueing one request detail. `Full` keeps the synchronous
+/// fallback; `ByteLimit` drops the detail instead of blocking the request path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailEnqueue {
+    Queued,
+    ByteLimit,
+    Full,
 }
 
 /// Work item for the background writer. Usage rows and request details share
@@ -118,12 +136,16 @@ enum WriteJob {
 
 /// Serializes usage-log writes through a single background task. The queue is
 /// bounded; when it is full the caller falls back to a synchronous write so no
-/// record is silently dropped.
+/// record is silently dropped. Request details additionally have a byte budget:
+/// past it they are dropped instead of being written inline.
 #[derive(Debug)]
 pub struct UsageWriter {
     tx: Mutex<Option<mpsc::Sender<WriteJob>>>,
     handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stats: Arc<UsageWriterStats>,
+    /// Bytes reserved by detail records currently in the queue.
+    queued_detail_bytes: Arc<AtomicUsize>,
+    detail_dropped: Arc<AtomicU64>,
 }
 
 /// Counters surfaced by `readyz` so operators can see backpressure and loss
@@ -140,20 +162,36 @@ pub struct UsageWriterSnapshot {
     pub queue_capacity: usize,
     pub sync_fallbacks: u64,
     pub failed_writes: u64,
+    pub detail_queue_bytes: usize,
+    pub detail_dropped: u64,
 }
 
 impl UsageWriter {
     const QUEUE_CAPACITY: usize = 1_024;
     const BATCH_SIZE: usize = 100;
+    /// Upper bound on memory held by queued request details. Bodies are already
+    /// truncated to 64 KiB, but a full channel of them would still pin tens of
+    /// MiB; beyond this point details are dropped rather than buffered.
+    const MAX_DETAIL_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 
     pub fn start(pool: SqlitePool, events: Arc<EventBus>) -> Self {
         let (tx, rx) = mpsc::channel(Self::QUEUE_CAPACITY);
         let stats = Arc::new(UsageWriterStats::default());
-        let handle = tokio::spawn(write_loop(pool, rx, Arc::clone(&stats), events));
+        let queued_detail_bytes = Arc::new(AtomicUsize::new(0));
+        let detail_dropped = Arc::new(AtomicU64::new(0));
+        let handle = tokio::spawn(write_loop(
+            pool,
+            rx,
+            Arc::clone(&stats),
+            Arc::clone(&queued_detail_bytes),
+            events,
+        ));
         Self {
             tx: Mutex::new(Some(tx)),
             handle: Mutex::new(Some(handle)),
             stats,
+            queued_detail_bytes,
+            detail_dropped,
         }
     }
 
@@ -174,6 +212,8 @@ impl UsageWriter {
             queue_capacity,
             sync_fallbacks: self.stats.sync_fallbacks.load(Ordering::Relaxed),
             failed_writes: self.stats.failed_writes.load(Ordering::Relaxed),
+            detail_queue_bytes: self.queued_detail_bytes.load(Ordering::Relaxed),
+            detail_dropped: self.detail_dropped.load(Ordering::Relaxed),
         }
     }
 
@@ -201,8 +241,33 @@ impl UsageWriter {
         self.try_send(WriteJob::Usage(Box::new(record)))
     }
 
-    fn try_enqueue_detail(&self, record: OwnedDetailRecord) -> bool {
-        self.try_send(WriteJob::Detail(record))
+    fn try_enqueue_detail(&self, record: OwnedDetailRecord) -> DetailEnqueue {
+        let size = record.size;
+
+        // Reserve the bytes before handing the job over, so concurrent
+        // producers cannot jointly overshoot the cap.
+        let mut queued = self.queued_detail_bytes.load(Ordering::Relaxed);
+        loop {
+            if queued.saturating_add(size) > Self::MAX_DETAIL_QUEUE_BYTES {
+                self.detail_dropped.fetch_add(1, Ordering::Relaxed);
+                return DetailEnqueue::ByteLimit;
+            }
+            match self.queued_detail_bytes.compare_exchange_weak(
+                queued,
+                queued + size,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => queued = current,
+            }
+        }
+
+        if !self.try_send(WriteJob::Detail(record)) {
+            self.queued_detail_bytes.fetch_sub(size, Ordering::AcqRel);
+            return DetailEnqueue::Full;
+        }
+        DetailEnqueue::Queued
     }
 
     /// Close the queue and wait until every queued record is persisted. Taking
@@ -256,17 +321,29 @@ pub async fn record(state: &AppState, record: &UsageRecord<'_>) {
 
 /// Store a request/response detail pair through the same bounded queue as the
 /// usage rows. Falls back to a synchronous write when the queue is full or the
-/// process is shutting down.
+/// process is shutting down, and drops the detail once the queue's byte budget
+/// is exhausted so a burst of large bodies cannot pin memory.
 pub async fn record_detail(state: &AppState, record: &DetailRecord<'_>) {
     if let Some(writer) = &state.usage_writer {
-        if writer.try_enqueue_detail(OwnedDetailRecord::from(record)) {
-            return;
+        match writer.try_enqueue_detail(OwnedDetailRecord::from(record)) {
+            DetailEnqueue::Queued => return,
+            // The byte budget is exhausted: drop the detail rather than block
+            // the request or pile more bodies into memory.
+            DetailEnqueue::ByteLimit => {
+                tracing::debug!(
+                    request_id = record.request_id,
+                    "detail write queue is over its byte budget; dropping detail"
+                );
+                return;
+            }
+            DetailEnqueue::Full => {
+                writer.note_sync_fallback();
+                tracing::warn!(
+                    request_id = record.request_id,
+                    "detail write queue is full; writing synchronously"
+                );
+            }
         }
-        writer.note_sync_fallback();
-        tracing::warn!(
-            request_id = record.request_id,
-            "detail write queue is full; writing synchronously"
-        );
     }
 
     if let Err(error) = models::request_detail::insert(
@@ -352,6 +429,7 @@ async fn write_loop(
     pool: SqlitePool,
     mut rx: mpsc::Receiver<WriteJob>,
     stats: Arc<UsageWriterStats>,
+    queued_detail_bytes: Arc<AtomicUsize>,
     events: Arc<EventBus>,
 ) {
     while let Some(first) = rx.recv().await {
@@ -372,6 +450,28 @@ async fn write_loop(
                 count = batch.len(),
                 "failed to write usage batch"
             );
+        }
+
+        // Release the byte reservations once the batch has been attempted,
+        // whether it committed or rolled back, so the counter cannot leak.
+        for job in &batch {
+            if let WriteJob::Detail(record) = job {
+                // Manual CAS loop keeps MSRV 1.82 compatibility; `take`/`try_update`
+                // naming changed after this crate's minimum toolchain.
+                let mut current = queued_detail_bytes.load(Ordering::Relaxed);
+                loop {
+                    let next = current.saturating_sub(record.size);
+                    match queued_detail_bytes.compare_exchange_weak(
+                        current,
+                        next,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(observed) => current = observed,
+                    }
+                }
+            }
         }
     }
 }

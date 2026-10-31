@@ -89,6 +89,8 @@ struct UsageQueueStatus {
     capacity: usize,
     sync_fallbacks: u64,
     failed_writes: u64,
+    detail_queue_bytes: usize,
+    detail_dropped: u64,
 }
 
 async fn readyz(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
@@ -100,6 +102,8 @@ async fn readyz(State(state): State<AppState>) -> Result<impl IntoResponse, AppE
             capacity: snapshot.queue_capacity,
             sync_fallbacks: snapshot.sync_fallbacks,
             failed_writes: snapshot.failed_writes,
+            detail_queue_bytes: snapshot.detail_queue_bytes,
+            detail_dropped: snapshot.detail_dropped,
         }
     });
 
