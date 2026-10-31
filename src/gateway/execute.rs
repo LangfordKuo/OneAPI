@@ -147,6 +147,7 @@ pub async fn proxy_with_identity(
     mut body: Value,
 ) -> Result<Response, AppError> {
     let request_id = resolve_request_id(headers);
+    let upstream_session = upstream::resolve_session(headers, identity.api_key_id);
     // Routing metadata (`x-oneapi-channel` / `x-oneapi-upstream-model`) is only
     // for the admin Playground UI; API key clients must not learn the internal
     // channel topology.
@@ -567,6 +568,7 @@ pub async fn proxy_with_identity(
             &candidate.upstream_kind,
             &request_body,
             headers,
+            Some(&upstream_session),
         ) {
             Ok(request) => request,
             Err(error) => {
@@ -937,6 +939,7 @@ async fn proxy_stream(
 ) -> Result<Response, AppError> {
     // Only the admin Playground may see internal routing metadata.
     let expose_route_headers = identity.source == "playground";
+    let upstream_session = upstream::resolve_session(headers, identity.api_key_id);
     let mut log = AttemptLog {
         request_id,
         api_key_id: identity.api_key_id,
@@ -1079,6 +1082,7 @@ async fn proxy_stream(
                 &candidate.upstream_kind,
                 &request_body,
                 headers,
+                Some(&upstream_session),
             ) {
                 Ok(request) => request.header(header::ACCEPT, "text/event-stream"),
                 Err(error) => {

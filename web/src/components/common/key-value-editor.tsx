@@ -7,11 +7,19 @@ export interface KeyValueRow {
   value: string;
 }
 
+export interface KeyValuePreset {
+  label: string;
+  value: string;
+  title?: string;
+}
+
 interface KeyValueEditorProps {
   value: KeyValueRow[];
   onChange: (value: KeyValueRow[]) => void;
   keyPlaceholder?: string;
   valuePlaceholder?: string;
+  /** Quick-fill buttons shown after each value input. */
+  valuePresets?: KeyValuePreset[];
 }
 
 export function KeyValueEditor({
@@ -19,14 +27,16 @@ export function KeyValueEditor({
   onChange,
   keyPlaceholder = '键',
   valuePlaceholder = '值',
+  valuePresets = [],
 }: KeyValueEditorProps) {
   return (
     <div className="space-y-2">
       {value.map((row, index) => (
-        <div key={index} className="flex items-start gap-2">
+        <div key={index} className="flex flex-wrap items-start gap-2">
           <Input
             value={row.key}
             placeholder={keyPlaceholder}
+            className="min-w-32 flex-1"
             onChange={(event) => {
               const next = [...value];
               next[index] = { ...row, key: event.target.value };
@@ -36,12 +46,30 @@ export function KeyValueEditor({
           <Input
             value={row.value}
             placeholder={valuePlaceholder}
+            className="min-w-32 flex-1"
             onChange={(event) => {
               const next = [...value];
               next[index] = { ...row, value: event.target.value };
               onChange(next);
             }}
           />
+          {valuePresets.map((preset) => (
+            <Button
+              key={preset.value}
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 shrink-0"
+              title={preset.title ?? preset.label}
+              onClick={() => {
+                const next = [...value];
+                next[index] = { ...row, value: preset.value };
+                onChange(next);
+              }}
+            >
+              {preset.label}
+            </Button>
+          ))}
           <Button
             type="button"
             variant="ghost"

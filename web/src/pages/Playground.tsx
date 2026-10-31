@@ -889,7 +889,12 @@ export default function Playground() {
     try {
       const response = await requestRaw('/api/playground', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // Stable per-conversation identifier for channels that template
+          // {{session}} into their custom headers (for example opencode).
+          'x-oneapi-session': conversation.id,
+        },
         body: JSON.stringify(
           buildPlaygroundRequest(
             {
