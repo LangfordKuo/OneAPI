@@ -96,8 +96,8 @@ pub async fn store_with_quota(
         return Ok(StoreOutcome::TooLarge);
     }
 
-    let new_bytes = i64::try_from(request_json.len().saturating_add(response_json.len()))
-        .unwrap_or(i64::MAX);
+    let new_bytes =
+        i64::try_from(request_json.len().saturating_add(response_json.len())).unwrap_or(i64::MAX);
 
     let mut tx = pool.begin().await?;
 
@@ -112,17 +112,15 @@ pub async fn store_with_quota(
     let old_exists = old_row.is_some();
     let old_bytes = old_row.unwrap_or(0);
 
-    let key_bytes: i64 = sqlx::query_scalar(
-        "SELECT bytes FROM response_usage WHERE api_key_id = ?",
-    )
-    .bind(api_key_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .unwrap_or(0);
-    let total_bytes: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(bytes), 0) FROM response_usage")
-            .fetch_one(&mut *tx)
-            .await?;
+    let key_bytes: i64 =
+        sqlx::query_scalar("SELECT bytes FROM response_usage WHERE api_key_id = ?")
+            .bind(api_key_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or(0);
+    let total_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(bytes), 0) FROM response_usage")
+        .fetch_one(&mut *tx)
+        .await?;
 
     let over_key = per_key_limit > 0
         && key_bytes
@@ -199,11 +197,7 @@ pub async fn store_with_quota(
 /// counters are decremented. SQLite 3.35+ (bundled with sqlx) provides
 /// `RETURNING`; a build without it surfaces the SQL error instead of silently
 /// falling back to an unaccounted delete.
-pub async fn delete_before(
-    pool: &SqlitePool,
-    cutoff: i64,
-    batch: i64,
-) -> sqlx::Result<usize> {
+pub async fn delete_before(pool: &SqlitePool, cutoff: i64, batch: i64) -> sqlx::Result<usize> {
     let mut deleted = 0usize;
     loop {
         let mut tx = pool.begin().await?;

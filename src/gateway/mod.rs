@@ -209,12 +209,8 @@ async fn count_tokens(
                 // compatible provider implements, so failures here do not feed
                 // channel health; they only drive failover and the final error.
                 if !execute::penalizes_channel(status) && client_error.is_none() {
-                    client_error = Some((
-                        status,
-                        error_type.clone(),
-                        message.clone(),
-                        provider_json,
-                    ));
+                    client_error =
+                        Some((status, error_type.clone(), message.clone(), provider_json));
                 }
                 last_message = message;
                 last_provider_json = provider_json;
@@ -222,11 +218,8 @@ async fn count_tokens(
 
             return Ok(match client_error {
                 Some((status, error_type, message, provider_json)) => {
-                    let client_message = error::client_safe_upstream_message(
-                        &error_type,
-                        &message,
-                        provider_json,
-                    );
+                    let client_message =
+                        error::client_safe_upstream_message(&error_type, &message, provider_json);
                     error::client_error(Protocol::Anthropic, status, client_message, &error_type)
                 }
                 None => error::client_error(

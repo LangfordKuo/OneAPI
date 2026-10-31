@@ -666,9 +666,8 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
         }
     }
 
-    let stop_reason = get_str(obj, "stop_reason").ok_or_else(|| {
-        ProtocolError::invalid_response("anthropic", "stop_reason is required")
-    })?;
+    let stop_reason = get_str(obj, "stop_reason")
+        .ok_or_else(|| ProtocolError::invalid_response("anthropic", "stop_reason is required"))?;
     let stop_reason = match stop_reason {
         // A `pause_turn` asks the caller to resume the turn; the IR has no
         // matching semantic, so surface it as `Other` instead of inventing a

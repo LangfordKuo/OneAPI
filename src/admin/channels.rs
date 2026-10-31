@@ -708,9 +708,9 @@ fn validate(
         // An omitted `enabled` on update means "keep the current state"; the
         // UI omits it unless the switch was actually toggled. Defaulting to
         // `true` here would silently re-enable a channel an operator disabled.
-        enabled: if enabled.unwrap_or_else(|| {
-            existing.map(|channel| channel.enabled != 0).unwrap_or(true)
-        }) {
+        enabled: if enabled
+            .unwrap_or_else(|| existing.map(|channel| channel.enabled != 0).unwrap_or(true))
+        {
             1
         } else {
             0

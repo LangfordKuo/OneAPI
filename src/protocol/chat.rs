@@ -734,9 +734,7 @@ pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
     let total = get_u64(usage, "total_tokens")
         .map(clamp_token_count)
         .or_else(|| match (prompt, output) {
-            (Some(prompt), Some(output)) => {
-                Some(clamp_token_count(prompt.saturating_add(output)))
-            }
+            (Some(prompt), Some(output)) => Some(clamp_token_count(prompt.saturating_add(output))),
             _ => None,
         });
 

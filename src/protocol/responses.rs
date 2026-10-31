@@ -696,9 +696,8 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
         }
     }
 
-    let status = get_str(obj, "status").ok_or_else(|| {
-        ProtocolError::invalid_response("responses", "status is required")
-    })?;
+    let status = get_str(obj, "status")
+        .ok_or_else(|| ProtocolError::invalid_response("responses", "status is required"))?;
     if !matches!(status, "completed" | "incomplete") {
         return Err(ProtocolError::invalid_response(
             "responses",
@@ -758,9 +757,7 @@ pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
     let total = get_u64(usage, "total_tokens")
         .map(clamp_token_count)
         .or_else(|| match (input_total, output) {
-            (Some(input), Some(output)) => {
-                Some(clamp_token_count(input.saturating_add(output)))
-            }
+            (Some(input), Some(output)) => Some(clamp_token_count(input.saturating_add(output))),
             _ => None,
         });
 

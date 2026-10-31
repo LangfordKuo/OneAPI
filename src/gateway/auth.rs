@@ -143,7 +143,10 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
             }
         }
 
-        Ok(Self { key: record, limits })
+        Ok(Self {
+            key: record,
+            limits,
+        })
     }
 }
 

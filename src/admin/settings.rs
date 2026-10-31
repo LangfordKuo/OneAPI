@@ -178,7 +178,12 @@ pub async fn update(
     }
 
     if let Some(value) = input.request_detail_retention_days {
-        check_range("request_detail_retention_days", value, 0, MAX_RETENTION_DAYS)?;
+        check_range(
+            "request_detail_retention_days",
+            value,
+            0,
+            MAX_RETENTION_DAYS,
+        )?;
         updates.push(("request_detail_retention_days", value.to_string()));
     }
 
