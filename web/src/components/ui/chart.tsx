@@ -78,37 +78,100 @@ function ChartContainer({
   )
 }
 
-const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
-  const colorConfig = Object.entries(config).filter(
-    ([, config]) => config.theme ?? config.color
-  )
+// Only allow identifiers that cannot break out of the CSS selector or value.
+const SAFE_CHART_ID_PATTERN = /^[A-Za-z0-9_-]+$/
+const SAFE_CONFIG_KEY_PATTERN = /^[A-Za-z0-9_-]+$/
+// Allow hex and CSS color functions, but only with a constrained body so that
+// values such as `red; } body { ...` can never be injected into the stylesheet.
+const SAFE_COLOR_PATTERN =
+  /^(#[0-9a-fA-F]{3,8}|(?:rgb|rgba|hsl|hsla|oklch)\([0-9A-Za-z.,%\s/()+-]*\)|var\(--[A-Za-z0-9_-]+\))$/
 
-  if (!colorConfig.length) {
-    return null
+function warnSkippedChartValue(
+  kind: "chart id" | "config key" | "color",
+  value: string
+) {
+  if (import.meta.env.DEV) {
+    console.warn(`[chart] skipped unsafe ${kind}: ${JSON.stringify(value)}`)
+  }
+}
+
+function isSafeColor(color: unknown): color is string {
+  if (typeof color !== "string") {
+    return false
+  }
+  if (SAFE_COLOR_PATTERN.test(color)) {
+    return true
+  }
+  warnSkippedChartValue("color", color)
+  return false
+}
+
+function buildChartCss(id: string, config: ChartConfig): string {
+  if (!SAFE_CHART_ID_PATTERN.test(id)) {
+    warnSkippedChartValue("chart id", id)
+    return ""
   }
 
-  return (
-    <style
-      dangerouslySetInnerHTML={{
-        __html: Object.entries(THEMES)
-          .map(
-            ([theme, prefix]) => `
+  const colorConfig = Object.entries(config).filter(([key, itemConfig]) => {
+    if (!SAFE_CONFIG_KEY_PATTERN.test(key)) {
+      warnSkippedChartValue("config key", key)
+      return false
+    }
+
+    if (!(itemConfig.theme ?? itemConfig.color)) {
+      return false
+    }
+
+    const hasSafeColor = itemConfig.theme
+      ? Object.values(itemConfig.theme).some(isSafeColor)
+      : isSafeColor(itemConfig.color)
+
+    return hasSafeColor
+  })
+
+  if (!colorConfig.length) {
+    return ""
+  }
+
+  return Object.entries(THEMES)
+    .map(
+      ([theme, prefix]) => `
 ${prefix} [data-chart=${id}] {
 ${colorConfig
   .map(([key, itemConfig]) => {
-    const color =
+    const resolved =
       itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ??
       itemConfig.color
-    return color ? `  --color-${key}: ${color};` : null
+    return resolved && isSafeColor(resolved)
+      ? `  --color-${key}: ${resolved};`
+      : null
   })
+  .filter((declaration): declaration is string => declaration !== null)
   .join("\n")}
 }
 `
-          )
-          .join("\n"),
-      }}
-    />
-  )
+    )
+    .join("\n")
+}
+
+const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
+  const styleRef = React.useRef<HTMLStyleElement>(null)
+
+  // Build the stylesheet as text and assign it with textContent so the CSS is
+  // never handed to the HTML parser.
+  const css = React.useMemo(() => buildChartCss(id, config), [id, config])
+
+  React.useEffect(() => {
+    if (styleRef.current) {
+      styleRef.current.textContent = css
+    }
+  }, [css])
+
+  if (!css) {
+    return null
+  }
+
+  return <style ref={styleRef} />
 }
 
 const ChartTooltip = RechartsPrimitive.Tooltip
