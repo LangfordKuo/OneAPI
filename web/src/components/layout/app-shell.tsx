@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { useTheme } from 'next-themes';
 import { useState, type ReactNode } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -35,6 +35,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { useLiveMetrics } from '@/hooks/useLiveMetrics';
+import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import { cn } from '@/lib/utils';
 
 const NAV_ITEMS = [
@@ -72,6 +73,10 @@ function SidebarContent({
   version?: string;
   onNavigate?: () => void;
 }) {
+  const navigate = useNavigate();
+  const update = useUpdateCheck(version);
+  const hasUpdate = update.data?.update_available === true;
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-14 shrink-0 items-center gap-2.5 border-b px-4">
@@ -110,9 +115,27 @@ function SidebarContent({
 
       <div className="shrink-0 border-t p-3">
         <div className="flex items-center justify-between rounded-lg bg-sidebar-accent/50 px-3 py-2 text-xs">
-          <span className="text-muted-foreground">
-            {version ? `v${version}` : 'OneAPI'}
-          </span>
+          <button
+            type="button"
+            onClick={() => {
+              onNavigate?.();
+              navigate('/settings#update');
+            }}
+            className="-mx-1 inline-flex items-center gap-1.5 rounded px-1 py-0.5 text-muted-foreground transition-colors hover:text-foreground"
+            title={
+              hasUpdate
+                ? `发现新版本 ${update.data?.latest_version}，点击前往更新`
+                : '当前版本'
+            }
+          >
+            <span>{version ? `v${version}` : 'OneAPI'}</span>
+            {hasUpdate ? (
+              <span className="relative flex size-2" aria-label="有新版本">
+                <span className="absolute inline-flex size-full animate-ping rounded-full bg-red-500 opacity-75" />
+                <span className="relative inline-flex size-2 rounded-full bg-red-500" />
+              </span>
+            ) : null}
+          </button>
           <span className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
             <span className="size-1.5 rounded-full bg-current" />
             运行中

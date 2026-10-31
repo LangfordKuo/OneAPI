@@ -47,12 +47,20 @@ function writeCache(info: UpdateInfo): void {
 /**
  * Fetch the latest release. Unless `force` is set, a result younger than a day
  * is reused from localStorage, so the program checks at most once per day and a
- * page reload does not hit the update source again.
+ * page reload does not hit the update source again. A cached result recorded
+ * against a different running version is ignored, which keeps the badge honest
+ * right after an update restarts the server.
  */
-export async function fetchUpdateInfo(force = false): Promise<UpdateInfo> {
+export async function fetchUpdateInfo(
+  force = false,
+  currentVersion?: string,
+): Promise<UpdateInfo> {
   if (!force) {
     const cached = readCache();
-    if (cached && Date.now() - cached.checked_at < DAY_MS) {
+    const sameVersion =
+      currentVersion == null ||
+      cached?.info.current_version === currentVersion;
+    if (cached && sameVersion && Date.now() - cached.checked_at < DAY_MS) {
       return cached.info;
     }
   }
@@ -66,10 +74,13 @@ export async function fetchUpdateInfo(force = false): Promise<UpdateInfo> {
  * badge simply stays clean, and the settings page reports errors when the
  * administrator checks manually.
  */
-export function useUpdateCheck() {
+export function useUpdateCheck(currentVersion?: string) {
   return useQuery({
     queryKey: UPDATE_CHECK_QUERY_KEY,
-    queryFn: () => fetchUpdateInfo(),
+    queryFn: () => fetchUpdateInfo(false, currentVersion),
+    // Wait for the running version: the cache is keyed by it, and checking
+    // without it would compare against a stale record after a restart.
+    enabled: currentVersion != null,
     staleTime: DAY_MS,
     refetchInterval: DAY_MS,
     retry: 0,
