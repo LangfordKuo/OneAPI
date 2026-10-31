@@ -21,6 +21,7 @@ mod web;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -87,6 +88,9 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
         db.clone(),
         events.clone(),
     ));
+    // Keep the receiver alive so `send(true)` always records the shutdown flag,
+    // even while no metrics stream is subscribed.
+    let (shutdown, _shutdown_rx) = tokio::sync::watch::channel(false);
     let state = AppState {
         config: Arc::new(config.clone()),
         db,
@@ -105,6 +109,8 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
         last_backup_at: Arc::new(std::sync::Mutex::new(None)),
         response_store_lock: Arc::new(tokio::sync::Mutex::new(())),
         response_store_rejected: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        shutdown,
+        metrics_streams: Arc::new(tokio::sync::Semaphore::new(state::METRICS_STREAM_LIMIT)),
     };
 
     maintenance::spawn(state.clone());
@@ -112,7 +118,28 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
 
     let updates = state.updates.clone();
     let shutdown_updates = updates.clone();
+    let shutdown_tx = state.shutdown.clone();
     let usage_writer_shutdown = state.usage_writer.clone();
+
+    // Backstop for graceful shutdown: streams observe `shutdown` and end on
+    // their own, but a stuck connection must not postpone a restart forever.
+    let mut watchdog_rx = state.shutdown.subscribe();
+    let watchdog = tokio::spawn(async move {
+        loop {
+            let shutting_down = *watchdog_rx.borrow();
+            if shutting_down {
+                break;
+            }
+            if watchdog_rx.changed().await.is_err() {
+                // The state was dropped; the server is already unwinding.
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        tracing::error!("graceful shutdown timed out; forcing exit");
+        std::process::exit(1);
+    });
+
     let app = app::router(state);
     let listener = tokio::net::TcpListener::bind(config.addr)
         .await
@@ -125,7 +152,7 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
         "OneAPI listening"
     );
 
-    axum::serve(
+    let serve_result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
@@ -134,9 +161,15 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
             _ = shutdown_signal() => {},
             _ = shutdown_updates.shutdown.notified() => {},
         }
+        // End long-lived streams (metrics SSE) so graceful shutdown and the
+        // self-update restart path do not wait on an open socket.
+        let _ = shutdown_tx.send(true);
     })
-    .await
-    .context("HTTP server failed")?;
+    .await;
+
+    watchdog.abort();
+    let _ = watchdog.await;
+    serve_result.context("HTTP server failed")?;
 
     // Flush queued usage rows before a restart replaces the process.
     if let Some(writer) = usage_writer_shutdown {

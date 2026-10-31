@@ -30,6 +30,11 @@ use crate::{
 
 const CACHE_TTL: Duration = Duration::from_secs(30);
 
+/// Concurrent `/api/metrics/stream` connections allowed. Each stream parks a
+/// socket for its whole lifetime, so a handful is enough for the dashboard and
+/// bounds the resources a signed-in client can pin.
+pub const METRICS_STREAM_LIMIT: usize = 4;
+
 /// Shared snapshot of the prepared channel list; each element is shared so a
 /// routing candidate can hold one channel without cloning it.
 type ChannelSnapshot = Arc<Vec<Arc<PreparedChannel>>>;
@@ -462,6 +467,13 @@ pub struct AppState {
     /// backups. Ordinary `std::sync::Mutex` because it is held only for a
     /// short check and never across an await.
     pub last_backup_at: Arc<Mutex<Option<Instant>>>,
+    /// Flips to `true` when the process starts shutting down. Long-lived
+    /// handlers (metrics SSE) subscribe and end their streams so graceful
+    /// shutdown and self-update restarts are never blocked by an open socket.
+    pub shutdown: tokio::sync::watch::Sender<bool>,
+    /// Bounds concurrent metrics SSE connections to
+    /// [`METRICS_STREAM_LIMIT`]; each stream holds one permit until it ends.
+    pub metrics_streams: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
