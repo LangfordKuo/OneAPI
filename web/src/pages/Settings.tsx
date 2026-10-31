@@ -42,6 +42,7 @@ interface SettingsDraft {
   nonstream_timeout_seconds: string;
   stream_idle_timeout_seconds: string;
   usage_log_retention_days: string;
+  request_detail_retention_days: string;
   response_retention_days: string;
   store_request_bodies: boolean;
   update_source: 'github' | 'ghproxy';
@@ -60,6 +61,7 @@ const NUMERIC_DEFAULTS = {
   nonstream_timeout_seconds: 600,
   stream_idle_timeout_seconds: 120,
   usage_log_retention_days: 30,
+  request_detail_retention_days: 7,
   response_retention_days: 7,
 } as const;
 
@@ -74,6 +76,9 @@ const EMPTY_DRAFT: SettingsDraft = {
     NUMERIC_DEFAULTS.stream_idle_timeout_seconds,
   ),
   usage_log_retention_days: String(NUMERIC_DEFAULTS.usage_log_retention_days),
+  request_detail_retention_days: String(
+    NUMERIC_DEFAULTS.request_detail_retention_days,
+  ),
   response_retention_days: String(NUMERIC_DEFAULTS.response_retention_days),
   store_request_bodies: false,
   update_source: 'github',
@@ -88,6 +93,9 @@ function toDraft(settings: Settings): SettingsDraft {
     nonstream_timeout_seconds: String(settings.nonstream_timeout_seconds),
     stream_idle_timeout_seconds: String(settings.stream_idle_timeout_seconds),
     usage_log_retention_days: String(settings.usage_log_retention_days),
+    request_detail_retention_days: String(
+      settings.request_detail_retention_days,
+    ),
     response_retention_days: String(settings.response_retention_days),
     store_request_bodies: settings.store_request_bodies,
     update_source: settings.update_source,
@@ -122,6 +130,10 @@ function toSettings(draft: SettingsDraft): Settings {
     usage_log_retention_days: toInt(
       draft.usage_log_retention_days,
       NUMERIC_DEFAULTS.usage_log_retention_days,
+    ),
+    request_detail_retention_days: toInt(
+      draft.request_detail_retention_days,
+      NUMERIC_DEFAULTS.request_detail_retention_days,
     ),
     response_retention_days: toInt(
       draft.response_retention_days,
@@ -375,6 +387,24 @@ export default function SettingsPage() {
                       onChange={(event) =>
                         update({
                           usage_log_retention_days: event.target.value,
+                        })
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="请求正文保留天数"
+                    htmlFor="settings-request-detail-retention"
+                    hint="请求/响应正文独立于用量日志保留；0 表示不按时间清理，仅在删除 Key 时清除。"
+                  >
+                    <Input
+                      id="settings-request-detail-retention"
+                      type="number"
+                      min={0}
+                      max={3650}
+                      value={draft.request_detail_retention_days}
+                      onChange={(event) =>
+                        update({
+                          request_detail_retention_days: event.target.value,
                         })
                       }
                     />

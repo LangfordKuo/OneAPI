@@ -41,10 +41,18 @@ pub async fn cleanup_once(state: &AppState) -> anyhow::Result<CleanupStats> {
     }
 
     let usage_days = setting::get_i64(&state.db, "usage_log_retention_days", 30).await?;
+    let request_detail_days =
+        setting::get_i64(&state.db, "request_detail_retention_days", 7).await?;
     let response_days = setting::get_i64(&state.db, "response_retention_days", 7).await?;
     let now = now_ms();
 
     let usage_cutoff = (usage_days > 0).then(|| now - usage_days.saturating_mul(DAY_MS));
+    // Request bodies are far more sensitive than usage metadata, so their
+    // retention is independent of the usage log window. `0` disables the
+    // time-based sweep; rows are then removed only when the owning Key is
+    // deleted (migration 0009 trigger).
+    let request_detail_cutoff =
+        (request_detail_days > 0).then(|| now - request_detail_days.saturating_mul(DAY_MS));
     let response_cutoff = (response_days > 0).then(|| now - response_days.saturating_mul(DAY_MS));
 
     let mut stats = CleanupStats {
@@ -54,6 +62,9 @@ pub async fn cleanup_once(state: &AppState) -> anyhow::Result<CleanupStats> {
 
     if let Some(cutoff) = usage_cutoff {
         stats.usage_logs = delete_before(&state.db, DELETE_USAGE_LOGS, cutoff).await?;
+    }
+
+    if let Some(cutoff) = request_detail_cutoff {
         stats.request_details = delete_before(&state.db, DELETE_REQUEST_DETAILS, cutoff).await?;
     }
 
@@ -90,8 +101,10 @@ async fn delete_before(
     }
 }
 
-/// Run cleanup immediately and then every six hours. A retention value of `0`
-/// disables that category; negative values are never written by the settings API.
+/// Run cleanup immediately and then every six hours. Each retention setting is
+/// read independently; a value of `0` disables that category's time-based
+/// sweep (request details are then only removed with their Key), and negative
+/// values are never written by the settings API.
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECONDS));

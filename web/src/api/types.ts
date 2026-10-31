@@ -64,6 +64,7 @@ export interface Settings {
   nonstream_timeout_seconds: number;
   stream_idle_timeout_seconds: number;
   usage_log_retention_days: number;
+  request_detail_retention_days: number;
   response_retention_days: number;
   store_request_bodies: boolean;
   update_source: 'github' | 'ghproxy';

@@ -11,6 +11,9 @@ use super::auth::AdminSession;
 /// the built-in default.
 const MAX_DEFAULT_MAX_TOKENS: i64 = 1_000_000;
 const MAX_TIMEOUT_SECONDS: i64 = 86_400;
+/// Upper bound for retention windows. `0` disables time-based cleanup for the
+/// category instead of meaning "delete immediately".
+const MAX_RETENTION_DAYS: i64 = 3_650;
 
 fn check_range(field: &str, value: i64, min: i64, max: i64) -> Result<(), AppError> {
     if !(min..=max).contains(&value) {
@@ -29,6 +32,7 @@ pub struct SettingsOutput {
     pub nonstream_timeout_seconds: i64,
     pub stream_idle_timeout_seconds: i64,
     pub usage_log_retention_days: i64,
+    pub request_detail_retention_days: i64,
     pub response_retention_days: i64,
     pub store_request_bodies: bool,
     pub update_source: String,
@@ -49,6 +53,7 @@ impl SettingsOutput {
             nonstream_timeout_seconds: map.integer("nonstream_timeout_seconds", 600),
             stream_idle_timeout_seconds: map.integer("stream_idle_timeout_seconds", 120),
             usage_log_retention_days: map.integer("usage_log_retention_days", 30),
+            request_detail_retention_days: map.integer("request_detail_retention_days", 7),
             response_retention_days: map.integer("response_retention_days", 7),
             store_request_bodies: map.boolean("store_request_bodies", false),
             update_source: map
@@ -78,6 +83,8 @@ pub struct SettingsInput {
     pub stream_idle_timeout_seconds: Option<i64>,
     #[serde(default)]
     pub usage_log_retention_days: Option<i64>,
+    #[serde(default)]
+    pub request_detail_retention_days: Option<i64>,
     #[serde(default)]
     pub response_retention_days: Option<i64>,
     #[serde(default)]
@@ -151,6 +158,11 @@ pub async fn update(
             ));
         }
         updates.push(("usage_log_retention_days", value.to_string()));
+    }
+
+    if let Some(value) = input.request_detail_retention_days {
+        check_range("request_detail_retention_days", value, 0, MAX_RETENTION_DAYS)?;
+        updates.push(("request_detail_retention_days", value.to_string()));
     }
 
     if let Some(value) = input.response_retention_days {
