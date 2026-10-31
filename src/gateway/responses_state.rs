@@ -1,9 +1,11 @@
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{models, state::AppState};
+use crate::{
+    models::{self, response::StoreOutcome},
+    state::AppState,
+};
 
-pub const MAX_STORED_BYTES: usize = 10 * 1024 * 1024;
 /// Guard against unbounded `previous_response_id` chains: the expanded input is
 /// sent upstream, so it needs its own ceiling independent of per-response size.
 const MAX_EXPANDED_ITEMS: usize = 2_000;
@@ -11,6 +13,20 @@ const MAX_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum number of prior turns walked for one request. Every link is an
 /// indexed lookup, so a pathological chain must not turn into unbounded work.
 const MAX_CHAIN_LINKS: usize = 256;
+/// Maximum accepted length of a `previous_response_id`. The value is used as an
+/// indexed lookup key, so it is validated before any database query.
+pub const MAX_RESPONSE_CURSOR_LEN: usize = 128;
+
+/// A response cursor is a bounded identifier: `[A-Za-z0-9_-]` only. Anything
+/// else is rejected before the lookup so the raw value never reaches the query
+/// or an error message.
+fn valid_cursor(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= MAX_RESPONSE_CURSOR_LEN
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
 
 pub enum ExpandError {
     Invalid(String),
@@ -45,6 +61,13 @@ pub async fn expand_previous(
     let mut cursor = previous_id;
     let mut stored_bytes = 0usize;
     loop {
+        // Validate every cursor (the client's first one and each parent read
+        // from storage) before it is used as an indexed lookup key.
+        if !valid_cursor(&cursor) {
+            return Err(ExpandError::Invalid(
+                "previous_response_id is invalid".to_string(),
+            ));
+        }
         if chain.len() >= MAX_CHAIN_LINKS {
             return Err(ExpandError::Invalid(format!(
                 "previous_response_id chain exceeds {MAX_CHAIN_LINKS} turns"
@@ -55,9 +78,11 @@ pub async fn expand_previous(
             .await
             .map_err(ExpandError::Database)?
             .ok_or_else(|| {
-                ExpandError::Invalid(format!(
-                    "previous_response_id `{cursor}` was not found or was not stored"
-                ))
+                // Never echo the cursor: it is client-controlled and the
+                // message may surface in logs or upstream error text.
+                ExpandError::Invalid(
+                    "previous_response_id was not found or was not stored".to_string(),
+                )
             })?;
 
         stored_bytes = stored_bytes
@@ -144,9 +169,10 @@ fn normalize_input(value: Option<&Value>) -> Vec<Value> {
     }
 }
 
-/// Persist a Responses object. Returns `false` when the payload is too large or
-/// has no id; callers must then report `store: false` to the client instead of
-/// promising a retrievable response.
+/// Persist a Responses object. Returns `false` when the payload is too large,
+/// exceeds the per-key/global storage quota, or has no id; callers must then
+/// report `store: false` to the client instead of promising a retrievable
+/// response.
 pub async fn store(
     state: &AppState,
     api_key_id: i64,
@@ -154,17 +180,38 @@ pub async fn store(
     request: &Value,
     response: &Value,
 ) -> sqlx::Result<bool> {
-    let request_json = serde_json::to_string(request).unwrap_or_default();
-    let response_json = serde_json::to_string(response).unwrap_or_default();
+    // Every skipped persistence counts as a rejection so operators can see
+    // quota pressure and payload problems in one place.
+    let reject = || {
+        state
+            .response_store_rejected
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    };
 
-    if request_json.len() > MAX_STORED_BYTES || response_json.len() > MAX_STORED_BYTES {
-        tracing::warn!(
-            request_bytes = request_json.len(),
-            response_bytes = response_json.len(),
-            "response exceeds the storage limit; skipping persistence"
-        );
-        return Ok(false);
-    }
+    let request_json = match serde_json::to_string(request) {
+        Ok(value) => value,
+        Err(error) => {
+            reject();
+            tracing::warn!(
+                api_key_id,
+                error = %error,
+                "request payload is not serializable; skipping response persistence"
+            );
+            return Ok(false);
+        }
+    };
+    let response_json = match serde_json::to_string(response) {
+        Ok(value) => value,
+        Err(error) => {
+            reject();
+            tracing::warn!(
+                api_key_id,
+                error = %error,
+                "response payload is not serializable; skipping response persistence"
+            );
+            return Ok(false);
+        }
+    };
 
     let id = response
         .get("id")
@@ -172,6 +219,11 @@ pub async fn store(
         .unwrap_or_default()
         .to_string();
     if id.is_empty() {
+        reject();
+        tracing::warn!(
+            api_key_id,
+            "response has no id; skipping response persistence"
+        );
         return Ok(false);
     }
 
@@ -181,7 +233,15 @@ pub async fn store(
         .unwrap_or("completed")
         .to_string();
 
-    models::response::insert(
+    let defaults = state.cache.defaults(&state.db).await?;
+    let per_key_limit = storage_limit_bytes(defaults.response_storage_per_key_mb);
+    let total_limit = storage_limit_bytes(defaults.response_storage_total_mb);
+
+    // The quota check, upsert and counter update must observe one consistent
+    // preimage; two concurrent requests must not both pass the same check.
+    let _guard = state.response_store_lock.lock().await;
+
+    let outcome = models::response::store_with_quota(
         &state.db,
         &id,
         api_key_id,
@@ -190,10 +250,63 @@ pub async fn store(
         &response_json,
         &status,
         models::now_ms(),
+        per_key_limit,
+        total_limit,
     )
     .await?;
 
-    Ok(true)
+    match outcome {
+        StoreOutcome::Stored => Ok(true),
+        StoreOutcome::Conflict => {
+            state
+                .response_store_rejected
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                response_id = %id,
+                api_key_id,
+                "response id is owned by another API key; skipping persistence"
+            );
+            Ok(false)
+        }
+        StoreOutcome::QuotaExceeded => {
+            state
+                .response_store_rejected
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                response_id = %id,
+                api_key_id,
+                new_bytes = request_json.len().saturating_add(response_json.len()),
+                per_key_limit,
+                total_limit,
+                "response storage quota exceeded; skipping persistence"
+            );
+            Ok(false)
+        }
+        StoreOutcome::TooLarge => {
+            state
+                .response_store_rejected
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                response_id = %id,
+                api_key_id,
+                request_bytes = request_json.len(),
+                response_bytes = response_json.len(),
+                "response exceeds the storage limit; skipping persistence"
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// Convert a MiB setting to bytes. `0` (or a negative hand-edited value) means
+/// unlimited and stays `0`; the multiplication saturates so an out-of-range
+/// stored value cannot wrap.
+fn storage_limit_bytes(mb: i64) -> i64 {
+    if mb <= 0 {
+        0
+    } else {
+        mb.saturating_mul(1024 * 1024)
+    }
 }
 
 pub async fn get(

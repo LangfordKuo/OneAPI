@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{error::AppError, models, protocol::Protocol, state::AppState, upstream};
 
@@ -36,7 +36,15 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/models", get(list_models))
         .route("/v1/models/{id}", get(get_model))
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
-        .layer(CorsLayer::permissive())
+        // Explicit CORS: browsers may call `/v1` from any origin, but response
+        // headers (`x-oneapi-*`, `x-request-id`, …) are deliberately not
+        // exposed, so page scripts cannot read internal routing metadata.
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
 }
 
 /// JSON extractor that maps malformed bodies to the protocol-specific error
@@ -105,7 +113,7 @@ async fn count_tokens(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
     {
-        if !auth.key.allows_model(model) {
+        if !auth.limits.allows_model(model) {
             return Ok(error::client_error(
                 Protocol::Anthropic,
                 StatusCode::FORBIDDEN,
@@ -116,13 +124,13 @@ async fn count_tokens(
 
         let channels = state.cache.channels(&state.db).await?;
         let health = state.cache.channel_health();
-        let allowed_channels = auth.key.channel_ids();
+        let allowed_channels = &auth.limits.channel_ids;
         let candidates: Vec<_> = select::candidates(
             &channels,
             &health,
             model,
             Protocol::Anthropic,
-            &allowed_channels,
+            allowed_channels,
         )
         .into_iter()
         .filter(|candidate| candidate.upstream_kind == "anthropic")
@@ -131,8 +139,9 @@ async fn count_tokens(
 
         if !candidates.is_empty() {
             let defaults = state.cache.defaults(&state.db).await?;
-            let mut client_error: Option<(StatusCode, String, String)> = None;
+            let mut client_error: Option<(StatusCode, String, String, bool)> = None;
             let mut last_message = "no upstream channel succeeded".to_string();
+            let mut last_provider_json = false;
 
             for candidate in candidates {
                 let mut request_body = body.clone();
@@ -185,33 +194,54 @@ async fn count_tokens(
                 let bytes = upstream::read_body_limited_bytes(response)
                     .await
                     .unwrap_or_default();
+                let value = serde_json::from_slice::<Value>(&bytes).ok();
                 if status.is_success() {
-                    return Ok(
-                        (status, [(header::CONTENT_TYPE, "application/json")], bytes)
-                            .into_response(),
-                    );
+                    // Only a well-formed count response is forwarded; a 200
+                    // carrying an HTML page or unrelated JSON must not be
+                    // echoed to the client as a token count.
+                    let has_count = value
+                        .as_ref()
+                        .and_then(|value| value.get("input_tokens"))
+                        .is_some();
+                    if has_count {
+                        return Ok(
+                            (status, [(header::CONTENT_TYPE, "application/json")], bytes)
+                                .into_response(),
+                        );
+                    }
+                    last_message = "upstream returned an invalid count_tokens response".to_string();
+                    last_provider_json = false;
+                    continue;
                 }
 
                 let text = String::from_utf8_lossy(&bytes);
-                let value = serde_json::from_slice::<Value>(&bytes).ok();
                 let (error_type, message) = execute::upstream_error_info(value.as_ref(), &text);
+                let provider_json = value.is_some();
                 // count_tokens is an auxiliary endpoint that not every
                 // compatible provider implements, so failures here do not feed
                 // channel health; they only drive failover and the final error.
                 if !execute::penalizes_channel(status) && client_error.is_none() {
-                    client_error = Some((status, error_type.clone(), message.clone()));
+                    client_error =
+                        Some((status, error_type.clone(), message.clone(), provider_json));
                 }
                 last_message = message;
+                last_provider_json = provider_json;
             }
 
             return Ok(match client_error {
-                Some((status, error_type, message)) => {
-                    error::client_error(Protocol::Anthropic, status, message, &error_type)
+                Some((status, error_type, message, provider_json)) => {
+                    let client_message =
+                        error::client_safe_upstream_message(&error_type, &message, provider_json);
+                    error::client_error(Protocol::Anthropic, status, client_message, &error_type)
                 }
                 None => error::client_error(
                     Protocol::Anthropic,
                     StatusCode::BAD_GATEWAY,
-                    format!("all upstream channels failed: {last_message}"),
+                    error::client_safe_upstream_message(
+                        "upstream_error",
+                        &last_message,
+                        last_provider_json,
+                    ),
                     "upstream_error",
                 ),
             });
@@ -267,7 +297,7 @@ async fn list_models(
     State(state): State<AppState>,
     auth: ApiKeyAuth,
 ) -> Result<Json<Value>, AppError> {
-    let models = available_models(&state, &auth.key).await?;
+    let models = available_models(&state, &auth.limits, auth.key.id).await?;
     let first_id = models.first().cloned();
     let last_id = models.last().cloned();
     let data: Vec<Value> = models
@@ -296,7 +326,7 @@ async fn get_model(
     auth: ApiKeyAuth,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
-    let models = available_models(&state, &auth.key).await?;
+    let models = available_models(&state, &auth.limits, auth.key.id).await?;
     if models.iter().any(|model| model == &id) {
         Ok(Json(json!({
             "id": id,
@@ -317,13 +347,14 @@ async fn get_model(
 
 async fn available_models(
     state: &AppState,
-    key: &models::api_key::ApiKey,
+    limits: &models::api_key::ApiKeyLimits,
+    key_id: i64,
 ) -> sqlx::Result<Vec<String>> {
     let channels = state.cache.channels(&state.db).await?;
     let mut result = BTreeSet::new();
     let mut has_wildcard = false;
-    // Parse the allowlist once instead of once per channel.
-    let allowed_channels = key.channel_ids();
+    // The allowlists were already parsed once on the auth path.
+    let allowed_channels = &limits.channel_ids;
     let channel_allowed =
         |channel_id: i64| allowed_channels.is_empty() || allowed_channels.contains(&channel_id);
 
@@ -340,10 +371,14 @@ async fn available_models(
         }
     }
 
-    // Wildcard channels accept any model, so surface models seen in recent
-    // traffic to keep model pickers useful.
+    // Wildcard channels accept any model, so surface models seen in this key's
+    // recent traffic to keep model pickers useful. The global cache is
+    // deliberately not used here: it would leak every tenant's model names.
     if has_wildcard {
-        for model in state.cache.recent_models(&state.db).await? {
+        let since = models::now_ms() - 30 * 24 * 60 * 60 * 1000;
+        let key_models =
+            models::usage_log::recent_models_for_key(&state.db, since, 200, key_id).await?;
+        for model in key_models {
             if !model.is_empty() && model != "*" {
                 result.insert(model);
             }
@@ -352,7 +387,7 @@ async fn available_models(
 
     // A per-key model allowlist narrows the catalog to models that can actually
     // be served by the channels this key may use.
-    let allowed = key.model_names();
+    let allowed = &limits.models;
     if !allowed.is_empty() && !allowed.iter().any(|model| model == "*") {
         result.retain(|model| allowed.contains(model));
     }

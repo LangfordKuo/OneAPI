@@ -51,7 +51,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/keys/{id}", put(keys::update).delete(keys::delete))
         .route("/api/settings", get(settings::get).put(settings::update))
         .route("/api/logs", get(logs::list))
-        .route("/api/logs/{request_id}", get(logs::detail))
+        .route("/api/logs/{id}", get(logs::detail))
         .route("/api/dashboard/summary", get(dashboard::summary))
         .route("/api/dashboard/timeseries", get(dashboard::timeseries))
         .route("/api/dashboard/breakdown", get(dashboard::breakdown))

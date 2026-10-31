@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{rejection::PathRejection, Path, Query, State},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -223,16 +223,17 @@ fn resolve_offset(offset: Option<i64>) -> Result<i64, AppError> {
 pub async fn detail(
     State(state): State<AppState>,
     _session: AdminSession,
-    Path(request_id): Path<String>,
+    // A malformed id is a client error, so map Axum's plain-text `Path`
+    // rejection to the shared JSON error shape.
+    id: Result<Path<i64>, PathRejection>,
 ) -> Result<Json<LogDetailOutput>, AppError> {
-    let row = models::usage_log::find_by_request_id(&state.db, &request_id)
+    let Path(id) = id.map_err(|_| AppError::BadRequest("log id must be an integer".to_string()))?;
+    let row = models::usage_log::find_by_id(&state.db, id)
         .await?
-        .ok_or_else(|| AppError::NotFound(format!("log `{request_id}` not found")))?;
-    let detail_key = row.api_key_id.unwrap_or(0);
-    let (request_body, response_body) =
-        models::usage_log::detail_bodies(&state.db, &request_id, detail_key)
-            .await?
-            .unwrap_or((None, None));
+        .ok_or_else(|| AppError::NotFound(format!("log `{id}` not found")))?;
+    let (request_body, response_body) = models::usage_log::detail_bodies(&state.db, id)
+        .await?
+        .unwrap_or((None, None));
 
     Ok(Json(LogDetailOutput {
         entry: LogEntry::from(row),

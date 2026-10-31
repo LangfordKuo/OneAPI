@@ -1,10 +1,12 @@
 use serde_json::{json, Map, Value};
 
 use super::{
-    effort_for_budget, effort_name, ensure_text_only, get_bool, get_f64, get_str, get_string,
-    get_u32, get_u64, image_url, parse_arguments, parse_effort, parse_image_string, parse_stop,
-    reasoning_text, text_content, ContentPart, ProtocolError, ReasoningConfig, ResponseFormat,
-    Role, StopReason, ToolChoice, ToolDef, UnifiedMessage, UnifiedRequest, UnifiedResponse, Usage,
+    clamp_token_count, effort_for_budget, effort_name, ensure_text_only, get_bool, get_str,
+    get_string, get_u64, image_url, parse_arguments, parse_bounded_f64, parse_bounded_u32,
+    parse_effort, parse_image_string, parse_max_tokens, parse_stop, reasoning_text, text_content,
+    ContentPart, ProtocolError, ReasoningConfig, ResponseFormat, Role, StopReason, ToolChoice,
+    ToolDef, UnifiedMessage, UnifiedRequest, UnifiedResponse, Usage, MAX_N, MAX_TEMPERATURE,
+    MAX_TOP_P, MIN_N, MIN_TEMPERATURE, MIN_TOP_P,
 };
 
 pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
@@ -124,8 +126,15 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
             let tool = tool
                 .as_object()
                 .ok_or_else(|| ProtocolError::invalid_request("chat", "tool must be an object"))?;
-            if get_str(tool, "type").unwrap_or("function") != "function" {
-                continue;
+            let tool_type = get_str(tool, "type").unwrap_or("function");
+            if tool_type != "function" {
+                // Only function tools map onto the IR. Hosted tools (web
+                // search, file search, ...) cannot be represented, so a silent
+                // drop would change what the model can call.
+                return Err(ProtocolError::unsupported(
+                    format!("tool type `{tool_type}`"),
+                    "chat",
+                ));
             }
             let function = tool
                 .get("function")
@@ -150,12 +159,19 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
     }
 
     let tool_choice = parse_tool_choice(obj.get("tool_choice"))?;
-    let max_tokens = get_u32(obj, "max_completion_tokens").or_else(|| get_u32(obj, "max_tokens"));
-    let reasoning = get_str(obj, "reasoning_effort").map(|effort| ReasoningConfig {
-        effort: Some(parse_effort(effort)),
-        budget_tokens: None,
-        summary: None,
-    });
+    // Validate both spellings even when both are present; `max_completion_tokens`
+    // keeps precedence when they are, which matches the previous selection.
+    let max_completion_tokens = parse_max_tokens(obj, "max_completion_tokens", "chat")?;
+    let legacy_max_tokens = parse_max_tokens(obj, "max_tokens", "chat")?;
+    let max_tokens = max_completion_tokens.or(legacy_max_tokens);
+    let reasoning = match get_str(obj, "reasoning_effort") {
+        Some(effort) => Some(ReasoningConfig {
+            effort: Some(parse_effort(effort, "chat")?),
+            budget_tokens: None,
+            summary: None,
+        }),
+        None => None,
+    };
     let response_format = parse_response_format(obj.get("response_format"))?;
 
     let mut extras = Map::new();
@@ -180,15 +196,21 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         tool_choice,
         parallel_tool_calls: get_bool(obj, "parallel_tool_calls"),
         max_tokens,
-        temperature: get_f64(obj, "temperature"),
-        top_p: get_f64(obj, "top_p"),
+        temperature: parse_bounded_f64(
+            obj,
+            "temperature",
+            "chat",
+            MIN_TEMPERATURE,
+            MAX_TEMPERATURE,
+        )?,
+        top_p: parse_bounded_f64(obj, "top_p", "chat", MIN_TOP_P, MAX_TOP_P)?,
         top_k: None,
-        stop: parse_stop(obj.get("stop")),
+        stop: parse_stop(obj.get("stop"), "chat")?,
         stream: get_bool(obj, "stream").unwrap_or(false),
         reasoning,
         response_format,
         metadata_user_id: get_string(obj, "user"),
-        n: get_u32(obj, "n"),
+        n: parse_bounded_u32(obj, "n", "chat", MIN_N, MAX_N)?,
         extras,
     })
 }
@@ -238,7 +260,12 @@ fn parse_content(
                             result.push(ContentPart::Image { source });
                         }
                     }
-                    _ => {}
+                    other => {
+                        return Err(ProtocolError::unsupported(
+                            format!("content part type `{other}`"),
+                            protocol,
+                        ))
+                    }
                 }
             }
             Ok(result)
@@ -356,7 +383,12 @@ fn parse_response_format(value: Option<&Value>) -> Result<Option<ResponseFormat>
                 strict: get_bool(schema_obj, "strict"),
             }
         }
-        _ => return Ok(None),
+        other => {
+            return Err(ProtocolError::unsupported(
+                format!("response_format type `{other}`"),
+                "chat",
+            ))
+        }
     }))
 }
 
@@ -436,14 +468,22 @@ pub fn encode_request(request: &UnifiedRequest) -> Result<Value, ProtocolError> 
                     if let ContentPart::ToolResult {
                         tool_use_id,
                         content,
-                        ..
+                        is_error,
                     } = part
                     {
                         ensure_text_only(content, "chat")?;
+                        let mut text = text_content(content);
+                        if *is_error {
+                            // Chat Completions `tool` messages have no error
+                            // flag. Prefixing the text is a lossy mapping: the
+                            // original payload is preserved so the model can
+                            // still see what failed.
+                            text = format!("[tool_error] {text}");
+                        }
                         messages.push(json!({
                             "role": "tool",
                             "tool_call_id": tool_use_id,
-                            "content": text_content(content),
+                            "content": text,
                         }));
                     }
                 }
@@ -510,6 +550,15 @@ pub fn encode_request(request: &UnifiedRequest) -> Result<Value, ProtocolError> 
     }
     if let Some(n) = request.n {
         obj.insert("n".into(), json!(n));
+    }
+
+    // Replay fields captured by the Chat parser that the encoder above does not
+    // model directly (logit_bias, penalties, seed, audio, modalities). A key the
+    // encoder already wrote keeps the encoded value, so known fields win.
+    for (key, value) in &request.extras {
+        if !obj.contains_key(key) {
+            obj.insert(key.clone(), value.clone());
+        }
     }
 
     Ok(Value::Object(obj))
@@ -585,6 +634,7 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
 
     let mut content = Vec::new();
     let mut stop_reason = None;
+    let mut refused = false;
 
     if let Some(choice) = choice {
         if let Some(message) = choice.get("message").and_then(Value::as_object) {
@@ -599,6 +649,18 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
                 }
             }
             content.extend(parse_output_content(message.get("content"))?);
+
+            // Some upstreams report a refusal as structured metadata rather
+            // than as message content. Surface the text and mark the stop
+            // reason so a client cannot mistake the refusal for a completion.
+            if let Some(refusal) = get_str(message, "refusal") {
+                refused = true;
+                if !refusal.is_empty() {
+                    content.push(ContentPart::Text {
+                        text: refusal.to_string(),
+                    });
+                }
+            }
 
             if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
                 for call in tool_calls {
@@ -622,7 +684,11 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
             }
         }
 
-        stop_reason = get_str(choice, "finish_reason").map(parse_finish_reason);
+        stop_reason = if refused {
+            Some(StopReason::ContentFilter)
+        } else {
+            get_str(choice, "finish_reason").map(parse_finish_reason)
+        };
     }
 
     let usage = obj
@@ -648,26 +714,29 @@ pub(crate) fn parse_finish_reason(value: &str) -> StopReason {
         "length" => StopReason::MaxTokens,
         "tool_calls" | "function_call" => StopReason::ToolUse,
         "content_filter" => StopReason::ContentFilter,
-        _ => StopReason::Other,
+        other => StopReason::Unknown(other.to_string()),
     }
 }
 
 pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
-    let prompt = get_u64(usage, "prompt_tokens");
-    let output = get_u64(usage, "completion_tokens");
+    let prompt = get_u64(usage, "prompt_tokens").map(clamp_token_count);
+    let output = get_u64(usage, "completion_tokens").map(clamp_token_count);
     let cached = usage
         .get("prompt_tokens_details")
         .and_then(Value::as_object)
-        .and_then(|details| get_u64(details, "cached_tokens"));
+        .and_then(|details| get_u64(details, "cached_tokens"))
+        .map(clamp_token_count);
     let input = match (prompt, cached) {
         (Some(prompt), Some(cached)) => Some(prompt.saturating_sub(cached)),
         (Some(prompt), None) => Some(prompt),
         _ => None,
     };
-    let total = get_u64(usage, "total_tokens").or_else(|| match (prompt, output) {
-        (Some(prompt), Some(output)) => Some(prompt + output),
-        _ => None,
-    });
+    let total = get_u64(usage, "total_tokens")
+        .map(clamp_token_count)
+        .or_else(|| match (prompt, output) {
+            (Some(prompt), Some(output)) => Some(clamp_token_count(prompt.saturating_add(output))),
+            _ => None,
+        });
 
     Usage {
         input_tokens: input,
@@ -678,7 +747,8 @@ pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
         reasoning_tokens: usage
             .get("completion_tokens_details")
             .and_then(Value::as_object)
-            .and_then(|details| get_u64(details, "reasoning_tokens")),
+            .and_then(|details| get_u64(details, "reasoning_tokens"))
+            .map(clamp_token_count),
     }
 }
 
@@ -722,12 +792,14 @@ pub fn encode_response(response: &UnifiedResponse) -> Result<Value, ProtocolErro
 
     let finish_reason = response
         .stop_reason
+        .as_ref()
         .map(|reason| match reason {
             StopReason::EndTurn | StopReason::StopSequence => "stop",
             StopReason::MaxTokens => "length",
             StopReason::ToolUse => "tool_calls",
             StopReason::ContentFilter => "content_filter",
             StopReason::Other => "stop",
+            StopReason::Unknown(raw) => raw.as_str(),
         })
         .unwrap_or("stop");
 

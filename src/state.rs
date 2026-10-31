@@ -1,7 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
+    net::IpAddr,
     path::PathBuf,
-    sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Arc, Mutex, RwLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -25,6 +29,11 @@ use crate::{
 };
 
 const CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Concurrent `/api/metrics/stream` connections allowed. Each stream parks a
+/// socket for its whole lifetime, so a handful is enough for the dashboard and
+/// bounds the resources a signed-in client can pin.
+pub const METRICS_STREAM_LIMIT: usize = 4;
 
 /// Shared snapshot of the prepared channel list; each element is shared so a
 /// routing candidate can hold one channel without cloning it.
@@ -275,6 +284,97 @@ pub struct UpdateState {
     pub shutdown: Notify,
 }
 
+const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
+const AUTH_FAILURE_PER_IP_LIMIT: usize = 20;
+/// Cap the per-client vector so concurrent failures cannot grow it without
+/// bound.
+const AUTH_FAILURE_MAX_TRACKED: usize = 128;
+
+/// Sliding-window limiter for failed API key authentication. Keys come from
+/// the shared client-IP policy (`client_ip::resolve_client_ip`): a configured
+/// header is authoritative, otherwise trusted-proxy XFF or the TCP peer is
+/// used. Under a CDN the header must keep distinct clients separate so the
+/// shared origin address is never rate-limited.
+///
+/// A request whose client IP cannot be resolved (`None`) is counted in one
+/// shared "unknown client" bucket instead of being exempt. That keeps the
+/// limiter closed when the configured header is missing or malformed, without
+/// ever charging those failures to the TCP peer, which under a CDN is the
+/// shared origin address.
+#[derive(Debug, Default)]
+pub struct AuthFailureLimiter {
+    state: Mutex<AuthFailureState>,
+}
+
+#[derive(Debug, Default)]
+struct AuthFailureState {
+    /// Failures per resolved client; `None` is the shared unknown bucket.
+    clients: HashMap<Option<IpAddr>, Vec<Instant>>,
+}
+
+impl AuthFailureLimiter {
+    fn lock(&self) -> std::sync::MutexGuard<'_, AuthFailureState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether the client may still attempt authentication. Only that client's
+    /// own failures count: a global gate would let one attacker lock every
+    /// tenant out of the gateway.
+    pub fn check(&self, client: Option<IpAddr>) -> bool {
+        let now = Instant::now();
+        let mut state = self.lock();
+        state.retain_recent(now);
+
+        let mut expired = false;
+        let allowed = match state.clients.get_mut(&client) {
+            Some(failures) => {
+                retain_recent(failures, now);
+                expired = failures.is_empty();
+                failures.len() < AUTH_FAILURE_PER_IP_LIMIT
+            }
+            None => true,
+        };
+        if expired {
+            state.clients.remove(&client);
+        }
+        allowed
+    }
+
+    pub fn record_failure(&self, client: Option<IpAddr>) {
+        let now = Instant::now();
+        let mut state = self.lock();
+        state.retain_recent(now);
+        let failures = state.clients.entry(client).or_default();
+        retain_recent(failures, now);
+        if failures.len() < AUTH_FAILURE_MAX_TRACKED {
+            failures.push(now);
+        }
+    }
+
+    pub fn record_success(&self, client: Option<IpAddr>) {
+        self.lock().clients.remove(&client);
+    }
+}
+
+impl AuthFailureState {
+    fn retain_recent(&mut self, now: Instant) {
+        // Drop fully expired clients, but only scan the whole map when it grows
+        // large so the common case stays cheap.
+        if self.clients.len() > 10_000 {
+            self.clients.retain(|_, failures| {
+                retain_recent(failures, now);
+                !failures.is_empty()
+            });
+        }
+    }
+}
+
+fn retain_recent(attempts: &mut Vec<Instant>, now: Instant) {
+    attempts.retain(|attempt| now.saturating_duration_since(*attempt) < AUTH_FAILURE_WINDOW);
+}
+
 /// Result of asking to try a channel that is coming out of cooldown.
 pub enum ProbeAttempt {
     /// The channel is not recovering, so normal traffic may use it.
@@ -349,11 +449,32 @@ pub struct AppState {
     pub events: Arc<EventBus>,
     pub updates: Arc<UpdateState>,
     pub login_limiter: Arc<LoginLimiter>,
+    pub auth_failure_limiter: Arc<AuthFailureLimiter>,
     pub clients: Arc<ClientCache>,
     pub cache: Arc<RuntimeCache>,
     pub probes: Arc<ChannelProbes>,
     pub usage_writer: Option<Arc<UsageWriter>>,
     pub started_at: DateTime<Utc>,
+    /// Serializes database snapshots. The admin endpoint uses `try_lock` so a
+    /// second request is rejected instead of queued behind a slow `VACUUM
+    /// INTO`.
+    pub backup_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes the Responses storage quota check, write and accounting so
+    /// concurrent requests cannot both pass the same preimage check.
+    pub response_store_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Responses objects rejected by the quota or ownership check since start.
+    pub response_store_rejected: Arc<AtomicU64>,
+    /// Start of the most recent snapshot attempt, used to rate-limit manual
+    /// backups. Ordinary `std::sync::Mutex` because it is held only for a
+    /// short check and never across an await.
+    pub last_backup_at: Arc<Mutex<Option<Instant>>>,
+    /// Flips to `true` when the process starts shutting down. Long-lived
+    /// handlers (metrics SSE) subscribe and end their streams so graceful
+    /// shutdown and self-update restarts are never blocked by an open socket.
+    pub shutdown: tokio::sync::watch::Sender<bool>,
+    /// Bounds concurrent metrics SSE connections to
+    /// [`METRICS_STREAM_LIMIT`]; each stream holds one permit until it ends.
+    pub metrics_streams: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {

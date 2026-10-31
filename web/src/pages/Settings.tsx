@@ -42,7 +42,10 @@ interface SettingsDraft {
   nonstream_timeout_seconds: string;
   stream_idle_timeout_seconds: string;
   usage_log_retention_days: string;
+  request_detail_retention_days: string;
   response_retention_days: string;
+  response_storage_per_key_mb: string;
+  response_storage_total_mb: string;
   store_request_bodies: boolean;
   update_source: 'github' | 'ghproxy';
   client_ip_header: string;
@@ -60,7 +63,10 @@ const NUMERIC_DEFAULTS = {
   nonstream_timeout_seconds: 600,
   stream_idle_timeout_seconds: 120,
   usage_log_retention_days: 30,
+  request_detail_retention_days: 7,
   response_retention_days: 7,
+  response_storage_per_key_mb: 64,
+  response_storage_total_mb: 2048,
 } as const;
 
 const EMPTY_DRAFT: SettingsDraft = {
@@ -74,7 +80,16 @@ const EMPTY_DRAFT: SettingsDraft = {
     NUMERIC_DEFAULTS.stream_idle_timeout_seconds,
   ),
   usage_log_retention_days: String(NUMERIC_DEFAULTS.usage_log_retention_days),
+  request_detail_retention_days: String(
+    NUMERIC_DEFAULTS.request_detail_retention_days,
+  ),
   response_retention_days: String(NUMERIC_DEFAULTS.response_retention_days),
+  response_storage_per_key_mb: String(
+    NUMERIC_DEFAULTS.response_storage_per_key_mb,
+  ),
+  response_storage_total_mb: String(
+    NUMERIC_DEFAULTS.response_storage_total_mb,
+  ),
   store_request_bodies: false,
   update_source: 'github',
   client_ip_header: '',
@@ -88,7 +103,12 @@ function toDraft(settings: Settings): SettingsDraft {
     nonstream_timeout_seconds: String(settings.nonstream_timeout_seconds),
     stream_idle_timeout_seconds: String(settings.stream_idle_timeout_seconds),
     usage_log_retention_days: String(settings.usage_log_retention_days),
+    request_detail_retention_days: String(
+      settings.request_detail_retention_days,
+    ),
     response_retention_days: String(settings.response_retention_days),
+    response_storage_per_key_mb: String(settings.response_storage_per_key_mb),
+    response_storage_total_mb: String(settings.response_storage_total_mb),
     store_request_bodies: settings.store_request_bodies,
     update_source: settings.update_source,
     client_ip_header: settings.client_ip_header ?? '',
@@ -123,9 +143,21 @@ function toSettings(draft: SettingsDraft): Settings {
       draft.usage_log_retention_days,
       NUMERIC_DEFAULTS.usage_log_retention_days,
     ),
+    request_detail_retention_days: toInt(
+      draft.request_detail_retention_days,
+      NUMERIC_DEFAULTS.request_detail_retention_days,
+    ),
     response_retention_days: toInt(
       draft.response_retention_days,
       NUMERIC_DEFAULTS.response_retention_days,
+    ),
+    response_storage_per_key_mb: toInt(
+      draft.response_storage_per_key_mb,
+      NUMERIC_DEFAULTS.response_storage_per_key_mb,
+    ),
+    response_storage_total_mb: toInt(
+      draft.response_storage_total_mb,
+      NUMERIC_DEFAULTS.response_storage_total_mb,
     ),
     store_request_bodies: draft.store_request_bodies,
     update_source: draft.update_source,
@@ -133,10 +165,30 @@ function toSettings(draft: SettingsDraft): Settings {
   };
 }
 
+/**
+ * Only the fields the user actually edited are sent. The backend treats every
+ * field as optional, so this avoids writing defaults back over settings that
+ * were never loaded or never touched.
+ */
+function toSettingsPatch(
+  draft: SettingsDraft,
+  fields: ReadonlySet<keyof SettingsDraft>,
+): Partial<Settings> {
+  const values = toSettings(draft);
+  return Object.fromEntries(
+    Array.from(fields, (field) => [field, values[field]]),
+  ) as Partial<Settings>;
+}
+
 export default function SettingsPage() {
   const queryClient = useQueryClient();
   const [draftOverride, setDraftOverride] = useState<SettingsDraft | null>(
     null,
+  );
+  // Fields the user edited while a server copy exists. Only these are sent on
+  // save, so unrelated values are never replaced with local defaults.
+  const [dirtyFields, setDirtyFields] = useState<Set<keyof SettingsDraft>>(
+    () => new Set(),
   );
   const [siteNameError, setSiteNameError] = useState('');
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -175,13 +227,22 @@ export default function SettingsPage() {
 
   function update(patch: Partial<SettingsDraft>) {
     setDraftOverride({ ...draft, ...patch });
+    setDirtyFields((current) => {
+      const next = new Set(current);
+      for (const key of Object.keys(patch) as (keyof SettingsDraft)[]) {
+        next.add(key);
+      }
+      return next;
+    });
   }
 
   const saveMutation = useMutation({
-    mutationFn: (values: Settings) => api.put<Settings>('/api/settings', values),
+    mutationFn: (values: Partial<Settings>) =>
+      api.put<Settings>('/api/settings', values),
     onSuccess: (data) => {
       toast.success('设置已保存');
       setDraftOverride(toDraft(data));
+      setDirtyFields(new Set());
       queryClient.setQueryData(['settings'], data);
       queryClient.invalidateQueries({ queryKey: ['site'] });
     },
@@ -232,12 +293,18 @@ export default function SettingsPage() {
   });
 
   function saveSettings() {
-    if (!draft.site_name.trim()) {
+    // Without server data the form must not be usable; saving here would write
+    // EMPTY_DRAFT defaults over the stored configuration.
+    if (!settingsQuery.data) {
+      toast.error('设置尚未加载，无法保存');
+      return;
+    }
+    if (dirtyFields.has('site_name') && !draft.site_name.trim()) {
       setSiteNameError('请输入站点名称');
       return;
     }
     setSiteNameError('');
-    saveMutation.mutate(toSettings(draft));
+    saveMutation.mutate(toSettingsPatch(draft, dirtyFields));
   }
 
   function changePassword() {
@@ -281,7 +348,32 @@ export default function SettingsPage() {
                   <Skeleton key={index} className="h-10 w-full" />
                 ))}
               </div>
-            ) : (
+            ) : settingsQuery.isError ? (
+              <Alert variant="destructive">
+                <AlertTitle>加载设置失败</AlertTitle>
+                <AlertDescription>
+                  {settingsQuery.error instanceof Error
+                    ? settingsQuery.error.message
+                    : String(settingsQuery.error)}
+                </AlertDescription>
+                <div className="mt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void settingsQuery.refetch()}
+                    disabled={settingsQuery.isFetching}
+                  >
+                    {settingsQuery.isFetching ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <RefreshCw />
+                    )}
+                    重试
+                  </Button>
+                </div>
+              </Alert>
+            ) : settingsQuery.data ? (
               <>
                 <Field
                   label="站点名称"
@@ -380,6 +472,24 @@ export default function SettingsPage() {
                     />
                   </Field>
                   <Field
+                    label="请求正文保留天数"
+                    htmlFor="settings-request-detail-retention"
+                    hint="请求/响应正文独立于用量日志保留；0 表示不按时间清理，仅在删除 Key 时清除。"
+                  >
+                    <Input
+                      id="settings-request-detail-retention"
+                      type="number"
+                      min={0}
+                      max={3650}
+                      value={draft.request_detail_retention_days}
+                      onChange={(event) =>
+                        update({
+                          request_detail_retention_days: event.target.value,
+                        })
+                      }
+                    />
+                  </Field>
+                  <Field
                     label="Responses 保留天数"
                     htmlFor="settings-response-retention"
                     hint="0 表示永久保留。"
@@ -392,6 +502,42 @@ export default function SettingsPage() {
                       onChange={(event) =>
                         update({
                           response_retention_days: event.target.value,
+                        })
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="Responses 单 Key 存储上限（MB）"
+                    htmlFor="settings-response-per-key-mb"
+                    hint="单个 API Key 的 Responses 存储上限；0 表示不限制，超额返回 store: false。"
+                  >
+                    <Input
+                      id="settings-response-per-key-mb"
+                      type="number"
+                      min={0}
+                      max={1048576}
+                      value={draft.response_storage_per_key_mb}
+                      onChange={(event) =>
+                        update({
+                          response_storage_per_key_mb: event.target.value,
+                        })
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="Responses 全局存储上限（MB）"
+                    htmlFor="settings-response-total-mb"
+                    hint="所有 API Key 合计的 Responses 存储上限；0 表示不限制。"
+                  >
+                    <Input
+                      id="settings-response-total-mb"
+                      type="number"
+                      min={0}
+                      max={1048576}
+                      value={draft.response_storage_total_mb}
+                      onChange={(event) =>
+                        update({
+                          response_storage_total_mb: event.target.value,
                         })
                       }
                     />
@@ -474,7 +620,7 @@ export default function SettingsPage() {
                   保存设置
                 </Button>
               </>
-            )}
+            ) : null}
           </CardContent>
         </Card>
 

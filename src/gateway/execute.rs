@@ -2,7 +2,12 @@ use std::time::{Duration, Instant};
 
 use crate::{
     error::AppError,
-    models::{self, api_key::ApiKey, channel::Channel, now_ms},
+    models::{
+        self,
+        api_key::{ApiKey, ApiKeyLimits},
+        channel::Channel,
+        now_ms,
+    },
     protocol::{self, Protocol, UnifiedRequest, Usage},
     state::{AppState, ProbeAttempt},
     upstream,
@@ -45,7 +50,11 @@ const FAILOVER_BUDGET: Duration = Duration::from_secs(60);
 struct ClientFailure {
     status: StatusCode,
     error_type: String,
+    /// Raw upstream text, kept for the usage log only.
     message: String,
+    /// Whether `message` came from a structured provider JSON error. Only then
+    /// may it be shown to the client (after redaction).
+    provider_json: bool,
     channel_id: i64,
     upstream_model: String,
     upstream: Protocol,
@@ -56,6 +65,7 @@ impl ClientFailure {
         status: StatusCode,
         error_type: String,
         message: String,
+        provider_json: bool,
         channel_id: i64,
         upstream_model: &str,
         upstream: Protocol,
@@ -64,10 +74,16 @@ impl ClientFailure {
             status,
             error_type,
             message,
+            provider_json,
             channel_id,
             upstream_model: upstream_model.to_string(),
             upstream,
         }
+    }
+
+    /// The message this failure is allowed to expose to the API key client.
+    fn client_message(&self) -> String {
+        error::client_safe_upstream_message(&self.error_type, &self.message, self.provider_json)
     }
 }
 
@@ -80,12 +96,12 @@ pub struct ProxyIdentity {
 }
 
 impl ProxyIdentity {
-    pub fn gateway(key: &ApiKey) -> Self {
+    pub fn gateway(key: &ApiKey, limits: &ApiKeyLimits) -> Self {
         Self {
             api_key_id: Some(key.id),
             source: "gateway",
-            allowed_channel_ids: key.channel_ids(),
-            allowed_models: key.model_names(),
+            allowed_channel_ids: limits.channel_ids.clone(),
+            allowed_models: limits.models.clone(),
         }
     }
 
@@ -116,7 +132,7 @@ pub async fn proxy(
 ) -> Result<Response, AppError> {
     proxy_with_identity(
         state,
-        ProxyIdentity::gateway(&auth.key),
+        ProxyIdentity::gateway(&auth.key, &auth.limits),
         inbound,
         headers,
         body,
@@ -132,17 +148,46 @@ pub async fn proxy_with_identity(
     mut body: Value,
 ) -> Result<Response, AppError> {
     let request_id = resolve_request_id(headers);
-    let defaults = state.cache.defaults(&state.db).await?;
-    let store_request_bodies = defaults.store_request_bodies;
-    let detail_request =
-        store_request_bodies.then(|| serde_json::to_string(&body).unwrap_or_default());
+    // Routing metadata (`x-oneapi-channel` / `x-oneapi-upstream-model`) is only
+    // for the admin Playground UI; API key clients must not learn the internal
+    // channel topology.
+    let expose_route_headers = identity.source == "playground";
 
-    let Some(model) = body
+    let requested_model = body
         .get("model")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
-    else {
+        .map(str::to_string);
+
+    if let Some(model) = requested_model.as_deref() {
+        // The model name is echoed into response headers and written to the
+        // indexed `usage_logs.model` column. Reject over-long names and control
+        // characters before fetching defaults, building the request detail,
+        // selecting a channel or writing a usage row: this request never
+        // reaches an upstream attempt, so it produces no usage row.
+        if model.chars().count() > models::usage_log::MAX_MODEL_NAME_LEN
+            || model.chars().any(char::is_control)
+        {
+            return Ok(error::client_error(
+                inbound,
+                StatusCode::BAD_REQUEST,
+                "invalid model name",
+                "invalid_request_error",
+            ));
+        }
+    }
+
+    let defaults = state.cache.defaults(&state.db).await?;
+    let store_request_bodies = defaults.store_request_bodies;
+    // Truncate as soon as the body is serialized: this string is cloned into
+    // `StreamJob`, and the non-stream retry paths keep it alive for the whole
+    // request. Holding the untruncated body would pin a full extra copy of a
+    // large payload; the detail write applies the same bound anyway.
+    let detail_request = store_request_bodies.then(|| {
+        models::request_detail::truncate_detail(&serde_json::to_string(&body).unwrap_or_default())
+    });
+
+    let Some(model) = requested_model else {
         let message = "model is required";
         store_request_detail(
             state,
@@ -163,7 +208,7 @@ pub async fn proxy_with_identity(
     let started = Instant::now();
     let deadline = started + REQUEST_TOTAL_BUDGET;
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let log = AttemptLog {
+    let mut log = AttemptLog {
         request_id: &request_id,
         api_key_id: identity.api_key_id,
         source: identity.source,
@@ -171,6 +216,7 @@ pub async fn proxy_with_identity(
         inbound,
         stream: streaming,
         started,
+        reservation: None,
     };
     let mut attempts = 0u32;
 
@@ -200,13 +246,6 @@ pub async fn proxy_with_identity(
         .and_then(|value| value.get("include_usage"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    // Local fallback used when a stream is interrupted before the final usage
-    // frame arrives or the upstream never reports usage at all.
-    let input_token_estimate = if streaming {
-        usage::estimate_request_tokens(&body)
-    } else {
-        0
-    };
 
     let mut client_request: Option<Value> = None;
     let mut response_id: Option<String> = None;
@@ -303,6 +342,34 @@ pub async fn proxy_with_identity(
         false
     };
 
+    // Admission estimate: the expanded body (Responses history included) plus
+    // the worst-case completion size. Computed after `expand_previous` so the
+    // reserved amount covers the history the upstream is actually asked to
+    // process, not just the client's final turn.
+    let input_estimate = usage::estimate_request_tokens(&body);
+    // Local fallback used when a stream is interrupted before the final usage
+    // frame arrives or the upstream never reports usage at all.
+    let input_token_estimate = if streaming { input_estimate } else { 0 };
+    let max_tokens = body
+        .get("max_tokens")
+        .or_else(|| body.get("max_completion_tokens"))
+        .or_else(|| body.get("max_output_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::from(defaults.default_max_tokens));
+    let reservation_estimate =
+        i64::try_from(input_estimate.saturating_add(max_tokens).max(1)).unwrap_or(i64::MAX);
+    let reservation_day = now_ms() / 86_400_000;
+    let mut reservation = match identity.api_key_id {
+        Some(api_key_id) => {
+            match usage::reserve(state, api_key_id, reservation_estimate, reservation_day).await {
+                Ok(reservation) => reservation,
+                Err(usage::ReserveError::Database(error)) => return Err(AppError::Database(error)),
+                Err(refused) => return Ok(reserve_error_response(inbound, &refused)),
+            }
+        }
+        None => None,
+    };
+
     let channels = state.cache.channels(&state.db).await?;
     let health = state.cache.channel_health();
     let candidates = select::candidates(
@@ -372,15 +439,23 @@ pub async fn proxy_with_identity(
             detail_request.clone(),
             headers,
             defaults,
+            reservation.take(),
+            reservation_estimate,
+            reservation_day,
         )
         .await;
     }
+
+    // The non-stream path settles the reservation through its terminal usage
+    // row (success or failover), so the log owns it from here on.
+    log.reservation = reservation;
 
     let mut last_channel: Option<i64> = None;
     let mut last_upstream_model: Option<String> = None;
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
+    let mut last_provider_json = false;
     // A request-shaped error (for example 400) is still worth retrying on
     // another channel, but it must not cool the channel down. Remember the
     // first one so the client gets a meaningful status if every channel fails.
@@ -393,6 +468,9 @@ pub async fn proxy_with_identity(
         if let Some((error_type, message)) = attempt_gate(attempts, started, deadline) {
             last_error_type = error_type.to_string();
             last_message = message.to_string();
+            // Gateway-generated limit text is safe to forward; it contains no
+            // upstream host information.
+            last_provider_json = true;
             break;
         }
         let probe_lease = match state.probes.acquire(candidate.channel(), now_ms()) {
@@ -429,6 +507,10 @@ pub async fn proxy_with_identity(
                         StatusCode::BAD_REQUEST,
                         "invalid_request_error".to_string(),
                         message.clone(),
+                        // A conversion rejection is gateway wording about the
+                        // client payload, not raw upstream text, so it can be
+                        // forwarded as-is.
+                        true,
                         channel.id,
                         &candidate.upstream_model,
                         upstream,
@@ -436,6 +518,7 @@ pub async fn proxy_with_identity(
                 }
                 last_error_type = "invalid_request_error".to_string();
                 last_message = message;
+                last_provider_json = true;
                 continue;
             }
             AttemptBody::InvalidRequest(message) => {
@@ -467,6 +550,7 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
+                last_provider_json = false;
                 state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
@@ -484,6 +568,7 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
+                last_provider_json = false;
                 state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
@@ -494,17 +579,26 @@ pub async fn proxy_with_identity(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_unreachable".to_string();
+                last_provider_json = false;
                 state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
         };
 
         let status = response.status();
+        // Capture the content type before the response is consumed by the body
+        // read; a same-protocol 2xx is only forwarded when it is JSON.
+        let upstream_content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_ascii_lowercase());
         let body_bytes = match upstream::read_body_limited_bytes(response).await {
             Ok(bytes) => bytes,
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_unreachable".to_string();
+                last_provider_json = false;
                 state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
@@ -517,6 +611,24 @@ pub async fn proxy_with_identity(
                 state.mark_channel_failure(channel.id, message).await;
                 last_error_type = "upstream_error".to_string();
                 last_message = message.to_string();
+                last_provider_json = false;
+                continue;
+            }
+            // Same protocol: the payload is forwarded to the client as-is, so a
+            // 2xx carrying HTML, a plain-text error page or malformed JSON must
+            // not be echoed back as a successful response. Another channel may
+            // still answer the request.
+            if upstream == inbound
+                && (upstream_content_type
+                    .as_deref()
+                    .is_some_and(|value| !value.contains("json"))
+                    || upstream_value.is_none())
+            {
+                let message = "upstream returned an invalid response";
+                state.mark_channel_failure(channel.id, message).await;
+                last_error_type = "upstream_invalid_response".to_string();
+                last_message = message.to_string();
+                last_provider_json = false;
                 continue;
             }
             // Some compatible providers report failures inside a 200 body
@@ -528,6 +640,7 @@ pub async fn proxy_with_identity(
                     state.mark_channel_failure(channel.id, &message).await;
                     last_error_type = error_type;
                     last_message = message;
+                    last_provider_json = true;
                     continue;
                 }
             }
@@ -548,6 +661,7 @@ pub async fn proxy_with_identity(
                         state.mark_channel_failure(channel.id, message).await;
                         last_error_type = "upstream_error".to_string();
                         last_message = message.to_string();
+                        last_provider_json = false;
                         continue;
                     }
                 }
@@ -559,6 +673,7 @@ pub async fn proxy_with_identity(
                     state.mark_channel_failure(channel.id, message).await;
                     last_error_type = "upstream_error".to_string();
                     last_message = message.to_string();
+                    last_provider_json = false;
                     continue;
                 };
 
@@ -569,6 +684,7 @@ pub async fn proxy_with_identity(
                         state.mark_channel_failure(channel.id, &message).await;
                         last_error_type = "upstream_error".to_string();
                         last_message = message;
+                        last_provider_json = false;
                         continue;
                     }
                 };
@@ -585,6 +701,9 @@ pub async fn proxy_with_identity(
                         // channel for a gateway-side conversion limit.
                         last_error_type = "conversion_error".to_string();
                         last_message = error.to_string();
+                        // Gateway conversion wording is client-oriented and
+                        // contains no upstream address, so keep it visible.
+                        last_provider_json = true;
                         continue;
                     }
                 };
@@ -599,6 +718,7 @@ pub async fn proxy_with_identity(
                     state.mark_channel_failure(channel.id, message).await;
                     last_error_type = "upstream_error".to_string();
                     last_message = message.to_string();
+                    last_provider_json = false;
                     continue;
                 }
 
@@ -697,7 +817,9 @@ pub async fn proxy_with_identity(
             .await;
 
             if detail_request.is_some() {
-                let response_text = String::from_utf8_lossy(&client_bytes);
+                let captured = String::from_utf8_lossy(&client_bytes);
+                // Bound the body before it enters the write queue.
+                let response_text = models::request_detail::truncate_detail(&captured);
                 store_request_detail(
                     state,
                     &request_id,
@@ -713,15 +835,16 @@ pub async fn proxy_with_identity(
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(client_body)
                 .map_err(|error| AppError::Internal(error.into()))?;
-            return Ok(with_route_headers(
-                response,
-                channel,
-                &candidate.upstream_model,
-            ));
+            return Ok(if expose_route_headers {
+                with_route_headers(response, channel, &candidate.upstream_model)
+            } else {
+                response
+            });
         }
 
         let text = String::from_utf8_lossy(&body_bytes);
         let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
+        let provider_json = upstream_value.is_some();
         if penalizes_channel(status) {
             state.mark_channel_failure(channel.id, &message).await;
         } else if client_error
@@ -732,12 +855,14 @@ pub async fn proxy_with_identity(
             // payload itself is the problem; retrying further only adds load.
             last_error_type = error_type;
             last_message = message;
+            last_provider_json = provider_json;
             break;
         } else if client_error.is_none() {
             client_error = Some(ClientFailure::new(
                 status,
                 error_type.clone(),
                 message.clone(),
+                provider_json,
                 channel.id,
                 &candidate.upstream_model,
                 upstream,
@@ -745,11 +870,12 @@ pub async fn proxy_with_identity(
         }
         last_error_type = error_type;
         last_message = message;
+        last_provider_json = provider_json;
     }
 
     finish_failover(
         state,
-        &log,
+        &mut log,
         attempts,
         detail_request.as_deref(),
         FailoverState {
@@ -758,6 +884,7 @@ pub async fn proxy_with_identity(
             last_upstream,
             last_error_type,
             last_message,
+            last_provider_json,
             client_error,
             probe_deferred,
         },
@@ -785,8 +912,13 @@ async fn proxy_stream(
     detail_request: Option<String>,
     headers: &HeaderMap,
     defaults: models::setting::GatewayDefaults,
+    mut reservation: Option<usage::Reservation>,
+    reservation_estimate: i64,
+    reservation_day: i64,
 ) -> Result<Response, AppError> {
-    let log = AttemptLog {
+    // Only the admin Playground may see internal routing metadata.
+    let expose_route_headers = identity.source == "playground";
+    let mut log = AttemptLog {
         request_id,
         api_key_id: identity.api_key_id,
         source: identity.source,
@@ -794,6 +926,7 @@ async fn proxy_stream(
         inbound,
         stream: true,
         started,
+        reservation: None,
     };
     let mut attempts = 0u32;
     let mut last_channel: Option<i64> = None;
@@ -801,6 +934,7 @@ async fn proxy_stream(
     let mut last_upstream = inbound;
     let mut last_error_type = "upstream_error".to_string();
     let mut last_message = "no upstream channel succeeded".to_string();
+    let mut last_provider_json = false;
     let mut client_error: Option<ClientFailure> = None;
     let mut unified_request: Option<UnifiedRequest> = None;
     let mut probe_deferred = false;
@@ -810,6 +944,9 @@ async fn proxy_stream(
         if let Some((error_type, message)) = attempt_gate(attempts, started, deadline) {
             last_error_type = error_type.to_string();
             last_message = message.to_string();
+            // Gateway-generated limit text is safe to forward; it contains no
+            // upstream host information.
+            last_provider_json = true;
             break;
         }
         let probe = match state.probes.acquire(candidate.channel(), now_ms()) {
@@ -846,6 +983,10 @@ async fn proxy_stream(
                         StatusCode::BAD_REQUEST,
                         "invalid_request_error".to_string(),
                         message.clone(),
+                        // A conversion rejection is gateway wording about the
+                        // client payload, not raw upstream text, so it can be
+                        // forwarded as-is.
+                        true,
                         channel.id,
                         &candidate.upstream_model,
                         upstream,
@@ -853,6 +994,7 @@ async fn proxy_stream(
                 }
                 last_error_type = "invalid_request_error".to_string();
                 last_message = message;
+                last_provider_json = true;
                 continue;
             }
             AttemptBody::InvalidRequest(message) => {
@@ -903,6 +1045,7 @@ async fn proxy_stream(
             Err(error) => {
                 last_message = error.to_string();
                 last_error_type = "upstream_configuration_error".to_string();
+                last_provider_json = false;
                 state.mark_channel_failure(channel.id, &last_message).await;
                 continue;
             }
@@ -922,6 +1065,7 @@ async fn proxy_stream(
                 Err(error) => {
                     last_message = error.to_string();
                     last_error_type = "upstream_configuration_error".to_string();
+                    last_provider_json = false;
                     state.mark_channel_failure(channel.id, &last_message).await;
                     continue 'candidates;
                 }
@@ -932,6 +1076,7 @@ async fn proxy_stream(
                 Err(error) => {
                     last_message = error.to_string();
                     last_error_type = "upstream_unreachable".to_string();
+                    last_provider_json = false;
                     state.mark_channel_failure(channel.id, &last_message).await;
                     continue 'candidates;
                 }
@@ -939,6 +1084,27 @@ async fn proxy_stream(
 
             let status = response.status();
             if status.is_success() {
+                // A 200 with a non-SSE body (HTML error page, JSON payload) is
+                // not a stream. Reject it before committing to this channel; an
+                // absent header is left to the first-frame check.
+                let invalid_content_type = response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .is_some_and(|value| {
+                        !value
+                            .to_str()
+                            .map(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+                            .unwrap_or(false)
+                    });
+                if invalid_content_type {
+                    // Drain the bounded body so the connection can be reused.
+                    let _ = upstream::read_body_limited(response).await;
+                    last_message = "upstream returned a non-SSE response".to_string();
+                    last_error_type = "upstream_invalid_content_type".to_string();
+                    last_provider_json = false;
+                    state.mark_channel_failure(channel.id, &last_message).await;
+                    continue 'candidates;
+                }
                 break response;
             }
 
@@ -962,6 +1128,7 @@ async fn proxy_stream(
 
             let upstream_value = serde_json::from_str::<Value>(&text).ok();
             let (error_type, message) = upstream_error_info(upstream_value.as_ref(), &text);
+            let provider_json = upstream_value.is_some();
 
             if penalizes_channel(status) {
                 state.mark_channel_failure(channel.id, &message).await;
@@ -971,12 +1138,14 @@ async fn proxy_stream(
                 // Same rejection on another channel: stop retrying this payload.
                 last_error_type = error_type;
                 last_message = message;
+                last_provider_json = provider_json;
                 break 'candidates;
             } else if client_error.is_none() {
                 client_error = Some(ClientFailure::new(
                     status,
                     error_type.clone(),
                     message.clone(),
+                    provider_json,
                     channel.id,
                     &candidate.upstream_model,
                     upstream,
@@ -984,6 +1153,7 @@ async fn proxy_stream(
             }
             last_error_type = error_type;
             last_message = message;
+            last_provider_json = provider_json;
             continue 'candidates;
         };
 
@@ -1027,11 +1197,14 @@ async fn proxy_stream(
             stream: byte_stream,
             _probe: probe,
             clear_failure_state,
+            reservation: reservation.take(),
         };
 
         match stream::start(job).await {
             Ok(mut response) => {
-                add_route_headers(&mut response, channel, &candidate.upstream_model);
+                if expose_route_headers {
+                    add_route_headers(&mut response, channel, &candidate.upstream_model);
+                }
                 return Ok(response);
             }
             Err(failure) => {
@@ -1040,6 +1213,29 @@ async fn proxy_stream(
                     .await;
                 last_error_type = failure.error_type.clone();
                 last_message = failure.message.clone();
+                last_provider_json = failure.provider_json;
+
+                // `start` consumed the job, so an armed guard was released when
+                // the stream task exited before writing usage. Re-arm it for the
+                // remaining candidates; if the quota is gone the request simply
+                // continues unreserved (and will be rejected by its usage row).
+                let rearm_key = if reservation.is_none() {
+                    identity.api_key_id
+                } else {
+                    None
+                };
+                if let Some(api_key_id) = rearm_key {
+                    match usage::reserve(state, api_key_id, reservation_estimate, reservation_day)
+                        .await
+                    {
+                        Ok(value) => reservation = value,
+                        Err(error) => tracing::warn!(
+                            error = %error,
+                            request_id,
+                            "failed to re-reserve quota after a stream attempt failed"
+                        ),
+                    }
+                }
 
                 // Nothing was written downstream yet, so try the next channel.
                 continue;
@@ -1047,9 +1243,13 @@ async fn proxy_stream(
         }
     }
 
+    // No candidate committed: the failover row settles any reservation still
+    // held here, exactly like a successful row would.
+    log.reservation = reservation.take();
+
     finish_failover(
         state,
-        &log,
+        &mut log,
         attempts,
         detail_request.as_deref(),
         FailoverState {
@@ -1058,6 +1258,7 @@ async fn proxy_stream(
             last_upstream,
             last_error_type,
             last_message,
+            last_provider_json,
             client_error,
             probe_deferred,
         },
@@ -1075,12 +1276,16 @@ struct AttemptLog<'a> {
     inbound: Protocol,
     stream: bool,
     started: Instant,
+    /// Admission reservation, settled by the usage row this log writes. Kept
+    /// here so every return path (success or any failover outcome) releases it
+    /// exactly once.
+    reservation: Option<usage::Reservation>,
 }
 
 impl AttemptLog<'_> {
     #[allow(clippy::too_many_arguments)]
     async fn record(
-        &self,
+        &mut self,
         state: &AppState,
         channel_id: Option<i64>,
         upstream_model: Option<&str>,
@@ -1090,6 +1295,10 @@ impl AttemptLog<'_> {
         error: Option<(&str, &str)>,
         usage: Usage,
     ) {
+        let (reserved_tokens, reserved_day) = match &self.reservation {
+            Some(reservation) => (reservation.tokens(), reservation.day()),
+            None => (0, 0),
+        };
         let record = UsageRecord {
             request_id: self.request_id,
             source: self.source,
@@ -1107,10 +1316,21 @@ impl AttemptLog<'_> {
             usage: &usage,
             latency_ms: self.started.elapsed().as_millis() as i64,
             first_token_ms: None,
+            reserved_tokens,
+            reserved_day,
             created_at: now_ms(),
         };
 
-        usage::record(state, &record).await;
+        let written = usage::record(state, &record).await;
+
+        // Only a row that reached the writer (or the database) owns settlement.
+        // A failed write leaves the guard armed so dropping this log releases
+        // the reservation instead of pinning the quota forever.
+        if written {
+            if let Some(mut reservation) = self.reservation.take() {
+                reservation.disarm();
+            }
+        }
     }
 }
 
@@ -1122,6 +1342,9 @@ struct FailoverState {
     last_upstream: Protocol,
     last_error_type: String,
     last_message: String,
+    /// Whether `last_message` is structured provider JSON that may be shown to
+    /// the client after redaction.
+    last_provider_json: bool,
     client_error: Option<ClientFailure>,
     probe_deferred: bool,
 }
@@ -1133,7 +1356,7 @@ struct FailoverState {
 /// upstream rejected -> that upstream's status, otherwise 502.
 async fn finish_failover(
     state: &AppState,
-    log: &AttemptLog<'_>,
+    log: &mut AttemptLog<'_>,
     attempts: u32,
     detail_request: Option<&str>,
     failover: FailoverState,
@@ -1172,6 +1395,7 @@ async fn finish_failover(
     // Every channel was tried. If one of them rejected the payload itself,
     // surface that status instead of hiding a client mistake behind a 502.
     if let Some(failure) = failover.client_error {
+        let client_message = failure.client_message();
         log.record(
             state,
             Some(failure.channel_id),
@@ -1188,13 +1412,14 @@ async fn finish_failover(
             log.request_id,
             log.api_key_id,
             detail_request,
+            // The raw upstream text is retained in the internal detail log.
             &error::client_error_value(inbound, &failure.message, &failure.error_type).to_string(),
         )
         .await;
         return Ok(error::client_error(
             inbound,
             failure.status,
-            failure.message,
+            client_message,
             &failure.error_type,
         ));
     }
@@ -1214,22 +1439,62 @@ async fn finish_failover(
     )
     .await;
 
-    let message = format!("all upstream channels failed: {}", failover.last_message);
+    // The client only receives a safe classification; the full upstream text
+    // stays in the usage row, the request detail and the channel health state.
+    let client_message = error::client_safe_upstream_message(
+        &failover.last_error_type,
+        &failover.last_message,
+        failover.last_provider_json,
+    );
+    let detail_message = format!("all upstream channels failed: {}", failover.last_message);
     store_request_detail(
         state,
         log.request_id,
         log.api_key_id,
         detail_request,
-        &error::client_error_value(inbound, &message, &failover.last_error_type).to_string(),
+        &error::client_error_value(inbound, &detail_message, &failover.last_error_type).to_string(),
     )
     .await;
 
     Ok(error::client_error(
         inbound,
         StatusCode::BAD_GATEWAY,
-        message,
+        client_message,
         &failover.last_error_type,
     ))
+}
+
+/// Map a refused admission reservation to the protocol-shaped client error.
+/// Status codes mirror the pre-existing auth checks: lifetime quota is 403,
+/// daily quota is 429, and a key disabled between auth and admission is 401.
+fn reserve_error_response(protocol: Protocol, cause: &usage::ReserveError) -> Response {
+    match cause {
+        usage::ReserveError::TokenLimit => error::client_error(
+            protocol,
+            StatusCode::FORBIDDEN,
+            "API key token limit reached",
+            "permission_error",
+        ),
+        usage::ReserveError::DailyLimit => error::client_error(
+            protocol,
+            StatusCode::TOO_MANY_REQUESTS,
+            "API key daily token limit reached; it resets at 00:00 UTC",
+            "rate_limit_error",
+        ),
+        usage::ReserveError::Disabled => error::client_error(
+            protocol,
+            StatusCode::UNAUTHORIZED,
+            "invalid or missing API key",
+            "authentication_error",
+        ),
+        // Callers convert the database case to `AppError` instead.
+        usage::ReserveError::Database(_) => error::client_error(
+            protocol,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "quota service unavailable",
+            "api_error",
+        ),
+    }
 }
 
 /// Per-iteration limits shared by both failover loops. A `Some` value means the
@@ -1358,13 +1623,17 @@ async fn store_request_detail(
     let Some(request) = request else {
         return;
     };
+    // Truncate before building the record so an oversized body is never copied
+    // around in full; `OwnedDetailRecord` re-applies the same bound.
+    let request = models::request_detail::truncate_detail(request);
+    let response = models::request_detail::truncate_detail(response);
     usage::record_detail(
         state,
         &usage::DetailRecord {
             request_id,
             api_key_id: api_key_id.unwrap_or(0),
-            request_body: request,
-            response_body: response,
+            request_body: &request,
+            response_body: &response,
             created_at: now_ms(),
         },
     )

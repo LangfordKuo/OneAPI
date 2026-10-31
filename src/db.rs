@@ -20,7 +20,11 @@ pub async fn connect(config: &Config) -> anyhow::Result<SqlitePool> {
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5))
-        .foreign_keys(true);
+        .foreign_keys(true)
+        // Zero out deleted cell content instead of leaving it recoverable in
+        // free pages. sqlx applies connect-option pragmas to every newly
+        // established connection, including ones opened after startup.
+        .pragma("secure_delete", "ON");
 
     let pool = SqlitePoolOptions::new()
         .max_connections(config.database_pool_size)

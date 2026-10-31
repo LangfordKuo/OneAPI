@@ -2,9 +2,10 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::{
-    budget_for_effort, get_bool, get_f64, get_str, get_string, get_u32, get_u64, text_content,
-    ContentPart, ImageSource, ProtocolError, ReasoningConfig, ResponseFormat, Role, ToolChoice,
-    ToolDef, UnifiedMessage, UnifiedRequest, UnifiedResponse, Usage,
+    budget_for_effort, clamp_token_count, get_bool, get_str, get_string, get_u32, get_u64,
+    parse_bounded_f64, parse_max_tokens, text_content, ContentPart, ImageSource, ProtocolError,
+    ReasoningConfig, ResponseFormat, Role, StopReason, ToolChoice, ToolDef, UnifiedMessage,
+    UnifiedRequest, UnifiedResponse, Usage, MAX_TEMPERATURE, MAX_TOP_P, MIN_TEMPERATURE, MIN_TOP_P,
 };
 
 pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
@@ -17,11 +18,8 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         .ok_or_else(|| ProtocolError::invalid_request("anthropic", "model is required"))?
         .to_string();
 
-    let max_tokens = get_u32(obj, "max_tokens")
-        .filter(|value| *value > 0)
-        .ok_or_else(|| {
-            ProtocolError::invalid_request("anthropic", "max_tokens must be a positive integer")
-        })?;
+    let max_tokens = parse_max_tokens(obj, "max_tokens", "anthropic")?
+        .ok_or_else(|| ProtocolError::invalid_request("anthropic", "max_tokens is required"))?;
 
     let mut system = Vec::new();
     if let Some(system_value) = obj.get("system") {
@@ -158,10 +156,16 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         tool_choice,
         parallel_tool_calls,
         max_tokens: Some(max_tokens),
-        temperature: get_f64(obj, "temperature"),
-        top_p: get_f64(obj, "top_p"),
+        temperature: parse_bounded_f64(
+            obj,
+            "temperature",
+            "anthropic",
+            MIN_TEMPERATURE,
+            MAX_TEMPERATURE,
+        )?,
+        top_p: parse_bounded_f64(obj, "top_p", "anthropic", MIN_TOP_P, MAX_TOP_P)?,
         top_k: get_u32(obj, "top_k"),
-        stop: super::parse_stop(obj.get("stop_sequences")),
+        stop: super::parse_stop(obj.get("stop_sequences"), "anthropic")?,
         stream: get_bool(obj, "stream").unwrap_or(false),
         reasoning,
         response_format,
@@ -220,9 +224,16 @@ fn parse_content_parts(value: Option<&Value>) -> Result<Vec<ContentPart>, Protoc
                         }
                     }
                     "image" => {
-                        if let Some(source) = block.get("source").and_then(parse_image_source) {
-                            result.push(ContentPart::Image { source });
-                        }
+                        let source = block
+                            .get("source")
+                            .and_then(parse_image_source)
+                            .ok_or_else(|| {
+                                ProtocolError::unsupported(
+                                    "image without valid source",
+                                    "anthropic",
+                                )
+                            })?;
+                        result.push(ContentPart::Image { source });
                     }
                     "tool_use" => {
                         let id = get_str(block, "id").unwrap_or_default().to_string();
@@ -256,7 +267,12 @@ fn parse_content_parts(value: Option<&Value>) -> Result<Vec<ContentPart>, Protoc
                             });
                         }
                     }
-                    _ => {}
+                    other => {
+                        return Err(ProtocolError::unsupported(
+                            format!("content block type `{other}`"),
+                            "anthropic",
+                        ))
+                    }
                 }
             }
             Ok(result)
@@ -597,6 +613,15 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
         ProtocolError::invalid_response("anthropic", "response must be a JSON object")
     })?;
 
+    // Error payloads also carry `type`, so a non-`message` body must not be
+    // treated as a successful completion.
+    if get_str(obj, "type") != Some("message") {
+        return Err(ProtocolError::invalid_response(
+            "anthropic",
+            "response type must be `message`",
+        ));
+    }
+
     let id = get_str(obj, "id").unwrap_or_default().to_string();
     let model = get_str(obj, "model").unwrap_or_default().to_string();
 
@@ -641,7 +666,15 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
         }
     }
 
-    let stop_reason = get_str(obj, "stop_reason").map(super::stream::parse_anthropic_stop);
+    let stop_reason = get_str(obj, "stop_reason")
+        .ok_or_else(|| ProtocolError::invalid_response("anthropic", "stop_reason is required"))?;
+    let stop_reason = match stop_reason {
+        // A `pause_turn` asks the caller to resume the turn; the IR has no
+        // matching semantic, so surface it as `Other` instead of inventing a
+        // completion.
+        "pause_turn" => StopReason::Other,
+        other => super::stream::parse_anthropic_stop(other),
+    };
 
     let usage = obj
         .get("usage")
@@ -654,21 +687,24 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
         model,
         created_at: 0,
         content,
-        stop_reason,
+        stop_reason: Some(stop_reason),
         stop_sequence: get_string(obj, "stop_sequence"),
         usage,
     })
 }
 
 pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
-    let input = get_u64(usage, "input_tokens");
-    let output = get_u64(usage, "output_tokens");
-    let cached = get_u64(usage, "cache_read_input_tokens");
-    let creation = get_u64(usage, "cache_creation_input_tokens");
+    let input = get_u64(usage, "input_tokens").map(clamp_token_count);
+    let output = get_u64(usage, "output_tokens").map(clamp_token_count);
+    let cached = get_u64(usage, "cache_read_input_tokens").map(clamp_token_count);
+    let creation = get_u64(usage, "cache_creation_input_tokens").map(clamp_token_count);
     let total = match (input, output) {
-        (Some(input), Some(output)) => {
-            Some(input + output + cached.unwrap_or(0) + creation.unwrap_or(0))
-        }
+        (Some(input), Some(output)) => Some(clamp_token_count(
+            input
+                .saturating_add(output)
+                .saturating_add(cached.unwrap_or(0))
+                .saturating_add(creation.unwrap_or(0)),
+        )),
         _ => None,
     };
 
@@ -710,7 +746,7 @@ pub fn encode_response(response: &UnifiedResponse) -> Result<Value, ProtocolErro
         }
     }
 
-    let stop_reason = super::stream::anthropic_stop_reason(response.stop_reason);
+    let stop_reason = super::stream::anthropic_stop_reason(response.stop_reason.clone());
 
     let mut usage = Map::new();
     if let Some(input) = response.usage.input_tokens {

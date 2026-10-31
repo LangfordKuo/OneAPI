@@ -12,8 +12,37 @@ pub const BACKUP_DIR: &str = "backups";
 /// the data directory.
 pub const KEEP_BACKUPS: usize = 5;
 
+/// Prefixes used by [`snapshot`]. Only files carrying one of these prefixes are
+/// listed or pruned, so a database file an operator stores in the backup
+/// directory is never mistaken for a snapshot and deleted.
+const BACKUP_PREFIXES: [&str; 2] = ["oneapi", "manual"];
+
 pub fn backup_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(BACKUP_DIR)
+}
+
+/// Whether `path` is a regular snapshot file created by [`snapshot`].
+///
+/// Symbolic links and other non-regular files are rejected without following
+/// them, and foreign `.db` files are ignored, so listing and pruning cannot
+/// escape the backup directory or remove data this module did not write.
+fn is_managed_backup(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() {
+        return false;
+    }
+    if !path.extension().is_some_and(|extension| extension == "db") {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    BACKUP_PREFIXES.iter().any(|prefix| {
+        name.strip_prefix(*prefix)
+            .is_some_and(|rest| rest.starts_with('-'))
+    })
 }
 
 /// (main database bytes, WAL bytes).
@@ -30,7 +59,7 @@ pub fn database_sizes(database_path: &Path) -> (u64, u64) {
 /// Modification time of the newest backup, in Unix milliseconds.
 pub fn last_backup_at(data_dir: &Path) -> Option<i64> {
     newest_backup(data_dir).and_then(|path| {
-        fs::metadata(path)
+        fs::symlink_metadata(path)
             .ok()
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
@@ -56,14 +85,12 @@ pub fn list(data_dir: &Path) -> Vec<BackupFile> {
 
     let mut files: Vec<BackupFile> = entries
         .flatten()
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "db")
-        })
         .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
+            let path = entry.path();
+            if !is_managed_backup(&path) {
+                return None;
+            }
+            let metadata = fs::symlink_metadata(&path).ok()?;
             Some(BackupFile {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 bytes: metadata.len(),
@@ -84,15 +111,11 @@ fn newest_backup(data_dir: &Path) -> Option<PathBuf> {
     let mut entries: Vec<(SystemTime, PathBuf)> = fs::read_dir(backup_dir(data_dir))
         .ok()?
         .flatten()
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "db")
-        })
-        .filter_map(|entry| {
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, entry.path()))
+        .map(|entry| entry.path())
+        .filter(|path| is_managed_backup(path))
+        .filter_map(|path| {
+            let modified = fs::symlink_metadata(&path).ok()?.modified().ok()?;
+            Some((modified, path))
         })
         .collect();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
@@ -114,7 +137,7 @@ pub async fn snapshot(
     prune: bool,
 ) -> anyhow::Result<PathBuf> {
     let dir = backup_dir(data_dir);
-    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    ensure_backup_dir(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let path = unique_path(&dir, prefix);
     // Build the statement with an escaped literal so the file is created on
     // every SQLite build; the path is our own, not user input.
@@ -124,14 +147,46 @@ pub async fn snapshot(
         .await
         .with_context(|| format!("failed to write database snapshot {}", path.display()))?;
     // A snapshot is a full copy of the database; keep it unreadable to other
-    // local users instead of relying on the process umask.
+    // local users instead of relying on the process umask. A file that cannot
+    // be made owner-only is removed: leaving it behind would expose the whole
+    // database with whatever permissions VACUUM happened to use.
     if let Err(error) = crate::security::restrict_permissions(&path) {
-        tracing::warn!(file = %path.display(), %error, "failed to restrict backup permissions");
+        if let Err(remove_error) = fs::remove_file(&path) {
+            tracing::warn!(
+                file = %path.display(),
+                error = %remove_error,
+                "failed to remove backup after permission failure"
+            );
+        }
+        return Err(anyhow::Error::from(error).context(format!(
+            "failed to restrict permissions on backup {}",
+            path.display()
+        )));
     }
     if prune {
         prune_backups(&dir, KEEP_BACKUPS);
     }
     Ok(path)
+}
+
+/// Create the backup directory owner-only. The mode is applied at creation so
+/// the directory is never briefly world-accessible, and an existing directory
+/// is tightened explicitly in case its permissions drifted.
+fn ensure_backup_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(dir)?;
+    }
+    Ok(())
 }
 
 fn wal_path(database_path: &Path) -> PathBuf {
@@ -144,7 +199,10 @@ fn unique_path(dir: &Path, prefix: &str) -> PathBuf {
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let mut path = dir.join(format!("{prefix}-{stamp}.db"));
     let mut suffix = 1;
-    while path.exists() {
+    // `Path::exists` follows symlinks, so a dangling link would look free and
+    // let VACUUM create its target elsewhere. Treat any directory entry as a
+    // collision instead.
+    while fs::symlink_metadata(&path).is_ok() {
         path = dir.join(format!("{prefix}-{stamp}-{suffix}.db"));
         suffix += 1;
     }
@@ -157,19 +215,20 @@ fn prune_backups(dir: &Path, keep: usize) {
     };
     let mut files: Vec<(SystemTime, PathBuf)> = entries
         .flatten()
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "db")
-        })
-        .filter_map(|entry| {
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, entry.path()))
+        .map(|entry| entry.path())
+        .filter(|path| is_managed_backup(path))
+        .filter_map(|path| {
+            let modified = fs::symlink_metadata(&path).ok()?.modified().ok()?;
+            Some((modified, path))
         })
         .collect();
     files.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     for (_, path) in files.into_iter().skip(keep) {
+        // Re-check just before removing so a path swapped for a symlink or a
+        // foreign file since the directory scan is left untouched.
+        if !is_managed_backup(&path) {
+            continue;
+        }
         if let Err(error) = fs::remove_file(&path) {
             tracing::warn!(file = %path.display(), error = %error, "failed to prune old backup");
         }

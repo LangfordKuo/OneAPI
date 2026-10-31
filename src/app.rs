@@ -79,6 +79,8 @@ struct ReadyStatus {
     status: &'static str,
     database_pool_size: u32,
     database_idle_connections: usize,
+    /// Responses objects skipped because they could not be persisted.
+    response_store_rejected: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     usage_queue: Option<UsageQueueStatus>,
 }
@@ -89,6 +91,8 @@ struct UsageQueueStatus {
     capacity: usize,
     sync_fallbacks: u64,
     failed_writes: u64,
+    detail_queue_bytes: usize,
+    detail_dropped: u64,
 }
 
 async fn readyz(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
@@ -100,6 +104,8 @@ async fn readyz(State(state): State<AppState>) -> Result<impl IntoResponse, AppE
             capacity: snapshot.queue_capacity,
             sync_fallbacks: snapshot.sync_fallbacks,
             failed_writes: snapshot.failed_writes,
+            detail_queue_bytes: snapshot.detail_queue_bytes,
+            detail_dropped: snapshot.detail_dropped,
         }
     });
 
@@ -107,6 +113,9 @@ async fn readyz(State(state): State<AppState>) -> Result<impl IntoResponse, AppE
         status: "ready",
         database_pool_size: state.config.database_pool_size,
         database_idle_connections: state.db.num_idle(),
+        response_store_rejected: state
+            .response_store_rejected
+            .load(std::sync::atomic::Ordering::Relaxed),
         usage_queue,
     }))
 }
@@ -138,6 +147,11 @@ struct SystemInfo {
     wal_bytes: u64,
     last_backup_at: Option<i64>,
     usage_queue_depth: usize,
+    /// Responses objects skipped because of storage limits or id conflicts.
+    response_store_rejected: u64,
+    /// Request details dropped because the detail queue exceeded its budget.
+    detail_dropped: u64,
+    detail_queue_bytes: usize,
     cooling_channels: usize,
     failovers_24h: i64,
 }
@@ -155,11 +169,19 @@ async fn system_info(
         (0, 0)
     };
     let last_backup_at = crate::backup::last_backup_at(&state.config.data_dir);
-    let usage_queue_depth = state
-        .usage_writer
-        .as_ref()
-        .map(|writer| writer.snapshot().queue_depth)
+    let usage_writer = state.usage_writer.as_ref().map(|writer| writer.snapshot());
+    let usage_queue_depth = usage_writer
+        .map(|snapshot| snapshot.queue_depth)
         .unwrap_or(0);
+    let detail_dropped = usage_writer
+        .map(|snapshot| snapshot.detail_dropped)
+        .unwrap_or(0);
+    let detail_queue_bytes = usage_writer
+        .map(|snapshot| snapshot.detail_queue_bytes)
+        .unwrap_or(0);
+    let response_store_rejected = state
+        .response_store_rejected
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     let now = crate::models::now_ms();
     let health = state.cache.channel_health();
@@ -198,6 +220,9 @@ async fn system_info(
         wal_bytes,
         last_backup_at,
         usage_queue_depth,
+        response_store_rejected,
+        detail_dropped,
+        detail_queue_bytes,
         cooling_channels,
         failovers_24h,
     }))

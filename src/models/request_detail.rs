@@ -16,8 +16,8 @@ pub async fn insert<'e, E>(
 where
     E: Executor<'e, Database = Sqlite>,
 {
-    let request_body = truncate(request_body);
-    let response_body = truncate(response_body);
+    let request_body = truncate_detail(request_body);
+    let response_body = truncate_detail(response_body);
 
     sqlx::query(
         "INSERT INTO request_details
@@ -39,7 +39,10 @@ where
     Ok(())
 }
 
-fn truncate(value: &str) -> String {
+/// Truncate a body to `MAX_DETAIL_BYTES` without splitting a UTF-8 character.
+/// Also applied on the capture side so oversized bodies are not copied into the
+/// write queue in full.
+pub(crate) fn truncate_detail(value: &str) -> String {
     if value.len() <= MAX_DETAIL_BYTES {
         return value.to_string();
     }

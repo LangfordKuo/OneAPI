@@ -1,7 +1,8 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -10,7 +11,12 @@ use serde_json::Value;
 use sqlx::{Executor, Sqlite, SqlitePool};
 use tokio::sync::mpsc;
 
-use crate::{events::EventBus, models, protocol::Usage, state::AppState};
+use crate::{
+    events::EventBus,
+    models,
+    protocol::{Usage, MAX_TOKEN_COUNT},
+    state::AppState,
+};
 
 pub struct UsageRecord<'a> {
     pub request_id: &'a str,
@@ -29,6 +35,12 @@ pub struct UsageRecord<'a> {
     pub usage: &'a Usage,
     pub latency_ms: i64,
     pub first_token_ms: Option<i64>,
+    /// Tokens reserved at admission for this request, settled by the writer.
+    /// `0` means the request made no reservation.
+    pub reserved_tokens: i64,
+    /// UTC day the reservation belongs to; only meaningful with
+    /// `reserved_tokens > 0`.
+    pub reserved_day: i64,
     pub created_at: i64,
 }
 
@@ -50,6 +62,8 @@ pub struct OwnedUsageRecord {
     usage: Usage,
     latency_ms: i64,
     first_token_ms: Option<i64>,
+    reserved_tokens: i64,
+    reserved_day: i64,
     created_at: i64,
 }
 
@@ -72,8 +86,137 @@ impl From<&UsageRecord<'_>> for OwnedUsageRecord {
             usage: record.usage.clone(),
             latency_ms: record.latency_ms,
             first_token_ms: record.first_token_ms,
+            reserved_tokens: record.reserved_tokens,
+            reserved_day: record.reserved_day,
             created_at: record.created_at,
         }
+    }
+}
+
+/// Why a reservation was refused. Mapped to the protocol-shaped client error by
+/// the gateway; `Database` is an internal failure, not a quota decision.
+#[derive(Debug, thiserror::Error)]
+pub enum ReserveError {
+    #[error("API key token limit reached")]
+    TokenLimit,
+    #[error("API key daily token limit reached")]
+    DailyLimit,
+    #[error("API key is disabled")]
+    Disabled,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+/// In-flight admission reservation.
+///
+/// The guard is armed when the counters were incremented. Until [`disarm`] is
+/// called, dropping it (early return, cancellation, panic) spawns a release so
+/// a failed request cannot pin quota forever. Once the usage row carrying the
+/// reservation has been handed to the writer, the row itself settles it, so the
+/// guard is disarmed to avoid releasing twice.
+///
+/// [`disarm`]: Reservation::disarm
+pub struct Reservation {
+    state: AppState,
+    key_id: i64,
+    tokens: i64,
+    day: i64,
+    armed: bool,
+}
+
+impl Reservation {
+    pub fn tokens(&self) -> i64 {
+        self.tokens
+    }
+
+    pub fn day(&self) -> i64 {
+        self.day
+    }
+
+    /// The reservation was handed to a usage row (or deliberately abandoned
+    /// with a compensating release); do not release it on drop.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let state = self.state.clone();
+        let key_id = self.key_id;
+        let tokens = self.tokens;
+        let day = self.day;
+        // `Drop` cannot await. A detached release is enough: if it fails the
+        // janitor will clear the counters once the reservation goes stale.
+        let release = async move {
+            if let Err(error) =
+                models::api_key::release_reservation(&state.db, key_id, tokens, day).await
+            {
+                tracing::warn!(
+                    error = %error,
+                    key_id,
+                    tokens,
+                    "failed to release quota reservation"
+                );
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(release);
+            }
+            Err(_) => tracing::warn!(
+                key_id,
+                tokens,
+                "runtime is gone; quota reservation left for the janitor"
+            ),
+        }
+    }
+}
+
+/// Whether the emergency switch `ONEAPI_DISABLE_QUOTA_RESERVATION=1` is set.
+/// Read per request so an operator can turn reservation off without a rebuild.
+fn reservation_disabled() -> bool {
+    std::env::var("ONEAPI_DISABLE_QUOTA_RESERVATION")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Reserve `estimate` tokens for `key_id` before an upstream attempt.
+///
+/// Returns `Ok(None)` when reservation is disabled by the emergency switch, so
+/// the caller simply falls back to post-hoc accounting. `day` is the UTC day
+/// (milliseconds / 86_400_000) the request was admitted on; settlement uses the
+/// same value.
+pub async fn reserve(
+    state: &AppState,
+    key_id: i64,
+    estimate: i64,
+    day: i64,
+) -> Result<Option<Reservation>, ReserveError> {
+    if reservation_disabled() {
+        return Ok(None);
+    }
+
+    let tokens = estimate.max(1);
+    match models::api_key::reserve(&state.db, key_id, tokens, day, models::now_ms()).await? {
+        models::api_key::ReserveOutcome::Reserved => Ok(Some(Reservation {
+            state: state.clone(),
+            key_id,
+            tokens,
+            day,
+            armed: true,
+        })),
+        models::api_key::ReserveOutcome::TokenLimit => Err(ReserveError::TokenLimit),
+        models::api_key::ReserveOutcome::DailyLimit => Err(ReserveError::DailyLimit),
+        models::api_key::ReserveOutcome::Disabled => Err(ReserveError::Disabled),
     }
 }
 
@@ -94,18 +237,36 @@ struct OwnedDetailRecord {
     request_body: String,
     response_body: String,
     created_at: i64,
+    /// Bytes this record holds in the queue, measured after truncation. Kept
+    /// with the record so the writer can release exactly what it reserved.
+    size: usize,
 }
 
 impl From<&DetailRecord<'_>> for OwnedDetailRecord {
     fn from(record: &DetailRecord<'_>) -> Self {
+        // Truncate before copying so an oversized body is never duplicated in
+        // full just to be discarded by `request_detail::insert` later.
+        let request_body = models::request_detail::truncate_detail(record.request_body);
+        let response_body = models::request_detail::truncate_detail(record.response_body);
+        let size = record.request_id.len() + request_body.len() + response_body.len();
         Self {
             request_id: record.request_id.to_string(),
             api_key_id: record.api_key_id,
-            request_body: record.request_body.to_string(),
-            response_body: record.response_body.to_string(),
+            request_body,
+            response_body,
             created_at: record.created_at,
+            size,
         }
     }
+}
+
+/// Outcome of queueing one request detail. `Full` keeps the synchronous
+/// fallback; `ByteLimit` drops the detail instead of blocking the request path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailEnqueue {
+    Queued,
+    ByteLimit,
+    Full,
 }
 
 /// Work item for the background writer. Usage rows and request details share
@@ -118,12 +279,16 @@ enum WriteJob {
 
 /// Serializes usage-log writes through a single background task. The queue is
 /// bounded; when it is full the caller falls back to a synchronous write so no
-/// record is silently dropped.
+/// record is silently dropped. Request details additionally have a byte budget:
+/// past it they are dropped instead of being written inline.
 #[derive(Debug)]
 pub struct UsageWriter {
     tx: Mutex<Option<mpsc::Sender<WriteJob>>>,
     handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stats: Arc<UsageWriterStats>,
+    /// Bytes reserved by detail records currently in the queue.
+    queued_detail_bytes: Arc<AtomicUsize>,
+    detail_dropped: Arc<AtomicU64>,
 }
 
 /// Counters surfaced by `readyz` so operators can see backpressure and loss
@@ -140,20 +305,36 @@ pub struct UsageWriterSnapshot {
     pub queue_capacity: usize,
     pub sync_fallbacks: u64,
     pub failed_writes: u64,
+    pub detail_queue_bytes: usize,
+    pub detail_dropped: u64,
 }
 
 impl UsageWriter {
     const QUEUE_CAPACITY: usize = 1_024;
     const BATCH_SIZE: usize = 100;
+    /// Upper bound on memory held by queued request details. Bodies are already
+    /// truncated to 64 KiB, but a full channel of them would still pin tens of
+    /// MiB; beyond this point details are dropped rather than buffered.
+    const MAX_DETAIL_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 
     pub fn start(pool: SqlitePool, events: Arc<EventBus>) -> Self {
         let (tx, rx) = mpsc::channel(Self::QUEUE_CAPACITY);
         let stats = Arc::new(UsageWriterStats::default());
-        let handle = tokio::spawn(write_loop(pool, rx, Arc::clone(&stats), events));
+        let queued_detail_bytes = Arc::new(AtomicUsize::new(0));
+        let detail_dropped = Arc::new(AtomicU64::new(0));
+        let handle = tokio::spawn(write_loop(
+            pool,
+            rx,
+            Arc::clone(&stats),
+            Arc::clone(&queued_detail_bytes),
+            events,
+        ));
         Self {
             tx: Mutex::new(Some(tx)),
             handle: Mutex::new(Some(handle)),
             stats,
+            queued_detail_bytes,
+            detail_dropped,
         }
     }
 
@@ -174,6 +355,8 @@ impl UsageWriter {
             queue_capacity,
             sync_fallbacks: self.stats.sync_fallbacks.load(Ordering::Relaxed),
             failed_writes: self.stats.failed_writes.load(Ordering::Relaxed),
+            detail_queue_bytes: self.queued_detail_bytes.load(Ordering::Relaxed),
+            detail_dropped: self.detail_dropped.load(Ordering::Relaxed),
         }
     }
 
@@ -201,8 +384,33 @@ impl UsageWriter {
         self.try_send(WriteJob::Usage(Box::new(record)))
     }
 
-    fn try_enqueue_detail(&self, record: OwnedDetailRecord) -> bool {
-        self.try_send(WriteJob::Detail(record))
+    fn try_enqueue_detail(&self, record: OwnedDetailRecord) -> DetailEnqueue {
+        let size = record.size;
+
+        // Reserve the bytes before handing the job over, so concurrent
+        // producers cannot jointly overshoot the cap.
+        let mut queued = self.queued_detail_bytes.load(Ordering::Relaxed);
+        loop {
+            if queued.saturating_add(size) > Self::MAX_DETAIL_QUEUE_BYTES {
+                self.detail_dropped.fetch_add(1, Ordering::Relaxed);
+                return DetailEnqueue::ByteLimit;
+            }
+            match self.queued_detail_bytes.compare_exchange_weak(
+                queued,
+                queued + size,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => queued = current,
+            }
+        }
+
+        if !self.try_send(WriteJob::Detail(record)) {
+            self.queued_detail_bytes.fetch_sub(size, Ordering::AcqRel);
+            return DetailEnqueue::Full;
+        }
+        DetailEnqueue::Queued
     }
 
     /// Close the queue and wait until every queued record is persisted. Taking
@@ -228,10 +436,14 @@ impl UsageWriter {
 }
 
 /// Write a usage row, through the queue when available.
-pub async fn record(state: &AppState, record: &UsageRecord<'_>) {
+///
+/// Returns whether the row was handed to the writer (or written synchronously).
+/// `false` means the row was not persisted, so the caller must keep a quota
+/// reservation armed instead of disarming it: nothing else will settle it.
+pub async fn record(state: &AppState, record: &UsageRecord<'_>) -> bool {
     if let Some(writer) = &state.usage_writer {
         if writer.try_enqueue(OwnedUsageRecord::from(record)) {
-            return;
+            return true;
         }
         writer.note_sync_fallback();
         tracing::warn!(
@@ -249,24 +461,38 @@ pub async fn record(state: &AppState, record: &UsageRecord<'_>) {
             request_id = record.request_id,
             "failed to write usage log"
         );
+        false
     } else {
         state.events.usage_written(1);
+        true
     }
 }
 
 /// Store a request/response detail pair through the same bounded queue as the
 /// usage rows. Falls back to a synchronous write when the queue is full or the
-/// process is shutting down.
+/// process is shutting down, and drops the detail once the queue's byte budget
+/// is exhausted so a burst of large bodies cannot pin memory.
 pub async fn record_detail(state: &AppState, record: &DetailRecord<'_>) {
     if let Some(writer) = &state.usage_writer {
-        if writer.try_enqueue_detail(OwnedDetailRecord::from(record)) {
-            return;
+        match writer.try_enqueue_detail(OwnedDetailRecord::from(record)) {
+            DetailEnqueue::Queued => return,
+            // The byte budget is exhausted: drop the detail rather than block
+            // the request or pile more bodies into memory.
+            DetailEnqueue::ByteLimit => {
+                tracing::debug!(
+                    request_id = record.request_id,
+                    "detail write queue is over its byte budget; dropping detail"
+                );
+                return;
+            }
+            DetailEnqueue::Full => {
+                writer.note_sync_fallback();
+                tracing::warn!(
+                    request_id = record.request_id,
+                    "detail write queue is full; writing synchronously"
+                );
+            }
         }
-        writer.note_sync_fallback();
-        tracing::warn!(
-            request_id = record.request_id,
-            "detail write queue is full; writing synchronously"
-        );
     }
 
     if let Err(error) = models::request_detail::insert(
@@ -292,6 +518,17 @@ pub async fn insert(pool: &SqlitePool, record: &UsageRecord<'_>) -> sqlx::Result
     let mut tx = pool.begin().await?;
     insert_one(&mut *tx, &owned).await?;
     if let Some(api_key_id) = owned.api_key_id {
+        // Settlement: give the reservation back before charging the actual
+        // usage, so the same request is never counted twice.
+        if owned.reserved_tokens > 0 {
+            models::api_key::release_reservation(
+                &mut *tx,
+                api_key_id,
+                owned.reserved_tokens,
+                owned.reserved_day,
+            )
+            .await?;
+        }
         models::api_key::add_usage(
             &mut *tx,
             api_key_id,
@@ -303,32 +540,86 @@ pub async fn insert(pool: &SqlitePool, record: &UsageRecord<'_>) -> sqlx::Result
     tx.commit().await
 }
 
+/// Bounds for the text fields that land in indexed usage-log columns.
+const MAX_ERROR_TYPE_LEN: usize = 128;
+const MAX_ERROR_MESSAGE_LEN: usize = 1024;
+
+/// Clamp a usage-log text field to `max_chars` Unicode scalar values before it
+/// is bound to a column. Char-based truncation never splits a UTF-8 sequence.
+fn truncate_field<'a>(field: &'static str, value: &'a str, max_chars: usize) -> Cow<'a, str> {
+    let chars = value.chars().count();
+    if chars <= max_chars {
+        return Cow::Borrowed(value);
+    }
+    tracing::warn!(
+        field,
+        chars,
+        max_chars,
+        "usage log field exceeds the storage limit; truncating"
+    );
+    Cow::Owned(value.chars().take(max_chars).collect())
+}
+
 async fn insert_one<'e, E>(executor: E, record: &OwnedUsageRecord) -> sqlx::Result<()>
 where
     E: Executor<'e, Database = Sqlite>,
 {
+    // Write-side backstop: the request path validates model names, but any
+    // caller can still hand the writer a long value. Clamp the text fields
+    // that feed indexed columns so one row cannot bloat the index.
+    let model = truncate_field(
+        "model",
+        &record.model,
+        models::usage_log::MAX_MODEL_NAME_LEN,
+    );
+    let upstream_model = record.upstream_model.as_deref().map(|value| {
+        truncate_field(
+            "upstream_model",
+            value,
+            models::usage_log::MAX_MODEL_NAME_LEN,
+        )
+    });
+    let error_type = record
+        .error_type
+        .as_deref()
+        .map(|value| truncate_field("error_type", value, MAX_ERROR_TYPE_LEN));
+    let error_message = record
+        .error_message
+        .as_deref()
+        .map(|value| truncate_field("error_message", value, MAX_ERROR_MESSAGE_LEN));
+
+    // The two foreign keys are normalized through an existence check instead of
+    // binding the id directly. A key or channel deleted between admission and
+    // this batch write would otherwise make the whole 100-row transaction fail
+    // on the FK constraint; a missing row now stores NULL, which is exactly
+    // what the schema's ON DELETE SET NULL produces for already-written rows.
     sqlx::query(
         "INSERT INTO usage_logs
-         (request_id, source, api_key_id, channel_id, model, upstream_model,
+         (request_id, source, api_key_id, detail_api_key_id, channel_id, model, upstream_model,
           inbound_protocol, upstream_protocol, stream, status_code, attempts,
           error_type, error_message, prompt_tokens, completion_tokens, total_tokens,
           cached_tokens, cache_creation_tokens, reasoning_tokens, latency_ms, first_token_ms,
           created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, (SELECT id FROM api_keys WHERE id = ?), ?,
+                 (SELECT id FROM channels WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&record.request_id)
     .bind(&record.source)
     .bind(record.api_key_id)
+    // Pins the detail row to the key that wrote it, independently of
+    // usage_logs.api_key_id, which is cleared when the key is deleted.
+    // Playground requests (no key) store NULL.
+    .bind(record.api_key_id)
     .bind(record.channel_id)
-    .bind(&record.model)
-    .bind(&record.upstream_model)
+    .bind(model.as_ref())
+    .bind(upstream_model.as_deref())
     .bind(&record.inbound_protocol)
     .bind(&record.upstream_protocol)
     .bind(if record.stream { 1i64 } else { 0i64 })
     .bind(i64::from(record.status_code))
     .bind(i64::from(record.attempts))
-    .bind(&record.error_type)
-    .bind(&record.error_message)
+    .bind(error_type.as_deref())
+    .bind(error_message.as_deref())
     .bind(token(record.usage.input_tokens))
     .bind(token(record.usage.output_tokens))
     .bind(token(record.usage.total_tokens))
@@ -348,6 +639,7 @@ async fn write_loop(
     pool: SqlitePool,
     mut rx: mpsc::Receiver<WriteJob>,
     stats: Arc<UsageWriterStats>,
+    queued_detail_bytes: Arc<AtomicUsize>,
     events: Arc<EventBus>,
 ) {
     while let Some(first) = rx.recv().await {
@@ -369,12 +661,38 @@ async fn write_loop(
                 "failed to write usage batch"
             );
         }
+
+        // Release the byte reservations once the batch has been attempted,
+        // whether it committed or rolled back, so the counter cannot leak.
+        for job in &batch {
+            if let WriteJob::Detail(record) = job {
+                // Manual CAS loop keeps MSRV 1.82 compatibility; `take`/`try_update`
+                // naming changed after this crate's minimum toolchain.
+                let mut current = queued_detail_bytes.load(Ordering::Relaxed);
+                loop {
+                    let next = current.saturating_sub(record.size);
+                    match queued_detail_bytes.compare_exchange_weak(
+                        current,
+                        next,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(observed) => current = observed,
+                    }
+                }
+            }
+        }
     }
 }
 
 async fn write_batch(pool: &SqlitePool, batch: &[WriteJob], events: &EventBus) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
     let mut key_usage: HashMap<i64, i64> = HashMap::new();
+    // Per key, the reservations to give back, grouped by their UTC day. Rows
+    // from the same request are aggregated so settlement is one UPDATE per key
+    // and day instead of one per row.
+    let mut key_releases: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
     let mut usage_rows = 0usize;
     for job in batch {
         match job {
@@ -383,6 +701,16 @@ async fn write_batch(pool: &SqlitePool, batch: &[WriteJob], events: &EventBus) -
                 insert_one(&mut *tx, record).await?;
                 if let Some(api_key_id) = record.api_key_id {
                     *key_usage.entry(api_key_id).or_default() += total_tokens(&record.usage);
+                    if record.reserved_tokens > 0 {
+                        let releases = key_releases.entry(api_key_id).or_default();
+                        match releases
+                            .iter_mut()
+                            .find(|(day, _)| *day == record.reserved_day)
+                        {
+                            Some((_, tokens)) => *tokens += record.reserved_tokens,
+                            None => releases.push((record.reserved_day, record.reserved_tokens)),
+                        }
+                    }
                 }
             }
             WriteJob::Detail(record) => {
@@ -396,6 +724,14 @@ async fn write_batch(pool: &SqlitePool, batch: &[WriteJob], events: &EventBus) -
                 )
                 .await?;
             }
+        }
+    }
+    // Release reservations first, then charge actual usage: the counters are
+    // MAX(0, ...) guarded, and this ordering keeps a partially applied batch
+    // (rolled back as a whole anyway) from double counting.
+    for (api_key_id, releases) in key_releases {
+        for (day, tokens) in releases {
+            models::api_key::release_reservation(&mut *tx, api_key_id, tokens, day).await?;
         }
     }
     let now = models::now_ms();
@@ -416,16 +752,34 @@ fn total_tokens(usage: &Usage) -> i64 {
     let total = usage
         .total_tokens
         .or_else(|| match (usage.input_tokens, usage.output_tokens) {
-            (Some(input), Some(output)) => Some(input + output),
+            (Some(input), Some(output)) => Some(input.saturating_add(output)),
             _ => None,
         });
-    total
-        .and_then(|value| i64::try_from(value).ok())
-        .unwrap_or(0)
+    match total {
+        Some(value) => i64::try_from(value).unwrap_or_else(|_| {
+            // A total outside i64 cannot be billed faithfully. Fall back to the
+            // per-field counters (already filled with local estimates when the
+            // upstream omitted usage) rather than recording zero tokens.
+            let estimate = usage
+                .input_tokens
+                .unwrap_or(0)
+                .saturating_add(usage.output_tokens.unwrap_or(0));
+            token_i64(estimate).max(1)
+        }),
+        None => 0,
+    }
 }
 
 fn token(value: Option<u64>) -> Option<i64> {
-    value.and_then(|value| i64::try_from(value).ok())
+    value.map(token_i64)
+}
+
+/// Clamp a token counter to the same ceiling used when parsing upstream usage,
+/// so a value that does not fit in the database's i64 column is still recorded
+/// (bounded) instead of being dropped as NULL/zero.
+fn token_i64(value: u64) -> i64 {
+    let bounded = value.min(MAX_TOKEN_COUNT);
+    i64::try_from(bounded).unwrap_or(MAX_TOKEN_COUNT as i64)
 }
 
 /// Approximate token count for free text (roughly four characters per token).

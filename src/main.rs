@@ -21,11 +21,13 @@ mod web;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use config::Config;
 use state::AppState;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Parser)]
 #[command(name = "oneapi", version, about = "Self-hosted AI API gateway")]
@@ -78,12 +80,23 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
     let db = db::connect(&config).await?;
     let crypto = Arc::new(security::Crypto::load_or_create(&config.data_dir)?);
     admin::bootstrap(&db).await?;
+    // Reservations describe requests in flight in this process only. After a
+    // restart nothing can be in flight, so every counter must start at zero;
+    // otherwise a crash would leave quota pinned forever.
+    models::api_key::reset_reservations(&db)
+        .await
+        .context("failed to reset quota reservations")?;
+    // Precompute the constant-cost dummy hash before any login can reach it.
+    let _ = security::dummy_password_hash();
 
     let events = Arc::new(events::EventBus::default());
     let usage_writer = Arc::new(gateway::usage::UsageWriter::start(
         db.clone(),
         events.clone(),
     ));
+    // Keep the receiver alive so `send(true)` always records the shutdown flag,
+    // even while no metrics stream is subscribed.
+    let (shutdown, _shutdown_rx) = tokio::sync::watch::channel(false);
     let state = AppState {
         config: Arc::new(config.clone()),
         db,
@@ -92,19 +105,48 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
         events,
         updates: std::sync::Arc::new(crate::state::UpdateState::default()),
         login_limiter: std::sync::Arc::new(crate::admin::LoginLimiter::default()),
+        auth_failure_limiter: std::sync::Arc::new(crate::state::AuthFailureLimiter::default()),
         clients: Arc::new(upstream::ClientCache::default()),
         cache: Arc::new(state::RuntimeCache::default()),
         probes: Arc::new(state::ChannelProbes::default()),
         usage_writer: Some(usage_writer),
         started_at: chrono::Utc::now(),
+        backup_lock: Arc::new(tokio::sync::Mutex::new(())),
+        last_backup_at: Arc::new(std::sync::Mutex::new(None)),
+        response_store_lock: Arc::new(tokio::sync::Mutex::new(())),
+        response_store_rejected: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        shutdown,
+        metrics_streams: Arc::new(tokio::sync::Semaphore::new(state::METRICS_STREAM_LIMIT)),
     };
 
     maintenance::spawn(state.clone());
     recovery::spawn(state.clone());
+    spawn_reservation_janitor(state.db.clone());
 
     let updates = state.updates.clone();
     let shutdown_updates = updates.clone();
+    let shutdown_tx = state.shutdown.clone();
     let usage_writer_shutdown = state.usage_writer.clone();
+
+    // Backstop for graceful shutdown: streams observe `shutdown` and end on
+    // their own, but a stuck connection must not postpone a restart forever.
+    let mut watchdog_rx = state.shutdown.subscribe();
+    let watchdog = tokio::spawn(async move {
+        loop {
+            let shutting_down = *watchdog_rx.borrow();
+            if shutting_down {
+                break;
+            }
+            if watchdog_rx.changed().await.is_err() {
+                // The state was dropped; the server is already unwinding.
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        tracing::error!("graceful shutdown timed out; forcing exit");
+        std::process::exit(1);
+    });
+
     let app = app::router(state);
     let listener = tokio::net::TcpListener::bind(config.addr)
         .await
@@ -117,7 +159,7 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
         "OneAPI listening"
     );
 
-    axum::serve(
+    let serve_result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
@@ -126,9 +168,15 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
             _ = shutdown_signal() => {},
             _ = shutdown_updates.shutdown.notified() => {},
         }
+        // End long-lived streams (metrics SSE) so graceful shutdown and the
+        // self-update restart path do not wait on an open socket.
+        let _ = shutdown_tx.send(true);
     })
-    .await
-    .context("HTTP server failed")?;
+    .await;
+
+    watchdog.abort();
+    let _ = watchdog.await;
+    serve_result.context("HTTP server failed")?;
 
     // Flush queued usage rows before a restart replaces the process.
     if let Some(writer) = usage_writer_shutdown {
@@ -148,6 +196,34 @@ async fn serve(data_dir: PathBuf) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// How long a reservation may be held before the janitor reclaims it. A stream
+/// can legitimately run for several minutes, so the cutoff is generous; the
+/// 60 second sweep bounds how much longer a leaked entry survives.
+const STALE_RESERVATION_MS: i64 = 30 * 60 * 1000;
+const RESERVATION_JANITOR_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Reclaim admission reservations left behind by crashes, cancelled requests or
+/// failed settlements. Failures are logged and retried on the next tick; a
+/// missing sweep only delays recovery, it never rejects a request.
+fn spawn_reservation_janitor(db: sqlx::SqlitePool) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(RESERVATION_JANITOR_INTERVAL);
+        loop {
+            interval.tick().await;
+            let cutoff = models::now_ms() - STALE_RESERVATION_MS;
+            match models::api_key::clear_stale_reservations(&db, cutoff).await {
+                Ok(0) => {}
+                Ok(keys) => {
+                    tracing::warn!(keys, "cleared stale quota reservations");
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to clear stale quota reservations");
+                }
+            }
+        }
+    });
 }
 
 #[cfg(unix)]
@@ -185,17 +261,23 @@ fn restart_process(exe: Option<std::path::PathBuf>) -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %error, "failed to listen for Ctrl+C");
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                let _ = signal.recv().await;
+            }
+            Err(error) => {
+                // Keep waiting on Ctrl+C instead of shutting down eagerly.
+                tracing::error!(error = %error, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]
@@ -218,22 +300,26 @@ async fn reset_password(data_dir: PathBuf, password: Option<String>) -> anyhow::
     })?;
 
     let password = match password {
-        Some(password) => password,
+        Some(password) => Zeroizing::new(password),
         None => {
             use std::io::Write;
             eprint!("New password: ");
             std::io::stderr().flush().ok();
-            let mut line = String::new();
+            let mut line = Zeroizing::new(String::new());
             std::io::stdin().read_line(&mut line)?;
-            line.trim_end_matches(['\r', '\n']).to_string()
+            // Trim in place so the buffer stays zeroized instead of leaving an
+            // extra plaintext copy behind.
+            let trimmed_len = line.trim_end_matches(['\r', '\n']).len();
+            line.truncate(trimmed_len);
+            line
         }
     };
 
-    if let Some(violation) = security::password_violation(&password) {
+    if let Some(violation) = security::password_violation(password.as_str()) {
         anyhow::bail!("password {violation}");
     }
 
-    let password_hash = security::hash_password(&password)?;
+    let password_hash = security::hash_password(password.as_str())?;
     models::admin::update_password(&db, admin.id, &password_hash).await?;
     models::session::delete_all_for_admin(&db, admin.id).await?;
 

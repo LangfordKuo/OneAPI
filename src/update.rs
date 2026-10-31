@@ -158,6 +158,9 @@ async fn apply_inner(state: &AppState) -> Result<UpdateResult> {
         .restart_requested
         .store(true, Ordering::SeqCst);
     state.updates.shutdown.notify_one();
+    // Metrics SSE streams only listen to the watch channel; notify_one would
+    // leave them open and block the graceful shutdown before the restart.
+    let _ = state.shutdown.send(true);
 
     Ok(UpdateResult {
         updated_to: info.latest_version,

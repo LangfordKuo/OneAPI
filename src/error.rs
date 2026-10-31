@@ -14,6 +14,9 @@ pub enum AppError {
     NotFound(String),
     #[error("{0}")]
     TooManyRequests(String),
+    /// The request conflicts with an operation that is already running.
+    #[error("{0}")]
+    Conflict(String),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     #[error(transparent)]
@@ -35,6 +38,7 @@ impl IntoResponse for AppError {
             AppError::TooManyRequests(message) => {
                 (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", message)
             }
+            AppError::Conflict(message) => (StatusCode::CONFLICT, "conflict_error", message),
             AppError::Database(error) => {
                 tracing::error!(error = %error, "database error");
                 (

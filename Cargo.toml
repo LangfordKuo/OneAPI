@@ -1,6 +1,6 @@
 [package]
 name = "oneapi"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2021"
 rust-version = "1.82"
 license = "GPL-3.0-only"
@@ -16,6 +16,7 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
+hmac = "0.12"
 mime_guess = "2"
 rand = "0.8"
 self-replace = "1"
@@ -34,6 +35,7 @@ tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip",
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
 flate2 = "1"

@@ -2,10 +2,11 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::{
-    effort_for_budget, effort_name, ensure_text_only, get_bool, get_f64, get_str, get_string,
-    get_u32, get_u64, image_url, parse_arguments, parse_effort, parse_image_string, text_content,
-    ContentPart, ProtocolError, ReasoningConfig, ResponseFormat, Role, StopReason, ToolChoice,
-    ToolDef, UnifiedMessage, UnifiedRequest, UnifiedResponse, Usage,
+    clamp_token_count, effort_for_budget, effort_name, ensure_text_only, get_bool, get_str,
+    get_string, get_u64, image_url, parse_arguments, parse_bounded_f64, parse_effort,
+    parse_image_string, parse_max_tokens, text_content, ContentPart, ProtocolError,
+    ReasoningConfig, ResponseFormat, Role, StopReason, ToolChoice, ToolDef, UnifiedMessage,
+    UnifiedRequest, UnifiedResponse, Usage, MAX_TEMPERATURE, MAX_TOP_P, MIN_TEMPERATURE, MIN_TOP_P,
 };
 
 pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
@@ -71,14 +72,17 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
     }
 
     let tool_choice = parse_tool_choice(obj.get("tool_choice"))?;
-    let reasoning = obj
-        .get("reasoning")
-        .and_then(Value::as_object)
-        .map(|reasoning| ReasoningConfig {
-            effort: get_str(reasoning, "effort").map(parse_effort),
+    let reasoning = match obj.get("reasoning").and_then(Value::as_object) {
+        Some(reasoning) => Some(ReasoningConfig {
+            effort: match get_str(reasoning, "effort") {
+                Some(effort) => Some(parse_effort(effort, "responses")?),
+                None => None,
+            },
             budget_tokens: None,
             summary: get_string(reasoning, "summary"),
-        });
+        }),
+        None => None,
+    };
     let response_format = obj
         .get("text")
         .and_then(Value::as_object)
@@ -94,9 +98,15 @@ pub fn parse_request(value: &Value) -> Result<UnifiedRequest, ProtocolError> {
         tools,
         tool_choice,
         parallel_tool_calls: get_bool(obj, "parallel_tool_calls"),
-        max_tokens: get_u32(obj, "max_output_tokens"),
-        temperature: get_f64(obj, "temperature"),
-        top_p: get_f64(obj, "top_p"),
+        max_tokens: parse_max_tokens(obj, "max_output_tokens", "responses")?,
+        temperature: parse_bounded_f64(
+            obj,
+            "temperature",
+            "responses",
+            MIN_TEMPERATURE,
+            MAX_TEMPERATURE,
+        )?,
+        top_p: parse_bounded_f64(obj, "top_p", "responses", MIN_TOP_P, MAX_TOP_P)?,
         top_k: None,
         stop: Vec::new(),
         stream: get_bool(obj, "stream").unwrap_or(false),
@@ -154,7 +164,7 @@ fn parse_input_item(
     match kind {
         "message" => {
             let role = get_str(item, "role").unwrap_or("user");
-            let content = parse_content_parts(item.get("content"), true)?;
+            let content = parse_content_parts(item.get("content"), true, true)?;
             match role {
                 "system" | "developer" => system.extend(content),
                 "user" => messages.push(UnifiedMessage {
@@ -211,7 +221,7 @@ fn parse_input_item(
                     )
                 })?
                 .to_string();
-            let content = parse_content_parts(item.get("output"), false)?;
+            let content = parse_content_parts(item.get("output"), false, true)?;
             messages.push(UnifiedMessage {
                 role: Role::Tool,
                 content: vec![ContentPart::ToolResult {
@@ -256,8 +266,16 @@ fn parse_input_item(
                 content: vec![part],
             });
         }
-        "item_reference" => {}
-        _ => {}
+        "item_reference" => {
+            // Recognised item that only references a previous turn; the IR has
+            // no reference semantics, so it carries no content of its own.
+        }
+        other => {
+            return Err(ProtocolError::unsupported(
+                format!("input item type `{other}`"),
+                "responses",
+            ))
+        }
     }
 
     Ok(())
@@ -266,6 +284,7 @@ fn parse_input_item(
 fn parse_content_parts(
     value: Option<&Value>,
     allow_images: bool,
+    strict: bool,
 ) -> Result<Vec<ContentPart>, ProtocolError> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -307,7 +326,17 @@ fn parse_content_parts(
                             result.push(ContentPart::Image { source });
                         }
                     }
-                    _ => {}
+                    other => {
+                        // Upstream responses may contain block types the
+                        // gateway does not model; only request parsing treats
+                        // an unknown type as a client error.
+                        if strict {
+                            return Err(ProtocolError::unsupported(
+                                format!("content part type `{other}`"),
+                                "responses",
+                            ));
+                        }
+                    }
                 }
             }
             Ok(result)
@@ -365,7 +394,12 @@ fn parse_response_format(value: &Value) -> Result<Option<ResponseFormat>, Protoc
             })?,
             strict: get_bool(obj, "strict"),
         }),
-        _ => None,
+        other => {
+            return Err(ProtocolError::unsupported(
+                format!("text.format type `{other}`"),
+                "responses",
+            ))
+        }
     })
 }
 
@@ -619,7 +653,7 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
             })?;
             match get_str(item, "type").unwrap_or_default() {
                 "message" => {
-                    content.extend(parse_content_parts(item.get("content"), true)?);
+                    content.extend(parse_content_parts(item.get("content"), true, false)?);
                 }
                 "reasoning" => {
                     let mut text = String::new();
@@ -662,7 +696,14 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
         }
     }
 
-    let status = get_str(obj, "status").unwrap_or("completed");
+    let status = get_str(obj, "status")
+        .ok_or_else(|| ProtocolError::invalid_response("responses", "status is required"))?;
+    if !matches!(status, "completed" | "incomplete") {
+        return Err(ProtocolError::invalid_response(
+            "responses",
+            format!("unsupported response status `{status}`"),
+        ));
+    }
     let has_tool_use = content
         .iter()
         .any(|part| matches!(part, ContentPart::ToolUse { .. }));
@@ -701,21 +742,24 @@ pub fn parse_response(value: &Value) -> Result<UnifiedResponse, ProtocolError> {
 }
 
 pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
-    let input_total = get_u64(usage, "input_tokens");
-    let output = get_u64(usage, "output_tokens");
+    let input_total = get_u64(usage, "input_tokens").map(clamp_token_count);
+    let output = get_u64(usage, "output_tokens").map(clamp_token_count);
     let cached = usage
         .get("input_tokens_details")
         .and_then(Value::as_object)
-        .and_then(|details| get_u64(details, "cached_tokens"));
+        .and_then(|details| get_u64(details, "cached_tokens"))
+        .map(clamp_token_count);
     let input = match (input_total, cached) {
         (Some(total), Some(cached)) => Some(total.saturating_sub(cached)),
         (Some(total), None) => Some(total),
         _ => None,
     };
-    let total = get_u64(usage, "total_tokens").or_else(|| match (input_total, output) {
-        (Some(input), Some(output)) => Some(input + output),
-        _ => None,
-    });
+    let total = get_u64(usage, "total_tokens")
+        .map(clamp_token_count)
+        .or_else(|| match (input_total, output) {
+            (Some(input), Some(output)) => Some(clamp_token_count(input.saturating_add(output))),
+            _ => None,
+        });
 
     Usage {
         input_tokens: input,
@@ -726,7 +770,8 @@ pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
         reasoning_tokens: usage
             .get("output_tokens_details")
             .and_then(Value::as_object)
-            .and_then(|details| get_u64(details, "reasoning_tokens")),
+            .and_then(|details| get_u64(details, "reasoning_tokens"))
+            .map(clamp_token_count),
     }
 }
 
@@ -799,12 +844,14 @@ pub fn encode_response(response: &UnifiedResponse) -> Result<Value, ProtocolErro
     }
     flush_text(&mut output, &mut text_buffer);
 
-    let status = match response.stop_reason {
-        Some(StopReason::MaxTokens) => "incomplete",
-        Some(StopReason::ContentFilter) => "incomplete",
+    let status = match response.stop_reason.as_ref() {
+        Some(StopReason::MaxTokens)
+        | Some(StopReason::ContentFilter)
+        | Some(StopReason::Other)
+        | Some(StopReason::Unknown(_)) => "incomplete",
         _ => "completed",
     };
-    let incomplete_reason = match response.stop_reason {
+    let incomplete_reason = match response.stop_reason.as_ref() {
         Some(StopReason::MaxTokens) => Some("max_output_tokens"),
         Some(StopReason::ContentFilter) => Some("content_filter"),
         _ => None,

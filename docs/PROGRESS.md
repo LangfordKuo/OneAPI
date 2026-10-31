@@ -1,8 +1,8 @@
 # OneAPI 进度
 
-- 最后更新：2026-10-30
-- 当前阶段：v0.1.17 已发布（备份改为仅服务器端）
-- 当前分支：`main`
+- 最后更新：2026-10-31
+- 当前阶段：v0.1.18 安全修复批次已实现并通过端到端验证（待合并/发布）
+- 当前分支：`security/hardening-0.1.18`
 - 最近发布：`v0.1.17`
 - 计划文档：`docs/IMPLEMENTATION_PLAN.md`
 
@@ -562,6 +562,19 @@
 - 设置页「数据库备份」改为“立即备份到服务器”+ 备份列表；恢复方式改为停机替换数据库文件并清理 `-wal`/`-shm`，界面与文档同步说明。
 
 验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`npx tsc --noEmit`、`npm run lint`、`npm run build` 通过；端到端确认 `/api/backup/export` 与 `/api/backup/import` 返回 404，`/api/backup/snapshot` 生成文件且不返回内容，`/api/backup/list` 能列出该文件，快照权限为 0600。
+
+## 安全修复批次（2026-10-31，v0.1.18）
+
+范围：`docs/SECURITY_FIX_PLAN.md` 中的 M5–M8、M10–M14、L1–L11，共 20 项。
+
+- 新增迁移 `0009_security_fixes.sql`：`usage_logs.detail_api_key_id`、`api_keys.key_hash_v2` 与预留列、`response_usage` 表、`usage_logs(api_key_id, created_at)` 索引、删除 Key 清正文触发器、API Key/渠道 JSON 有效性触发器。
+- 计费与配额：准入阶段原子预留（`reserved_tokens`/`reserved_daily_tokens`），用量事务内释放并计入实际 token；启动清零、60 秒 janitor 清理 30 分钟以上陈旧预留；`ONEAPI_DISABLE_QUOTA_RESERVATION=1` 可紧急关闭。Responses 增加每 Key（默认 64 MiB）与全局（默认 2 GiB）存储配额，超额返回 `store:false`，保留期删除与显式删除同步回写 `response_usage`。
+- 数据隔离：日志详情改按 `usage_logs.id` 查询，删除“按客户端 request_id 取最新正文”的跨 Key 回退；`/v1/models` 的最近模型按 API Key 过滤；`responses` 冲突写入校验 Key 归属。
+- 网关：SSE 校验上游 `Content-Type` 与协议终止事件，缺失终止/200 非 SSE 明确报错；慢客户端不再误冷却渠道；上游错误与 `x-oneapi-*` 路由头只对 Playground/脱敏后暴露；`model` ≤256、`previous_response_id` ≤128 且不回显；usage 饱和运算与 Responses/Anthropic 状态、Chat 拒答映射；未知协议字段与非法数值显式 400；Chat 目标的 `tool_result.is_error` 使用 `[tool_error]` 有损前缀。
+- 安全加固：API Key v2 哈希 `HMAC-SHA256(pepper, key)`，v1 兼容并惰性回填；鉴权失败按客户端 IP 限速；**配置 `client_ip_header` 时该头为唯一来源，绝不回退建联 IP**，避免 CDN 回源地址被拉黑；备份目录 0700/文件 0600、并发与 10 秒限流；指标 SSE 30 秒会话复检、连接上限与停机主动结束；主密钥/密码 zeroize；正文保留期独立于 usage 日志；前端 401 统一处理、路径校验、设置脏字段提交、编辑不回写 `enabled`、chart 样式安全注入。
+- 验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo build --release --locked`、`cargo test --locked`、`npx tsc --noEmit`、`npm run lint`、`npm run build` 通过；真实服务 + 假上游端到端 60 项断言通过（登录/渠道/Key、三协议请求、模型列表隔离、错误脱敏、HTML/截断流、Responses 存储与配额、同 request_id 双 Key 详情、配额 403/429、长 model/cursor、跨协议未知字段 400、JSON 触发器、鉴权限速、配置客户端 IP 头后不同头 IP 互不牵连且不回退建联 IP、同协议非 JSON 200 拒绝、count_tokens 2xx 校验、日志 id JSON 400、保留期上界、系统计数器、备份权限与限流、删除 Key 清正文、v2 哈希与预留结算）。
+- 全量复审后修复：usage 批量写入对已删除 Key/渠道做外键归一（避免整批回滚）；`error:null` 三处判定统一；跨协议解码失败补发安全 error 帧；usage 同步写失败不再 disarm 预留；详情正文在序列化/捕获时即截断；删除 `response::insert` 死代码；Responses 配额计数统一按字节（`length(CAST(... AS BLOB))`）；未知客户端桶限速（头缺失/非法时不放行也不使用 TCP 对端）；同协议非流式 200 增加 JSON/Content-Type 校验；`count_tokens` 2xx 校验；备份冲突改 409；保留期上界统一；日志路由改 `{id}` 并返回 JSON 400；`response.failed` 字段优先级收敛；首帧 `id:`/`retry:` 不再误判；`client_slow` 写入 usage；配额/详情计数器在 `/api/system` 与 `/readyz` 暴露。
+- 未纳入本批次（保持现状，另行排期）：S1、H1–H5、M1–M4、M9、M15、L12，详见 `docs/SECURITY_FIX_PLAN.md` §0.2。
 
 ## AOCI 状态
 

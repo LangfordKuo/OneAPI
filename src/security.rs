@@ -16,17 +16,25 @@ use argon2::{
     Argon2,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use hmac::{Hmac, Mac};
 use rand::{distributions::Alphanumeric, Rng, RngCore};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 const API_KEY_PREFIX: &str = "sk-";
 const API_KEY_RANDOM_LEN: usize = 48;
 const MASTER_KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
+/// Domain separator for deriving the API key pepper from the master key.
+const API_KEY_PEPPER_CONTEXT: &[u8] = b"oneapi-api-key-pepper";
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone)]
 pub struct Crypto {
-    key: [u8; MASTER_KEY_LEN],
+    /// The master key is kept in a `Zeroizing` wrapper so it is wiped from
+    /// memory when the last `Crypto` clone is dropped.
+    key: Zeroizing<[u8; MASTER_KEY_LEN]>,
     /// Decrypting a key just to render a mask shows up when listing channels;
     /// the ciphertext is content-addressed, so entries never go stale.
     mask_cache: Arc<Mutex<HashMap<String, String>>>,
@@ -39,7 +47,7 @@ impl std::fmt::Debug for Crypto {
 }
 
 impl Crypto {
-    fn new(key: [u8; MASTER_KEY_LEN]) -> Self {
+    fn new(key: Zeroizing<[u8; MASTER_KEY_LEN]>) -> Self {
         Self {
             key,
             mask_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -48,16 +56,18 @@ impl Crypto {
 
     pub fn load_or_create(data_dir: &Path) -> Result<Self> {
         if let Ok(secret) = std::env::var("ONEAPI_SECRET") {
+            let secret = Zeroizing::new(secret);
             if !secret.trim().is_empty() {
-                return Ok(Self::new(sha256_bytes(secret.as_bytes())));
+                return Ok(Self::new(Zeroizing::new(sha256_bytes(secret.as_bytes()))));
             }
         }
 
         let path = data_dir.join("master.key");
         let key = match fs::read(&path) {
             Ok(bytes) if bytes.len() == MASTER_KEY_LEN => {
-                let mut key = [0u8; MASTER_KEY_LEN];
-                key.copy_from_slice(&bytes);
+                let bytes = Zeroizing::new(bytes);
+                let mut key = Zeroizing::new([0u8; MASTER_KEY_LEN]);
+                key[..].copy_from_slice(bytes.as_slice());
                 key
             }
             Ok(_) => {
@@ -68,9 +78,9 @@ impl Crypto {
                 ))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let mut key = [0u8; MASTER_KEY_LEN];
-                rand::thread_rng().fill_bytes(&mut key);
-                write_secret_file(&path, &key)?;
+                let mut key = Zeroizing::new([0u8; MASTER_KEY_LEN]);
+                rand::thread_rng().fill_bytes(&mut key[..]);
+                write_secret_file(&path, &key[..])?;
                 tracing::info!(path = %path.display(), "generated master key for upstream secrets");
                 key
             }
@@ -84,7 +94,7 @@ impl Crypto {
 
     pub fn encrypt(&self, plaintext: &str) -> Result<String> {
         let cipher =
-            Aes256Gcm::new_from_slice(&self.key).map_err(|_| anyhow!("invalid master key"))?;
+            Aes256Gcm::new_from_slice(&self.key[..]).map_err(|_| anyhow!("invalid master key"))?;
         let mut nonce_bytes = [0u8; NONCE_LEN];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -99,7 +109,7 @@ impl Crypto {
         ))
     }
 
-    pub fn decrypt(&self, encoded: &str) -> Result<String> {
+    pub fn decrypt(&self, encoded: &str) -> Result<Zeroizing<String>> {
         let mut parts = encoded.splitn(3, ':');
         let version = parts.next().unwrap_or_default();
         let nonce_b64 = parts
@@ -125,12 +135,14 @@ impl Crypto {
         }
 
         let cipher =
-            Aes256Gcm::new_from_slice(&self.key).map_err(|_| anyhow!("invalid master key"))?;
+            Aes256Gcm::new_from_slice(&self.key[..]).map_err(|_| anyhow!("invalid master key"))?;
         let plaintext = cipher
             .decrypt(Nonce::from_slice(&nonce_bytes), ciphertext.as_ref())
             .map_err(|_| anyhow!("failed to decrypt secret"))?;
 
-        String::from_utf8(plaintext).context("decrypted secret is not valid UTF-8")
+        String::from_utf8(plaintext)
+            .map(Zeroizing::new)
+            .context("decrypted secret is not valid UTF-8")
     }
 
     pub fn mask(&self, encoded: &str) -> String {
@@ -145,11 +157,13 @@ impl Crypto {
 
         let masked = match self.decrypt(encoded) {
             Ok(plaintext) => {
-                let chars: Vec<char> = plaintext.chars().collect();
-                if chars.len() <= 4 {
+                let len = plaintext.chars().count();
+                if len <= 4 {
                     "••••".to_string()
                 } else {
-                    let suffix: String = chars[chars.len() - 4..].iter().collect();
+                    // Take only the visible suffix so the full plaintext never
+                    // gets copied into an unzeroized `Vec<char>`.
+                    let suffix: String = plaintext.chars().skip(len - 4).collect();
                     format!("••••{suffix}")
                 }
             }
@@ -165,6 +179,33 @@ impl Crypto {
             cache.insert(encoded.to_string(), masked.clone());
         }
         masked
+    }
+
+    /// Pepper for API key hashes, derived from the master key with a fixed
+    /// domain separator. It is never stored, so a database copy alone cannot
+    /// reproduce (or brute-force) the stored hashes.
+    fn api_key_pepper(&self) -> [u8; 32] {
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.key[..])
+            .expect("HMAC-SHA256 accepts keys of any length");
+        mac.update(API_KEY_PEPPER_CONTEXT);
+        let mut pepper = [0u8; 32];
+        pepper.copy_from_slice(&mac.finalize().into_bytes());
+        pepper
+    }
+
+    /// Peppered API key hash: `HMAC-SHA256(pepper, key)`, hex encoded.
+    pub fn api_key_hash_v2(&self, key: &str) -> String {
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.api_key_pepper())
+            .expect("HMAC-SHA256 accepts keys of any length");
+        mac.update(key.as_bytes());
+        hex(&mac.finalize().into_bytes())
+    }
+
+    /// Legacy unpeppered SHA-256 hash. Existing rows keep authenticating with
+    /// it (and an older binary can still read them after a rollback); new
+    /// writes use [`Self::api_key_hash_v2`].
+    pub fn api_key_hash_legacy(key: &str) -> String {
+        sha256_hex(key)
     }
 }
 
@@ -244,6 +285,12 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
     }
 }
 
+/// Valid Argon2id PHC string using the crate's default parameters
+/// (`m=19456,t=2,p=1`). It is only a constant-cost fallback for
+/// [`dummy_password_hash`]; no real password ever verifies against it.
+const FALLBACK_DUMMY_PASSWORD_HASH: &str =
+    "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
 /// A hash with default Argon2 parameters, generated once from random input.
 /// Verifying against it keeps the login path's cost constant when the username
 /// does not exist, so response timing does not reveal account existence.
@@ -252,9 +299,19 @@ pub fn dummy_password_hash() -> &'static str {
     HASH.get_or_init(|| {
         let mut random = [0u8; 24];
         rand::thread_rng().fill_bytes(&mut random);
-        let password = BASE64.encode(random);
-        hash_password(&password).expect("default Argon2 parameters are valid")
+        let password = Zeroizing::new(BASE64.encode(random));
+        match hash_password(password.as_str()) {
+            Ok(hash) => hash,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "failed to precompute dummy password hash; using built-in fallback"
+                );
+                FALLBACK_DUMMY_PASSWORD_HASH.to_string()
+            }
+        }
     })
+    .as_str()
 }
 
 pub fn generate_api_key() -> String {
@@ -264,10 +321,6 @@ pub fn generate_api_key() -> String {
         .map(char::from)
         .collect();
     format!("{API_KEY_PREFIX}{random}")
-}
-
-pub fn api_key_hash(key: &str) -> String {
-    sha256_hex(key)
 }
 
 pub fn generate_session_token() -> String {

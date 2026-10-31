@@ -64,7 +64,10 @@ export interface Settings {
   nonstream_timeout_seconds: number;
   stream_idle_timeout_seconds: number;
   usage_log_retention_days: number;
+  request_detail_retention_days: number;
   response_retention_days: number;
+  response_storage_per_key_mb: number;
+  response_storage_total_mb: number;
   store_request_bodies: boolean;
   update_source: 'github' | 'ghproxy';
   client_ip_header: string;
@@ -184,6 +187,26 @@ export interface ModelsOutput {
 export interface SiteInfo {
   site_name: string;
   version: string;
+}
+
+export interface SystemInfo {
+  name: string;
+  version: string;
+  uptime_seconds: number;
+  database: string;
+  data_dir: string;
+  database_bytes: number;
+  wal_bytes: number;
+  last_backup_at: number | null;
+  usage_queue_depth: number;
+  /** Responses objects skipped by storage limits or id conflicts. */
+  response_store_rejected?: number;
+  /** Request details dropped after the detail queue exceeded its budget. */
+  detail_dropped?: number;
+  /** Bytes currently held by queued request details. */
+  detail_queue_bytes?: number;
+  cooling_channels: number;
+  failovers_24h: number;
 }
 
 export interface SetupStatus {

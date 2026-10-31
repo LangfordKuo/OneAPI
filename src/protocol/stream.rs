@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use super::sse::SseFrame;
 use super::{
-    anthropic, chat, responses, BlockKind, Protocol, ProtocolError, StopReason, StreamBlock,
-    StreamEvent, Usage,
+    anthropic, chat, has_error, responses, BlockKind, Protocol, ProtocolError, StopReason,
+    StreamBlock, StreamEvent, Usage,
 };
 
 fn parse_frame(frame: &SseFrame, protocol: &'static str) -> Result<Value, ProtocolError> {
@@ -81,6 +81,16 @@ impl StreamDecoder {
         }
     }
 
+    /// Whether the upstream sent the protocol's terminal event. A stream that
+    /// ends without one was truncated and must not be treated as complete.
+    pub fn saw_terminal(&self) -> bool {
+        match self {
+            Self::Chat(decoder) => decoder.terminal,
+            Self::Responses(decoder) => decoder.terminal,
+            Self::Anthropic(decoder) => decoder.terminal,
+        }
+    }
+
     pub fn final_response(&self) -> Option<Value> {
         match self {
             Self::Responses(decoder) => decoder.final_response.clone(),
@@ -100,6 +110,8 @@ pub struct ChatDecoder {
     finish_reason: Option<StopReason>,
     stopped: bool,
     done: bool,
+    /// `[DONE]` was observed; `finish()` alone does not count.
+    terminal: bool,
 }
 
 impl ChatDecoder {
@@ -112,13 +124,14 @@ impl ChatDecoder {
             return Ok(Vec::new());
         }
         if frame.data.trim() == "[DONE]" {
+            self.terminal = true;
             return Ok(self.close());
         }
 
         let value = parse_frame(frame, "chat")?;
         let mut events = Vec::new();
 
-        if value.get("error").is_some() {
+        if has_error(&value) {
             events.push(error_event(&value));
             return Ok(events);
         }
@@ -275,7 +288,7 @@ impl ChatDecoder {
         if !self.stopped {
             self.stopped = true;
             events.push(StreamEvent::Stop {
-                reason: self.finish_reason,
+                reason: self.finish_reason.clone(),
                 stop_sequence: None,
             });
         }
@@ -291,6 +304,8 @@ pub struct AnthropicDecoder {
     open: BTreeSet<usize>,
     stopped: bool,
     done: bool,
+    /// `message_stop` was observed; `finish()` alone does not count.
+    terminal: bool,
 }
 
 impl AnthropicDecoder {
@@ -301,6 +316,7 @@ impl AnthropicDecoder {
             open: BTreeSet::new(),
             stopped: false,
             done: false,
+            terminal: false,
         }
     }
 
@@ -420,6 +436,7 @@ impl AnthropicDecoder {
                 }
             }
             "message_stop" => {
+                self.terminal = true;
                 events.extend(self.close());
             }
             "error" => events.push(error_event(&value)),
@@ -465,6 +482,9 @@ pub struct ResponsesDecoder {
     stopped: bool,
     done: bool,
     final_response: Option<Value>,
+    /// `response.completed` / `response.incomplete` / `response.failed` was
+    /// observed; `finish()` alone does not count.
+    terminal: bool,
 }
 
 impl ResponsesDecoder {
@@ -601,6 +621,7 @@ impl ResponsesDecoder {
                 self.stop_output_item(output_index, &mut events);
             }
             "response.completed" | "response.incomplete" => {
+                self.terminal = true;
                 if let Some(response) = value.get("response") {
                     self.final_response = Some(response.clone());
                     if let Ok(parsed) = responses::parse_response(response) {
@@ -613,12 +634,21 @@ impl ResponsesDecoder {
                 events.extend(self.close());
             }
             "response.failed" => {
-                if let Some(response) = value.get("response") {
-                    self.final_response = Some(response.clone());
-                    if let Some(error) = response.get("error") {
-                        events.push(error_event(error));
-                    }
-                }
+                self.terminal = true;
+                // A failed response is never a stored success. Some compatible
+                // upstreams omit the nested error object; synthesize one so the
+                // client still receives an error event.
+                let error = value
+                    .get("response")
+                    .and_then(|response| response.get("error"))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({
+                            "type": "upstream_error",
+                            "message": "upstream response failed",
+                        })
+                    });
+                events.push(error_event(&error));
             }
             "error" => events.push(error_event(&value)),
             _ => {}
@@ -683,7 +713,7 @@ impl ResponsesDecoder {
         if !self.stopped {
             self.stopped = true;
             events.push(StreamEvent::Stop {
-                reason: self.stop,
+                reason: self.stop.clone(),
                 stop_sequence: None,
             });
         }
@@ -924,13 +954,13 @@ impl ChatEncoder {
             StreamEvent::Stop {
                 reason,
                 stop_sequence: _,
-            } => self.stop = *reason,
+            } => self.stop = reason.clone(),
             StreamEvent::Done => {
                 self.ensure_role_chunk(&mut frames);
                 frames.push(sse_data(&self.chunk(json!({
                     "index": 0,
                     "delta": {},
-                    "finish_reason": chat_finish_reason(self.stop),
+                    "finish_reason": chat_finish_reason(self.stop.clone()),
                 }))));
                 if self.include_usage && !self.usage.is_empty() {
                     frames.push(sse_data(&json!({
@@ -952,7 +982,8 @@ impl ChatEncoder {
                 frames.push(sse_data(&json!({
                     "error": {"message": message, "type": error_type},
                 })));
-                frames.push("data: [DONE]\n\n".to_string());
+                // Do not emit the success sentinel: OpenAI-compatible clients
+                // treat `[DONE]` as a completed stream.
                 self.done = true;
             }
             _ => {}
@@ -984,12 +1015,15 @@ impl ChatEncoder {
     }
 }
 
-fn chat_finish_reason(reason: Option<StopReason>) -> &'static str {
+fn chat_finish_reason(reason: Option<StopReason>) -> String {
     match reason {
-        Some(StopReason::MaxTokens) => "length",
-        Some(StopReason::ToolUse) => "tool_calls",
-        Some(StopReason::ContentFilter) => "content_filter",
-        _ => "stop",
+        Some(StopReason::MaxTokens) => "length".to_string(),
+        Some(StopReason::ToolUse) => "tool_calls".to_string(),
+        Some(StopReason::ContentFilter) => "content_filter".to_string(),
+        // Preserve an unrecognized upstream value instead of disguising it as
+        // a normal `stop`.
+        Some(StopReason::Unknown(raw)) => raw,
+        _ => "stop".to_string(),
     }
 }
 
@@ -1200,7 +1234,7 @@ impl AnthropicEncoder {
                 reason,
                 stop_sequence,
             } => {
-                self.stop = *reason;
+                self.stop = reason.clone();
                 self.stop_sequence = stop_sequence.clone();
             }
             StreamEvent::Done => {
@@ -1216,7 +1250,7 @@ impl AnthropicEncoder {
                     &json!({
                         "type": "message_delta",
                         "delta": {
-                            "stop_reason": anthropic_stop_reason(self.stop),
+                            "stop_reason": anthropic_stop_reason(self.stop.clone()),
                             "stop_sequence": self.stop_sequence,
                         },
                         "usage": anthropic_usage_delta(&self.usage),
@@ -1595,7 +1629,7 @@ impl ResponsesEncoder {
                 reason,
                 stop_sequence,
             } => {
-                self.stop = *reason;
+                self.stop = reason.clone();
                 self.stop_sequence = stop_sequence.clone();
             }
             StreamEvent::Done => {

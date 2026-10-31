@@ -33,7 +33,12 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> +
 #[derive(Debug)]
 pub struct StreamFailure {
     pub error_type: String,
+    /// Raw failure text for the usage log and channel health state. It is never
+    /// written to the client as-is.
     pub message: String,
+    /// Whether `message` came from a structured provider JSON error, in which
+    /// case it may be shown to the client after redaction.
+    pub provider_json: bool,
 }
 
 impl StreamFailure {
@@ -44,6 +49,17 @@ impl StreamFailure {
         Self {
             error_type: error_type.into(),
             message: message.into(),
+            provider_json: false,
+        }
+    }
+
+    /// A failure carrying an upstream error body that was already parsed as
+    /// JSON.
+    fn from_provider(error_type: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            error_type: error_type.into(),
+            message: message.into(),
+            provider_json: true,
         }
     }
 }
@@ -80,6 +96,10 @@ pub struct StreamJob {
     /// have failure state recorded; a healthy channel would otherwise pay for a
     /// no-op UPDATE (and its SQLite write lock) on every request.
     pub clear_failure_state: bool,
+    /// Admission reservation for this request. The terminal usage row settles
+    /// it; if the task ends before that row is written, dropping the job
+    /// releases it.
+    pub reservation: Option<usage::Reservation>,
 }
 
 /// Clamp upstream error text before it reaches the client, the usage log, or
@@ -89,6 +109,18 @@ fn bounded_error(error_type: String, message: String) -> (String, String) {
         error::truncate_message(&error_type, 128),
         error::truncate_message(&message, 1024),
     )
+}
+
+/// Text that may be written to the client for an in-stream failure.
+///
+/// Upstream-provided messages go through the shared mapping (URL redaction and
+/// clamping). `conversion_error` describes the request the client itself sent,
+/// so it is kept verbatim and merely clamped.
+fn client_stream_message(error_type: &str, message: &str, provider_json: bool) -> String {
+    if error_type == "conversion_error" {
+        return error::truncate_message(message, 300);
+    }
+    error::client_safe_upstream_message(error_type, message, provider_json)
 }
 
 /// Commit the stream to the client only after the first upstream SSE frame has
@@ -128,7 +160,16 @@ fn sse_response(rx: mpsc::Receiver<Bytes>) -> Response {
 enum FrameOutcome {
     Ok,
     Disconnected,
-    Failed(String, String),
+    Failed {
+        error_type: String,
+        message: String,
+        /// Whether an error frame already reached the client. An upstream error
+        /// event is forwarded (passthrough) or encoded (converted) before the
+        /// frame is classified as failed, so synthesizing another frame then
+        /// would duplicate it. A decode failure has sent nothing, so the
+        /// terminal error frame is still owed to the client.
+        delivered: bool,
+    },
     /// Responses terminal frame(s) held back until persistence decides `store`.
     Completed(Vec<Bytes>),
 }
@@ -142,6 +183,9 @@ const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
 enum WaitOutcome {
     Next(Option<Result<Bytes, std::io::Error>>),
     TimedOut,
+    /// The client stopped reading: the outbound channel stayed full past the
+    /// idle deadline, so this is not an upstream failure.
+    ClientBlocked,
     Disconnected,
 }
 
@@ -167,8 +211,19 @@ async fn wait_for_upstream(
                 if Instant::now() >= deadline {
                     return WaitOutcome::TimedOut;
                 }
-                if tx.send(Bytes::from_static(HEARTBEAT_FRAME)).await.is_err() {
-                    return WaitOutcome::Disconnected;
+                // The heartbeat must not block past the absolute idle deadline.
+                // A full channel means the client stopped reading, which is a
+                // client-side problem rather than upstream idleness.
+                tokio::select! {
+                    _ = tx.closed() => return WaitOutcome::Disconnected,
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                        return WaitOutcome::ClientBlocked;
+                    }
+                    result = tx.send(Bytes::from_static(HEARTBEAT_FRAME)) => {
+                        if result.is_err() {
+                            return WaitOutcome::Disconnected;
+                        }
+                    }
                 }
             }
             result = upstream.next() => return WaitOutcome::Next(result),
@@ -177,7 +232,7 @@ async fn wait_for_upstream(
 }
 
 async fn run(
-    job: StreamJob,
+    mut job: StreamJob,
     tx: mpsc::Sender<Bytes>,
     ready: oneshot::Sender<Result<(), StreamFailure>>,
 ) {
@@ -252,7 +307,7 @@ async fn run(
 
     if let Some((error_type, message)) = frame_error(job.upstream, &first) {
         let (error_type, message) = bounded_error(error_type, message);
-        let _ = ready.send(Err(StreamFailure::new(error_type, message)));
+        let _ = ready.send(Err(StreamFailure::from_provider(error_type, message)));
         return;
     }
 
@@ -284,9 +339,18 @@ async fn run(
     let mut response_capture: Vec<u8> = Vec::new();
     let mut first_token_at: Option<Instant> = None;
     let mut client_disconnected = false;
+    // The client stopped reading (the outbound channel stayed full), which is a
+    // client-side problem distinct from a real disconnect.
+    let mut client_slow = false;
     let mut stream_error: Option<(String, String)> = None;
+    // Raw stream_error text is kept for logging and channel health; this flag
+    // selects the client-facing wording when the error frame is emitted.
+    let mut stream_error_provider_json = false;
     let mut synthesize_error = false;
     let mut held_terminal: Option<Vec<Bytes>> = None;
+    // Same-protocol passthrough does not run every frame through the decoder,
+    // so its terminal frame is tracked from the observation instead.
+    let mut passthrough_terminal = false;
 
     loop {
         let frame = if let Some(frame) = pending.pop_front() {
@@ -304,7 +368,21 @@ async fn run(
                         "upstream_stream_timeout".to_string(),
                         format!("upstream stream was idle for {:?}", job.idle_timeout),
                     ));
+                    stream_error_provider_json = false;
                     synthesize_error = true;
+                    break;
+                }
+                WaitOutcome::ClientBlocked => {
+                    // The heartbeat could not be written before the idle
+                    // deadline: treat it as a slow/disconnected client and
+                    // leave channel health untouched.
+                    tracing::warn!(
+                        request_id = %job.request_id,
+                        channel_id = job.channel_id,
+                        "client_slow: heartbeat blocked past the idle deadline"
+                    );
+                    client_slow = true;
+                    client_disconnected = true;
                     break;
                 }
                 WaitOutcome::Next(Some(Ok(chunk))) => {
@@ -314,6 +392,7 @@ async fn run(
                             "upstream_stream_too_large".to_string(),
                             "upstream stream frame exceeded the size limit".to_string(),
                         ));
+                        stream_error_provider_json = false;
                         synthesize_error = true;
                         break;
                     }
@@ -324,6 +403,7 @@ async fn run(
                         "upstream_unreachable".to_string(),
                         error.to_string(),
                     ));
+                    stream_error_provider_json = false;
                     synthesize_error = true;
                     break;
                 }
@@ -353,6 +433,7 @@ async fn run(
             &mut response_capture,
             &mut tokens,
             &mut first_token_at,
+            &mut passthrough_terminal,
         )
         .await
         {
@@ -361,8 +442,22 @@ async fn run(
                 client_disconnected = true;
                 break;
             }
-            FrameOutcome::Failed(error_type, message) => {
+            FrameOutcome::Failed {
+                error_type,
+                message,
+                delivered,
+            } => {
+                // `conversion_error` is gateway wording about the payload the
+                // client sent; every other failure comes from a structured
+                // upstream error event.
+                stream_error_provider_json = error_type != "conversion_error";
                 stream_error = Some(bounded_error(error_type, message));
+                // The response is already committed, so a failure that never
+                // reached the client (a decode error after content was sent)
+                // must end with a sanitized error frame instead of a silent
+                // close. Failures whose frame was already forwarded or encoded
+                // must not emit a second one.
+                synthesize_error = !delivered;
                 break;
             }
             FrameOutcome::Completed(held) => {
@@ -372,10 +467,33 @@ async fn run(
         }
     }
 
+    // An upstream that closes without its protocol terminal frame truncated
+    // the stream even when every byte it sent was valid SSE. Report it instead
+    // of encoding a synthetic completion the client would trust.
+    if !client_disconnected && stream_error.is_none() && held_terminal.is_none() {
+        let saw_terminal = if job.passthrough {
+            passthrough_terminal
+        } else {
+            decoder.saw_terminal()
+        };
+        if !saw_terminal {
+            stream_error = Some(bounded_error(
+                "upstream_stream_truncated".to_string(),
+                "upstream stream ended without a terminal event".to_string(),
+            ));
+            stream_error_provider_json = false;
+            synthesize_error = true;
+        }
+    }
+
     if !client_disconnected {
         if synthesize_error {
             if let Some((error_type, message)) = stream_error.clone() {
-                let frame = error_frame(job.inbound, &error_type, &message);
+                // `stream_error` keeps the raw text for the usage row and the
+                // channel health state above; only the frame is sanitized.
+                let client_message =
+                    client_stream_message(&error_type, &message, stream_error_provider_json);
+                let frame = error_frame(job.inbound, &error_type, &client_message);
                 let _ =
                     send_bytes(&tx, Bytes::from(frame.into_bytes()), &mut response_capture).await;
             }
@@ -441,7 +559,9 @@ async fn run(
 
     if job.store_request_detail {
         if let Some(request) = &job.detail_request {
-            let response = String::from_utf8_lossy(&response_capture);
+            let captured = String::from_utf8_lossy(&response_capture);
+            // Bound the body before the record copies it into the write queue.
+            let response = models::request_detail::truncate_detail(&captured);
             usage::record_detail(
                 &job.state,
                 &usage::DetailRecord {
@@ -476,7 +596,12 @@ async fn run(
     } else {
         200
     };
-    let (error_type, error_message) = if client_disconnected {
+    let (error_type, error_message) = if client_slow {
+        (
+            Some("client_slow"),
+            Some("client stopped reading before the stream completed"),
+        )
+    } else if client_disconnected {
         (
             Some("client_disconnected"),
             Some("client disconnected before the stream completed"),
@@ -512,10 +637,29 @@ async fn run(
         usage: &recorded_usage,
         latency_ms: job.started.elapsed().as_millis() as i64,
         first_token_ms: first_token_at.map(|at| at.duration_since(job.started).as_millis() as i64),
+        reserved_tokens: job
+            .reservation
+            .as_ref()
+            .map(usage::Reservation::tokens)
+            .unwrap_or(0),
+        reserved_day: job
+            .reservation
+            .as_ref()
+            .map(usage::Reservation::day)
+            .unwrap_or(0),
         created_at: models::now_ms(),
     };
 
-    usage::record(&job.state, &record).await;
+    let written = usage::record(&job.state, &record).await;
+
+    // The usage row owns settlement now; dropping the guard armed would release
+    // the same reservation a second time. A failed write leaves it armed so
+    // dropping the job releases the quota instead of pinning it.
+    if written {
+        if let Some(mut reservation) = job.reservation.take() {
+            reservation.disarm();
+        }
+    }
 
     // Keep the response body open until persistence is done so a client that has
     // consumed the stream can immediately fetch a stored Responses object.
@@ -637,9 +781,13 @@ async fn process_frame(
     capture: &mut Vec<u8>,
     tokens: &mut Usage,
     first_token_at: &mut Option<Instant>,
+    passthrough_terminal: &mut bool,
 ) -> FrameOutcome {
     if passthrough {
         let observation = observe_passthrough(upstream, &frame);
+        if observation.saw_terminal {
+            *passthrough_terminal = true;
+        }
         account_stream_chars(
             live,
             channel_id,
@@ -693,7 +841,12 @@ async fn process_frame(
         }
 
         if let Some((error_type, message)) = observation.error {
-            return FrameOutcome::Failed(error_type, message);
+            // The upstream error frame itself was forwarded above.
+            return FrameOutcome::Failed {
+                error_type,
+                message,
+                delivered: true,
+            };
         }
 
         return FrameOutcome::Ok;
@@ -706,7 +859,13 @@ async fn process_frame(
     let events = match decoder.decode(&frame) {
         Ok(events) => events,
         Err(error) => {
-            return FrameOutcome::Failed("conversion_error".to_string(), error.to_string())
+            // Nothing was encoded for this frame, so the client has not seen an
+            // error yet.
+            return FrameOutcome::Failed {
+                error_type: "conversion_error".to_string(),
+                message: error.to_string(),
+                delivered: false,
+            };
         }
     };
 
@@ -753,7 +912,12 @@ async fn process_frame(
         }
 
         if let Some((error_type, message)) = error {
-            return FrameOutcome::Failed(error_type, message);
+            // The encoder emitted the client-facing error frame for the event.
+            return FrameOutcome::Failed {
+                error_type,
+                message,
+                delivered: true,
+            };
         }
     }
 
@@ -804,6 +968,10 @@ struct PassthroughObservation {
     /// Responses `response.completed` / `response.incomplete`, i.e. the frame
     /// that must be held back until persistence decides `store`.
     terminal: bool,
+    /// The protocol's terminal frame was seen: Chat `[DONE]`, Anthropic
+    /// `message_stop`, or a Responses terminal event. Used to detect a stream
+    /// that ends without one.
+    saw_terminal: bool,
     /// First frame that actually carries generated content, used to time the
     /// first token.
     has_content: bool,
@@ -834,6 +1002,7 @@ fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObser
     };
 
     if protocol == Protocol::Chat && frame.data.trim() == "[DONE]" {
+        observation.saw_terminal = true;
         return observation;
     }
 
@@ -848,7 +1017,7 @@ fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObser
 
     match protocol {
         Protocol::Chat => {
-            if value.get("error").is_some() {
+            if protocol::has_error(&value) {
                 observation.error = Some(observed_error(&value));
             }
             if let Some(usage) = value.get("usage").and_then(Value::as_object) {
@@ -907,19 +1076,19 @@ fn observe_passthrough(protocol: Protocol, frame: &SseFrame) -> PassthroughObser
                 }
             }
             "error" => observation.error = Some(observed_error(&value)),
+            "message_stop" => observation.saw_terminal = true,
             _ => {}
         },
         Protocol::Responses => {
             match name {
-                "response.completed" | "response.incomplete" => observation.terminal = true,
+                "response.completed" | "response.incomplete" => {
+                    observation.terminal = true;
+                    observation.saw_terminal = true;
+                }
                 "error" => observation.error = Some(observed_error(&value)),
                 "response.failed" => {
-                    if let Some(error) = value
-                        .get("response")
-                        .and_then(|response| response.get("error"))
-                    {
-                        observation.error = Some(observed_error(error));
-                    }
+                    observation.saw_terminal = true;
+                    observation.error = Some(response_failed_error(&value));
                 }
                 _ => {}
             }
@@ -957,6 +1126,30 @@ fn observed_error(value: &Value) -> (String, String) {
     )
 }
 
+/// Extract the error from a Responses `response.failed` event.
+///
+/// Both the first-frame check and passthrough observation use this function so
+/// they agree on field precedence: `code` wins over `type`, matching the
+/// non-stream `upstream_error_info` path.
+fn response_failed_error(value: &Value) -> (String, String) {
+    match value
+        .get("response")
+        .and_then(|response| response.get("error"))
+    {
+        Some(error) => {
+            let (error_type, message) = protocol::error_fields(error, true);
+            (
+                error_type.unwrap_or_else(|| "upstream_error".to_string()),
+                message.unwrap_or_else(|| "upstream stream error".to_string()),
+            )
+        }
+        None => (
+            "upstream_error".to_string(),
+            "upstream response failed".to_string(),
+        ),
+    }
+}
+
 async fn send_bytes(
     tx: &mpsc::Sender<Bytes>,
     bytes: Bytes,
@@ -974,6 +1167,26 @@ async fn send_bytes(
 }
 
 fn frame_error(protocol: Protocol, frame: &SseFrame) -> Option<(String, String)> {
+    // A non-SSE body (HTML error page, bare JSON document) reaches the parser
+    // as a line without a `data:` field, so `data` stays empty while `raw`
+    // carries bytes. It must never be committed to the client as a stream.
+    // Comment-only heartbeats (`: ping`) and control frames carrying only
+    // `id:`/`retry:`/`event:` fields are valid SSE and keep flowing.
+    let looks_like_sse = frame
+        .raw
+        .split(|byte| *byte == b'\n')
+        .all(is_sse_field_line);
+    if frame.data.trim().is_empty()
+        && !frame.raw.is_empty()
+        && frame.event.is_none()
+        && !looks_like_sse
+    {
+        return Some((
+            "upstream_invalid_frame".to_string(),
+            "upstream returned a non-SSE response".to_string(),
+        ));
+    }
+
     let value: Value = serde_json::from_str(&frame.data).ok()?;
     let name = frame
         .event
@@ -990,20 +1203,36 @@ fn frame_error(protocol: Protocol, frame: &SseFrame) -> Option<(String, String)>
     };
 
     match protocol {
-        // Chat has no dedicated error event: an `error` key is the signal.
+        // Chat has no dedicated error event: a non-null `error` member is the
+        // signal. `"error": null` is a normal successful frame.
         Protocol::Chat => {
-            value.get("error")?;
+            if !protocol::has_error(&value) {
+                return None;
+            }
             Some(fields(&value, false))
         }
         Protocol::Anthropic if name == "error" => Some(fields(&value, false)),
         Protocol::Responses if name == "error" => Some(fields(&value, false)),
-        Protocol::Responses if name == "response.failed" => {
-            let error = value.get("response")?.get("error")?;
-            // These payloads carry the machine-readable `code`; prefer it.
-            Some(fields(error, true))
-        }
+        Protocol::Responses if name == "response.failed" => Some(response_failed_error(&value)),
         Protocol::Anthropic | Protocol::Responses => None,
     }
+}
+
+/// Whether a raw line is a legal SSE field line or comment.
+///
+/// Used to tell a control frame (`id:`, `retry:` or `: keep-alive`) with no
+/// `data:` payload apart from a non-SSE body that the parser merely split into
+/// lines, such as an HTML error page.
+fn is_sse_field_line(line: &[u8]) -> bool {
+    let line = match line.iter().position(|byte| !byte.is_ascii_whitespace()) {
+        Some(start) => &line[start..],
+        None => return true,
+    };
+    line.first() == Some(&b':')
+        || line.starts_with(b"data:")
+        || line.starts_with(b"event:")
+        || line.starts_with(b"id:")
+        || line.starts_with(b"retry:")
 }
 
 /// Whether a Chat `delta` object carries generated content.
