@@ -8,6 +8,7 @@ mod keys;
 mod logs;
 mod metrics;
 mod playground;
+mod playground_sessions;
 mod query;
 mod settings;
 mod setup;
@@ -58,6 +59,13 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/dashboard/breakdown", get(dashboard::breakdown))
         .route("/api/models", get(catalog::list))
         .route("/api/playground", post(playground::proxy))
+        .route("/api/playground/sessions", get(playground_sessions::list))
+        .route(
+            "/api/playground/sessions/{id}",
+            get(playground_sessions::get)
+                .put(playground_sessions::save)
+                .delete(playground_sessions::delete),
+        )
         .route("/api/setup/status", get(setup::status))
         .route("/api/setup", post(setup::setup))
         .route("/api/metrics/stream", get(metrics::stream))

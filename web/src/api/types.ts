@@ -184,6 +184,74 @@ export interface ModelsOutput {
   models: string[];
 }
 
+export interface PlaygroundTool {
+  key: string;
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+export interface PlaygroundUsage {
+  input?: number;
+  output?: number;
+  total?: number;
+}
+
+export type PlaygroundMessageStatus = 'done' | 'streaming' | 'error' | 'stopped';
+
+export interface PlaygroundMessageMeta {
+  channel?: string | null;
+  upstream_model?: string | null;
+  model?: string | null;
+  response_id?: string | null;
+  stop_reason?: string | null;
+  usage?: PlaygroundUsage | null;
+  elapsed_ms?: number | null;
+  first_token_ms?: number | null;
+  reasoning_ms?: number | null;
+}
+
+export interface PlaygroundMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  reasoning: string;
+  tools: PlaygroundTool[];
+  status: PlaygroundMessageStatus;
+  error: string;
+  meta: PlaygroundMessageMeta;
+}
+
+export interface PlaygroundSessionSummary {
+  id: string;
+  title: string;
+  protocol: ProtocolName;
+  model: string;
+  created_at: number;
+  updated_at: number;
+  message_count: number;
+}
+
+export interface PlaygroundSession {
+  id: string;
+  title: string;
+  protocol: ProtocolName;
+  model: string;
+  system: string;
+  stream: boolean;
+  max_tokens: number;
+  created_at: number;
+  updated_at: number;
+  messages: PlaygroundMessage[];
+}
+
+export interface PlaygroundSessionsOutput {
+  items: PlaygroundSessionSummary[];
+}
+
+export interface PlaygroundSessionOutput {
+  session: PlaygroundSession;
+}
+
 export interface SiteInfo {
   site_name: string;
   version: string;
