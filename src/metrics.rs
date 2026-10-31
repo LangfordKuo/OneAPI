@@ -259,3 +259,23 @@ impl LiveMetrics {
 fn round_one(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_guard_tracks_active_requests() {
+        let metrics = Arc::new(LiveMetrics::default());
+        assert_eq!(metrics.snapshot_at(0).active_sessions, 0);
+
+        let first = metrics.session();
+        let second = metrics.session();
+        assert_eq!(metrics.snapshot_at(0).active_sessions, 2);
+
+        drop(first);
+        assert_eq!(metrics.snapshot_at(0).active_sessions, 1);
+        drop(second);
+        assert_eq!(metrics.snapshot_at(0).active_sessions, 0);
+    }
+}

@@ -562,3 +562,36 @@ fn self_update_disabled_in_container() -> bool {
 
     Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_failures_are_warnings() {
+        let error = UpdateError::network("connection refused");
+        assert_eq!(error.kind.as_str(), "network");
+        assert_eq!(error.severity(), "warning");
+        // The hint must actually point at the fix the UI promises.
+        assert!(error.hint.contains("更新源"));
+    }
+
+    #[test]
+    fn install_failures_are_errors() {
+        for error in [
+            UpdateError::integrity("checksum mismatch"),
+            UpdateError::replace("self_replace failed"),
+            UpdateError::storage("updates dir is read-only"),
+            UpdateError::database("settings unavailable"),
+        ] {
+            assert_eq!(error.severity(), "error");
+            assert!(!error.hint.is_empty());
+        }
+    }
+
+    #[test]
+    fn request_state_failures_stay_warnings() {
+        assert_eq!(UpdateError::state("already current").severity(), "warning");
+        assert_eq!(UpdateError::platform("no asset").severity(), "warning");
+    }
+}
