@@ -1135,6 +1135,7 @@ async fn send_test(
             &route.upstream_kind,
             &body,
             &HeaderMap::new(),
+            None,
         )
     })
     .await
@@ -1152,6 +1153,7 @@ async fn send_models(
             &state.crypto,
             &route.upstream_kind,
             &HeaderMap::new(),
+            None,
         )
     })
     .await

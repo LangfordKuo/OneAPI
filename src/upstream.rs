@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::RwLock, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue};
 use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder};
 
@@ -74,6 +74,50 @@ const FORWARDED_HEADERS: &[&str] = &[
     "openai-organization",
     "openai-project",
 ];
+
+/// Placeholder accepted in a channel's custom header values. It is replaced
+/// with [`resolve_session`]'s stable per-conversation identifier, which is what
+/// providers such as opencode expect in their session header.
+pub const SESSION_TEMPLATE: &str = "{{session}}";
+
+/// Fallback used by probes and recovery checks, which have no client session.
+pub const DEFAULT_SESSION_ID: &str = "oneapi";
+
+const MAX_SESSION_ID_LEN: usize = 256;
+
+/// Resolve the stable session identifier used for upstream header templates.
+///
+/// Clients may pin a conversation with `x-oneapi-session` (or opencode's own
+/// `x-opencode-session`). Without one, an API key gets a stable per-key value so
+/// repeated requests still share a session instead of looking like a new
+/// conversation on every call.
+pub fn resolve_session(headers: &HeaderMap, api_key_id: Option<i64>) -> String {
+    for name in ["x-oneapi-session", "x-opencode-session"] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            let value = value.trim();
+            if !value.is_empty()
+                && value.len() <= MAX_SESSION_ID_LEN
+                && value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+                })
+            {
+                return value.to_string();
+            }
+        }
+    }
+    match api_key_id {
+        Some(id) => format!("oneapi-key-{id}"),
+        None => "oneapi-playground".to_string(),
+    }
+}
+
+fn resolve_extra_header_value(value: &str, session_id: Option<&str>) -> String {
+    if value.contains(SESSION_TEMPLATE) {
+        value.replace(SESSION_TEMPLATE, session_id.unwrap_or(DEFAULT_SESSION_ID))
+    } else {
+        value.to_string()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ClientKey {
@@ -235,6 +279,7 @@ pub fn apply_auth(
     crypto: &Crypto,
     kind: &str,
     client_headers: &HeaderMap,
+    session_id: Option<&str>,
 ) -> Result<RequestBuilder> {
     let api_key = crypto
         .decrypt(&config.api_key_enc)
@@ -260,7 +305,10 @@ pub fn apply_auth(
         if name.eq_ignore_ascii_case("anthropic-version") {
             has_anthropic_version = true;
         }
-        request = request.header(name.as_str(), value.as_str());
+        let resolved = resolve_extra_header_value(value, session_id);
+        let resolved = HeaderValue::from_str(&resolved)
+            .with_context(|| format!("invalid extra header value for {name}"))?;
+        request = request.header(name.as_str(), resolved);
     }
 
     if kind == "anthropic" && !has_anthropic_version {
@@ -287,9 +335,10 @@ pub fn build_request(
     kind: &str,
     body: &serde_json::Value,
     client_headers: &HeaderMap,
+    session_id: Option<&str>,
 ) -> Result<RequestBuilder> {
     let request = client.post(endpoint_url(config, kind)).json(body);
-    apply_auth(request, config, crypto, kind, client_headers)
+    apply_auth(request, config, crypto, kind, client_headers, session_id)
 }
 
 /// First concrete model configured for a route, translated through the
@@ -330,5 +379,68 @@ pub fn probe_body(kind: &str, model: &str) -> serde_json::Value {
             "max_tokens": 1,
             "stream": false,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_header_overrides_the_key_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-oneapi-session",
+            HeaderValue::from_static("conversation-42"),
+        );
+        assert_eq!(resolve_session(&headers, Some(7)), "conversation-42");
+    }
+
+    #[test]
+    fn opencode_session_header_is_accepted_and_unsafe_values_are_ignored() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-opencode-session",
+            HeaderValue::from_static("sess_abc.123"),
+        );
+        assert_eq!(resolve_session(&headers, None), "sess_abc.123");
+
+        headers.insert(
+            "x-opencode-session",
+            HeaderValue::from_static("bad value with spaces"),
+        );
+        assert_eq!(resolve_session(&headers, Some(3)), "oneapi-key-3");
+    }
+
+    #[test]
+    fn missing_session_falls_back_to_key_or_playground() {
+        assert_eq!(
+            resolve_session(&HeaderMap::new(), Some(11)),
+            "oneapi-key-11"
+        );
+        assert_eq!(
+            resolve_session(&HeaderMap::new(), None),
+            "oneapi-playground"
+        );
+    }
+
+    #[test]
+    fn session_template_is_replaced_only_when_requested() {
+        assert_eq!(
+            resolve_extra_header_value(SESSION_TEMPLATE, Some("abc")),
+            "abc"
+        );
+        assert_eq!(
+            resolve_extra_header_value("prefix-{{session}}-suffix", Some("abc")),
+            "prefix-abc-suffix"
+        );
+        assert_eq!(
+            resolve_extra_header_value(SESSION_TEMPLATE, None),
+            DEFAULT_SESSION_ID
+        );
+        assert_eq!(
+            resolve_extra_header_value("literal", Some("abc")),
+            "literal"
+        );
     }
 }

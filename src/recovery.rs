@@ -190,6 +190,7 @@ async fn probe_config(
                 &config.protocol,
                 &body,
                 &HeaderMap::new(),
+                None,
             )
             .map_err(|error| error.to_string())?;
             (request, format!("{} model {model}", config.protocol))
@@ -203,6 +204,7 @@ async fn probe_config(
                 &state.crypto,
                 &config.protocol,
                 &HeaderMap::new(),
+                None,
             )
             .map_err(|error| error.to_string())?;
             (request, format!("{} models", config.protocol))

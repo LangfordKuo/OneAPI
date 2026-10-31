@@ -23,6 +23,7 @@ import { EmptyState } from '@/components/common/empty-state';
 import { Field } from '@/components/common/field';
 import {
   KeyValueEditor,
+  type KeyValuePreset,
   type KeyValueRow,
 } from '@/components/common/key-value-editor';
 import { PageHeader } from '@/components/common/page-header';
@@ -91,6 +92,14 @@ const PROTOCOL_ORDER: ChannelKind[] = [
   'openai_chat',
   'openai_responses',
   'anthropic',
+];
+
+const EXTRA_HEADER_VALUE_PRESETS: KeyValuePreset[] = [
+  {
+    label: 'session',
+    value: '{{session}}',
+    title: '替换为稳定会话 ID，适用于 opencode 的 x-opencode-session',
+  },
 ];
 
 const KIND_LABELS: Record<ChannelKind, string> = {
@@ -1017,7 +1026,10 @@ export default function Channels() {
                   />
                 </Field>
 
-                <Field label="自定义请求头">
+                <Field
+                  label="自定义请求头"
+                  hint="{{session}} 会替换为稳定会话 ID（客户端可传 x-oneapi-session 或 x-opencode-session，缺省按 API Key 生成）。"
+                >
                   <KeyValueEditor
                     value={active.extraHeaders}
                     onChange={(extraHeaders) =>
@@ -1025,6 +1037,7 @@ export default function Channels() {
                     }
                     keyPlaceholder="Header 名称"
                     valuePlaceholder="Header 值"
+                    valuePresets={EXTRA_HEADER_VALUE_PRESETS}
                   />
                 </Field>
               </>

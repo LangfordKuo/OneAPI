@@ -142,6 +142,7 @@ async fn count_tokens(
             let mut client_error: Option<(StatusCode, String, String, bool)> = None;
             let mut last_message = "no upstream channel succeeded".to_string();
             let mut last_provider_json = false;
+            let session_id = upstream::resolve_session(&headers, Some(auth.key.id));
 
             for candidate in candidates {
                 let mut request_body = body.clone();
@@ -173,6 +174,7 @@ async fn count_tokens(
                     &state.crypto,
                     "anthropic",
                     &headers,
+                    Some(&session_id),
                 ) {
                     Ok(request) => request,
                     Err(error) => {
