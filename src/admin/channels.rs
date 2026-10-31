@@ -317,6 +317,55 @@ fn existing_protocol(existing: Option<&Channel>, kind: ChannelKind) -> Option<Pr
         })
 }
 
+/// Reusing a stored api_key while pointing the same protocol at a new
+/// base_url would send the existing credential to a different host. Require a
+/// freshly entered key for that protocol before the URL may move.
+fn reject_reused_key_base_url_change(
+    input: &ChannelInput,
+    existing: &Channel,
+) -> Result<(), AppError> {
+    fn key_is_missing(api_key: Option<&str>) -> bool {
+        api_key.map(str::trim).map(str::is_empty).unwrap_or(true)
+    }
+
+    if input.protocols.is_empty() {
+        // Legacy flat layout: the primary protocol defaults to the one stored
+        // on the channel.
+        let kind = input
+            .kind
+            .unwrap_or_else(|| ChannelKind::from_db(&existing.kind));
+        let base_url = input.base_url.as_deref().unwrap_or("").trim();
+        if base_url.is_empty() || !key_is_missing(input.api_key.as_deref()) {
+            return Ok(());
+        }
+        if let Some(config) = existing_protocol(Some(existing), kind) {
+            if base_url.trim_end_matches('/') != config.base_url.trim_end_matches('/') {
+                return Err(AppError::BadRequest(format!(
+                    "re-enter the api_key to change base_url for protocol {}",
+                    kind.as_str()
+                )));
+            }
+        }
+        return Ok(());
+    }
+
+    for protocol in &input.protocols {
+        let base_url = protocol.base_url.trim();
+        if base_url.is_empty() || !key_is_missing(protocol.api_key.as_deref()) {
+            continue;
+        }
+        if let Some(config) = existing_protocol(Some(existing), protocol.protocol) {
+            if base_url.trim_end_matches('/') != config.base_url.trim_end_matches('/') {
+                return Err(AppError::BadRequest(format!(
+                    "re-enter the api_key to change base_url for protocol {}",
+                    protocol.protocol.as_str()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn resolve_key(
     input: Option<String>,
     existing: Option<&Channel>,
@@ -812,6 +861,7 @@ pub async fn update(
         .await?
         .ok_or_else(|| AppError::NotFound("channel not found".to_string()))?;
 
+    reject_reused_key_base_url_change(&input, &existing)?;
     let validated = validate(input, false, Some(&existing), state.crypto.as_ref())?;
     let write = to_write(validated)?;
 
@@ -952,6 +1002,9 @@ async fn probe_channel(
     };
 
     let creating = existing.is_none();
+    if let Some(existing) = existing.as_ref() {
+        reject_reused_key_base_url_change(&channel_input, existing)?;
+    }
     let validated = validate(
         channel_input,
         creating,

@@ -130,3 +130,63 @@ pub(crate) fn client_safe_upstream_message(
         _ => truncate_message(&redact_urls(raw), 300),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_urls_handles_embedded_url_tokens() {
+        let redacted =
+            redact_urls("connect failed (https://internal:1/x) url=http://b/y <https://c/z> done");
+
+        assert!(
+            !redacted.contains("internal")
+                && !redacted.contains("http://b")
+                && !redacted.contains("https://c"),
+            "hosts and paths must be removed, got: {redacted}"
+        );
+        assert_eq!(
+            redacted.matches("[url]").count(),
+            3,
+            "all three embedded URLs must be replaced: {redacted}"
+        );
+        assert!(redacted.contains("([url]"), "wrapped url: {redacted}");
+        assert!(redacted.contains("url=[url]"), "prefixed url: {redacted}");
+        assert!(
+            redacted.contains("<[url]"),
+            "angle-bracketed url: {redacted}"
+        );
+        assert!(redacted.contains("connect failed"), "prefixes must survive");
+        assert!(redacted.contains("done"), "suffixes must survive");
+    }
+
+    #[test]
+    fn upstream_unreachable_uses_fixed_client_wording() {
+        let message = client_safe_upstream_message("upstream_unreachable", "http://x", false);
+
+        assert_eq!(message, "upstream request failed");
+        assert!(
+            !message.contains("http"),
+            "the raw upstream detail must not leak: {message}"
+        );
+    }
+
+    #[test]
+    fn provider_json_errors_are_url_redacted() {
+        let message = client_safe_upstream_message(
+            "upstream_error",
+            "provider rejected request to http://internal:8080/v1/messages",
+            true,
+        );
+
+        assert!(
+            !message.contains("internal"),
+            "host must be redacted: {message}"
+        );
+        assert!(
+            message.contains("[url]"),
+            "redaction marker expected: {message}"
+        );
+    }
+}

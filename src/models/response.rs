@@ -260,3 +260,245 @@ pub async fn delete(pool: &SqlitePool, id: &str, api_key_id: i64) -> sqlx::Resul
     tx.commit().await?;
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{insert_key, pool};
+
+    const LIMIT: i64 = 1_000_000;
+
+    async fn usage(pool: &SqlitePool, api_key_id: i64) -> (i64, i64) {
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT bytes, rows FROM response_usage WHERE api_key_id = ?",
+        )
+        .bind(api_key_id)
+        .fetch_optional(pool)
+        .await
+        .expect("read response usage")
+        .unwrap_or((0, 0))
+    }
+
+    #[tokio::test]
+    async fn store_counts_multibyte_payloads_in_bytes() {
+        let pool = pool().await;
+        let key = insert_key(&pool, "bytes", None, None).await;
+        let request_json = r#"{"prompt":"hola 世界"}"#;
+        let response_json = r#"{"text":"你好，世界"}"#;
+
+        let outcome = store_with_quota(
+            &pool,
+            "resp-bytes",
+            key,
+            "test-model",
+            request_json,
+            response_json,
+            "completed",
+            1,
+            LIMIT,
+            LIMIT,
+        )
+        .await
+        .expect("store response");
+
+        assert_eq!(outcome, StoreOutcome::Stored);
+        let expected = (request_json.len() + response_json.len()) as i64;
+        let character_count = (request_json.chars().count() + response_json.chars().count()) as i64;
+        assert_ne!(
+            expected, character_count,
+            "payload must contain multi-byte characters for this test to be meaningful"
+        );
+        assert_eq!(
+            usage(&pool, key).await,
+            (expected, 1),
+            "usage must count UTF-8 bytes, not characters"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_a_response_counts_only_the_size_difference() {
+        let pool = pool().await;
+        let key = insert_key(&pool, "replace", None, None).await;
+        let small_request = r#"{"prompt":"hi"}"#;
+        let small_response = r#"{"text":"ok"}"#;
+        store_with_quota(
+            &pool,
+            "resp-replace",
+            key,
+            "test-model",
+            small_request,
+            small_response,
+            "completed",
+            1,
+            LIMIT,
+            LIMIT,
+        )
+        .await
+        .expect("initial store");
+
+        let large_request = r#"{"prompt":"a much longer prompt with 中文 content"}"#;
+        let large_response = r#"{"text":"a longer response body with 中文 too"}"#;
+        let outcome = store_with_quota(
+            &pool,
+            "resp-replace",
+            key,
+            "test-model",
+            large_request,
+            large_response,
+            "completed",
+            2,
+            LIMIT,
+            LIMIT,
+        )
+        .await
+        .expect("replace store");
+
+        assert_eq!(outcome, StoreOutcome::Stored);
+        let expected = (large_request.len() + large_response.len()) as i64;
+        assert_eq!(
+            usage(&pool, key).await,
+            (expected, 1),
+            "a replacement must adjust bytes to the new size and keep one row"
+        );
+        let stored = get(&pool, "resp-replace", key)
+            .await
+            .expect("get response")
+            .expect("stored row");
+        assert_eq!(stored.request_json, large_request);
+        assert_eq!(stored.response_json, large_response);
+    }
+
+    #[tokio::test]
+    async fn reusing_an_id_from_another_key_is_a_conflict_without_side_effects() {
+        let pool = pool().await;
+        let owner = insert_key(&pool, "owner", None, None).await;
+        let other = insert_key(&pool, "other", None, None).await;
+        let request_json = r#"{"prompt":"owner"}"#;
+        let response_json = r#"{"text":"owner response"}"#;
+        store_with_quota(
+            &pool,
+            "resp-conflict",
+            owner,
+            "test-model",
+            request_json,
+            response_json,
+            "completed",
+            1,
+            LIMIT,
+            LIMIT,
+        )
+        .await
+        .expect("store owner response");
+        let owner_usage = usage(&pool, owner).await;
+
+        let outcome = store_with_quota(
+            &pool,
+            "resp-conflict",
+            other,
+            "test-model",
+            r#"{"prompt":"other"}"#,
+            r#"{"text":"other response"}"#,
+            "completed",
+            2,
+            LIMIT,
+            LIMIT,
+        )
+        .await
+        .expect("conflicting store");
+
+        assert_eq!(outcome, StoreOutcome::Conflict);
+        assert_eq!(
+            usage(&pool, owner).await,
+            owner_usage,
+            "the owner's accounting must not change"
+        );
+        assert_eq!(
+            usage(&pool, other).await,
+            (0, 0),
+            "the rejected key must not gain accounting"
+        );
+        let stored = get(&pool, "resp-conflict", owner)
+            .await
+            .expect("get response")
+            .expect("owner row");
+        assert_eq!(stored.request_json, request_json);
+        assert_eq!(stored.response_json, response_json);
+    }
+
+    #[tokio::test]
+    async fn per_key_quota_rejection_leaves_accounting_untouched() {
+        let pool = pool().await;
+        let key = insert_key(&pool, "quota", None, None).await;
+        let request_json = r#"{"prompt":"0123456789"}"#;
+        let response_json = r#"{"text":"0123456789"}"#;
+
+        let outcome = store_with_quota(
+            &pool,
+            "resp-quota",
+            key,
+            "test-model",
+            request_json,
+            response_json,
+            "completed",
+            1,
+            10,
+            0,
+        )
+        .await
+        .expect("quota-checked store");
+
+        assert_eq!(outcome, StoreOutcome::QuotaExceeded);
+        assert_eq!(
+            usage(&pool, key).await,
+            (0, 0),
+            "a rejected write must not consume quota"
+        );
+        assert!(
+            get(&pool, "resp-quota", key)
+                .await
+                .expect("get response")
+                .is_none(),
+            "a rejected write must not store a row"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_response_releases_its_bytes() {
+        let pool = pool().await;
+        let key = insert_key(&pool, "delete", None, None).await;
+        let request_json = r#"{"prompt":"delete me"}"#;
+        let response_json = r#"{"text":"deleted"}"#;
+        store_with_quota(
+            &pool,
+            "resp-delete",
+            key,
+            "test-model",
+            request_json,
+            response_json,
+            "completed",
+            1,
+            LIMIT,
+            LIMIT,
+        )
+        .await
+        .expect("store response");
+
+        assert!(
+            delete(&pool, "resp-delete", key).await.expect("delete"),
+            "the owner can delete its response"
+        );
+
+        assert_eq!(
+            usage(&pool, key).await.0,
+            0,
+            "deleting must release the stored bytes"
+        );
+        assert!(
+            get(&pool, "resp-delete", key)
+                .await
+                .expect("get response")
+                .is_none(),
+            "the response row must be gone"
+        );
+    }
+}

@@ -8,7 +8,7 @@ use std::{
 };
 
 use serde_json::Value;
-use sqlx::{Executor, Sqlite, SqlitePool};
+use sqlx::{Executor, Sqlite, SqliteConnection, SqlitePool};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -513,25 +513,52 @@ pub async fn record_detail(state: &AppState, record: &DetailRecord<'_>) {
     }
 }
 
+/// Settle one API key's admission reservation and actual usage on `executor`.
+///
+/// This is the single settlement path shared by the synchronous write and the
+/// batch writer. The two callers differ only in the day used to assign the
+/// charge: the synchronous path keeps the row's `created_at` (the request was
+/// admitted then), while the batch path uses the batch write time. Both are
+/// passed in as `now_ms`.
+///
+/// Releases run before `add_usage` so the same request can never be counted
+/// twice (reserved + actual). The executor is reborrowed for every statement so
+/// all of this stays on the caller's transaction.
+async fn settle_key<'e, E>(
+    mut executor: E,
+    api_key_id: i64,
+    releases: &[(i64, i64)],
+    actual_tokens: i64,
+    now_ms: i64,
+) -> sqlx::Result<()>
+where
+    E: Executor<'e, Database = Sqlite> + std::ops::DerefMut<Target = SqliteConnection>,
+{
+    for &(day, tokens) in releases {
+        models::api_key::release_reservation(&mut *executor, api_key_id, tokens, day).await?;
+    }
+    models::api_key::add_usage(&mut *executor, api_key_id, actual_tokens, now_ms).await?;
+    Ok(())
+}
+
 pub async fn insert(pool: &SqlitePool, record: &UsageRecord<'_>) -> sqlx::Result<()> {
     let owned = OwnedUsageRecord::from(record);
     let mut tx = pool.begin().await?;
     insert_one(&mut *tx, &owned).await?;
     if let Some(api_key_id) = owned.api_key_id {
         // Settlement: give the reservation back before charging the actual
-        // usage, so the same request is never counted twice.
-        if owned.reserved_tokens > 0 {
-            models::api_key::release_reservation(
-                &mut *tx,
-                api_key_id,
-                owned.reserved_tokens,
-                owned.reserved_day,
-            )
-            .await?;
-        }
-        models::api_key::add_usage(
+        // usage, so the same request is never counted twice. The charge keeps
+        // the row's `created_at` day, matching the pre-refactor behaviour.
+        let release = [(owned.reserved_day, owned.reserved_tokens)];
+        let releases: &[(i64, i64)] = if owned.reserved_tokens > 0 {
+            &release
+        } else {
+            &[]
+        };
+        settle_key(
             &mut *tx,
             api_key_id,
+            releases,
             total_tokens(&owned.usage),
             owned.created_at,
         )
@@ -729,14 +756,23 @@ async fn write_batch(pool: &SqlitePool, batch: &[WriteJob], events: &EventBus) -
     // Release reservations first, then charge actual usage: the counters are
     // MAX(0, ...) guarded, and this ordering keeps a partially applied batch
     // (rolled back as a whole anyway) from double counting.
-    for (api_key_id, releases) in key_releases {
-        for (day, tokens) in releases {
-            models::api_key::release_reservation(&mut *tx, api_key_id, tokens, day).await?;
-        }
-    }
+    //
+    // Both maps are filled from the same `api_key_id` branch above, so every
+    // key with a release also has a usage aggregate. Iterating `key_usage` and
+    // handing each key its own releases keeps the per-key order (release, then
+    // charge) while settling everything in one transaction. The batch path
+    // keeps its existing day assignment: the charge uses the write time.
     let now = models::now_ms();
     for (api_key_id, tokens) in key_usage {
-        models::api_key::add_usage(&mut *tx, api_key_id, tokens, now).await?;
+        let releases = key_releases.remove(&api_key_id).unwrap_or_default();
+        settle_key(&mut *tx, api_key_id, &releases, tokens, now).await?;
+    }
+    // Defensive: the aggregation above cannot produce a key with reservations
+    // but no usage row. If that invariant ever breaks, release the reservation
+    // without charging (add_usage ignores a zero token count), which is what
+    // the previous two-pass write did.
+    for (api_key_id, releases) in key_releases {
+        settle_key(&mut *tx, api_key_id, &releases, 0, now).await?;
     }
     tx.commit().await?;
 

@@ -56,12 +56,25 @@ impl LoginLimiter {
     }
 
     pub fn record_failure(&self, key: &str) {
+        const MAX_TRACKED_ATTEMPTS: usize = 10_000;
         let now = Instant::now();
         let mut attempts = self.lock();
-        if attempts.len() > 10_000 {
+        if attempts.len() >= MAX_TRACKED_ATTEMPTS {
             attempts.retain(|_, entry| {
                 now.duration_since(entry.last_failure) < Duration::from_secs(3_600)
             });
+        }
+        if attempts.len() >= MAX_TRACKED_ATTEMPTS && !attempts.contains_key(key) {
+            // Evict the oldest quarter instead of clearing the whole map: a
+            // flood of unique keys must not wipe every active lockout.
+            let mut oldest: Vec<(Instant, String)> = attempts
+                .iter()
+                .map(|(key, entry)| (entry.last_failure, key.clone()))
+                .collect();
+            oldest.sort_unstable_by_key(|(last_failure, _)| *last_failure);
+            for (_, stale_key) in oldest.into_iter().take(MAX_TRACKED_ATTEMPTS / 4) {
+                attempts.remove(&stale_key);
+            }
         }
 
         let entry = attempts.entry(key.to_string()).or_insert(Attempt {
@@ -191,6 +204,15 @@ pub async fn login(
             "username and password are required".to_string(),
         ));
     }
+    // Bound the work before it reaches Argon2 or the rate limiter: both the
+    // username (also part of the limiter key) and the password are attacker
+    // controlled, and hashing an arbitrarily long password is pure CPU.
+    if username.chars().count() > 64 {
+        return Err(AppError::BadRequest("username is too long".to_string()));
+    }
+    if password.chars().count() > 256 {
+        return Err(AppError::BadRequest("password is too long".to_string()));
+    }
 
     let client_ip = client_addr
         .0
@@ -208,12 +230,23 @@ pub async fn login(
     let Some(admin) = models::admin::find_by_username(&state.db, username).await? else {
         // Keep the Argon2 cost identical to the wrong-password path so response
         // timing does not reveal whether the username exists.
-        security::verify_password(security::dummy_password_hash(), password.as_str());
+        security::verify_password_blocking(
+            security::dummy_password_hash().to_string(),
+            Zeroizing::new(password.to_string()),
+        )
+        .await
+        .map_err(AppError::Internal)?;
         state.login_limiter.record_failure(&limiter_key);
         return Err(AppError::Unauthorized);
     };
 
-    if !security::verify_password(&admin.password_hash, password.as_str()) {
+    let verified = security::verify_password_blocking(
+        admin.password_hash.clone(),
+        Zeroizing::new(password.to_string()),
+    )
+    .await
+    .map_err(AppError::Internal)?;
+    if !verified {
         state.login_limiter.record_failure(&limiter_key);
         return Err(AppError::Unauthorized);
     }
@@ -273,7 +306,13 @@ pub async fn change_password(
         )));
     }
 
-    if !security::verify_password(&session.admin.password_hash, current_password.as_str()) {
+    let verified = security::verify_password_blocking(
+        session.admin.password_hash.clone(),
+        Zeroizing::new(current_password.to_string()),
+    )
+    .await
+    .map_err(AppError::Internal)?;
+    if !verified {
         state.login_limiter.record_failure(&limiter_key);
         return Err(AppError::Unauthorized);
     }
@@ -283,8 +322,9 @@ pub async fn change_password(
         return Err(AppError::BadRequest(format!("new password {violation}")));
     }
 
-    let password_hash =
-        security::hash_password(new_password.as_str()).map_err(AppError::Internal)?;
+    let password_hash = security::hash_password_blocking(Zeroizing::new(new_password.to_string()))
+        .await
+        .map_err(AppError::Internal)?;
     models::admin::update_password(&state.db, session.admin.id, &password_hash).await?;
     models::session::delete_all_for_admin(&state.db, session.admin.id).await?;
 
@@ -338,7 +378,7 @@ pub async fn bootstrap(pool: &SqlitePool) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("ONEAPI_ADMIN_PASSWORD {violation}"));
     }
 
-    let password_hash = security::hash_password(password.as_str())?;
+    let password_hash = security::hash_password_blocking(password).await?;
     models::admin::create(pool, &username, &password_hash, models::now_ms()).await?;
     tracing::info!(username = %username, "initial admin account created from environment");
 

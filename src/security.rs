@@ -285,6 +285,41 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
     }
 }
 
+/// Caps concurrent Argon2 work. Hashing is CPU- and memory-bound, so a burst
+/// of login attempts must not occupy every Tokio worker: the blocking pool
+/// does the work, and this semaphore bounds how much of that pool is consumed.
+static PASSWORD_SEMAPHORE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+
+fn password_semaphore() -> &'static tokio::sync::Semaphore {
+    PASSWORD_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(4))
+}
+
+/// Verify a password on the blocking pool so the Tokio worker running the
+/// request stays available. The hash and password are moved into the closure.
+pub async fn verify_password_blocking(
+    hash: String,
+    password: Zeroizing<String>,
+) -> anyhow::Result<bool> {
+    let _permit = password_semaphore()
+        .acquire()
+        .await
+        .map_err(|_| anyhow!("password verification semaphore is closed"))?;
+    tokio::task::spawn_blocking(move || verify_password(&hash, password.as_str()))
+        .await
+        .map_err(|error| anyhow!("password verification task failed: {error}"))
+}
+
+/// Hash a password on the blocking pool, bounded by the same semaphore.
+pub async fn hash_password_blocking(password: Zeroizing<String>) -> anyhow::Result<String> {
+    let _permit = password_semaphore()
+        .acquire()
+        .await
+        .map_err(|_| anyhow!("password hashing semaphore is closed"))?;
+    tokio::task::spawn_blocking(move || hash_password(password.as_str()))
+        .await
+        .map_err(|error| anyhow!("password hashing task failed: {error}"))?
+}
+
 /// Valid Argon2id PHC string using the crate's default parameters
 /// (`m=19456,t=2,p=1`). It is only a constant-cost fallback for
 /// [`dummy_password_hash`]; no real password ever verifies against it.

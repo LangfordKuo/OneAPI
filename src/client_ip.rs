@@ -117,3 +117,67 @@ fn parse_ip(raw: &str) -> Option<IpAddr> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(
+                HeaderName::from_static(name),
+                value.parse().expect("valid header value"),
+            );
+        }
+        headers
+    }
+
+    fn ip(value: &str) -> IpAddr {
+        value.parse().expect("valid ip address")
+    }
+
+    #[tokio::test]
+    async fn configured_header_is_authoritative_over_peer() {
+        let headers = headers(&[("x-real-ip", "203.0.113.7")]);
+
+        let resolved = resolve_client_ip(&headers, "x-real-ip", Some(ip("10.0.0.1")));
+
+        assert_eq!(resolved, Some(ip("203.0.113.7")));
+    }
+
+    #[tokio::test]
+    async fn configured_header_missing_or_invalid_never_falls_back_to_peer() {
+        let missing = headers(&[("x-forwarded-for", "198.51.100.9")]);
+        assert_eq!(
+            resolve_client_ip(&missing, "x-real-ip", Some(ip("10.0.0.1"))),
+            None,
+            "a missing configured header must not fall back to the TCP peer"
+        );
+
+        let invalid = headers(&[("x-real-ip", "not-an-ip")]);
+        assert_eq!(
+            resolve_client_ip(&invalid, "x-real-ip", Some(ip("10.0.0.1"))),
+            None,
+            "a malformed configured header must not fall back to the TCP peer"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_setting_uses_forwarded_for_behind_a_loopback_peer() {
+        let headers = headers(&[("x-forwarded-for", "198.51.100.9, 10.0.0.2")]);
+
+        let resolved = resolve_client_ip(&headers, "", Some(ip("127.0.0.1")));
+
+        assert_eq!(resolved, Some(ip("198.51.100.9")));
+    }
+
+    #[tokio::test]
+    async fn empty_setting_and_no_forwarded_for_returns_the_direct_peer() {
+        let headers = headers(&[]);
+
+        let resolved = resolve_client_ip(&headers, "", Some(ip("127.0.0.1")));
+
+        assert_eq!(resolved, Some(ip("127.0.0.1")));
+    }
+}
