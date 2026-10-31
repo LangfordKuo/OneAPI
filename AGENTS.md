@@ -109,9 +109,9 @@ OneAPI 是一个 Rust + Axum 的 AI API 网关：统一接入 Chat Completions /
 
 开始任何实现任务前先阅读：
 
-- `docs/PROGRESS.md`：当前进度、下一步、分支约定与交接约定。
+- `docs/PROGRESS.md`：项目约定（文档、分支与发布、交接、AOCI 认知维护）。
 - `docs/KNOWN_LIMITATIONS.md`：当前版本仍存在的已知限制与接受的风险。
 
-每个里程碑结束后更新 `docs/PROGRESS.md`；新增或解除已知限制时同步更新 `docs/KNOWN_LIMITATIONS.md`；审查/优化项完成后在 `docs/PROGRESS.md` 回填。架构、数据模型与协议映射以代码和 AOCI 认知索引为准。
+变更、进度与已完成事项以 Git 提交和 Release 记录为准，不写入文档；约定变化时更新 `docs/PROGRESS.md`，新增或解除已知限制时更新 `docs/KNOWN_LIMITATIONS.md`。架构、数据模型与协议映射以代码和 AOCI 认知索引为准。
 <!-- project:end -->
 
