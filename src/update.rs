@@ -312,7 +312,7 @@ async fn apply_inner(state: &AppState) -> Result<UpdateResult> {
 async fn configured_source(state: &AppState) -> Result<String> {
     let value = setting::get(&state.db, "update_source")
         .await
-        .context("failed to read update source setting")?;
+        .context("无法读取更新源设置")?;
     Ok(match value.as_deref() {
         Some("ghproxy") => "ghproxy".to_string(),
         _ => "github".to_string(),
@@ -334,7 +334,7 @@ fn client() -> Result<Client> {
             }
         }))
         .build()
-        .context("failed to build update HTTP client")
+        .context("无法创建更新 HTTP 客户端")
 }
 
 async fn fetch_release(client: &Client, source: &str) -> Result<GithubRelease> {
@@ -344,13 +344,13 @@ async fn fetch_release(client: &Client, source: &str) -> Result<GithubRelease> {
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .with_context(|| format!("failed to query update metadata from {source}"))?;
+        .with_context(|| format!("无法从 {source} 获取更新信息"))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         bail!(
-            "update metadata request failed with {status}: {}",
+            "更新信息请求失败（{status}）：{}",
             body.chars().take(200).collect::<String>()
         );
     }
@@ -358,7 +358,7 @@ async fn fetch_release(client: &Client, source: &str) -> Result<GithubRelease> {
     response
         .json::<GithubRelease>()
         .await
-        .context("failed to parse GitHub release metadata")
+        .context("无法解析 GitHub 发布信息")
 }
 
 fn api_url(source: &str) -> Result<String> {
@@ -397,7 +397,7 @@ fn validate_asset_name(name: &str) -> Result<()> {
         || name.chars().any(char::is_control)
         || Path::new(name).file_name().and_then(|part| part.to_str()) != Some(name);
     if invalid {
-        bail!("refusing to use update asset name `{name}`");
+        bail!("拒绝使用更新包文件名 `{name}`");
     }
     Ok(())
 }
@@ -446,12 +446,12 @@ fn platform_asset() -> Option<(&'static str, &'static str)> {
 }
 
 fn current_version() -> Result<Version> {
-    Version::parse(env!("CARGO_PKG_VERSION")).context("current binary version is not valid semver")
+    Version::parse(env!("CARGO_PKG_VERSION")).context("当前版本号不是合法的 semver")
 }
 
 fn parse_version(tag: &str) -> Result<Version> {
     Version::parse(tag.trim_start_matches('v'))
-        .with_context(|| format!("release tag `{tag}` is not a valid semver version"))
+        .with_context(|| format!("发布标签 `{tag}` 不是合法的版本号"))
 }
 
 fn checksum_for(checksums: &str, asset_name: &str) -> Option<String> {
@@ -478,23 +478,23 @@ async fn download(client: &Client, url: &str) -> Result<Vec<u8>> {
         .get(url)
         .send()
         .await
-        .with_context(|| format!("failed to download {url}"))?;
+        .with_context(|| format!("下载失败：{url}"))?;
 
     if !response.status().is_success() {
-        bail!("download failed with {} for {url}", response.status());
+        bail!("下载失败（{}）：{url}", response.status());
     }
     if let Some(length) = response.content_length() {
         if length > MAX_DOWNLOAD_BYTES {
-            bail!("download is too large ({length} bytes)");
+            bail!("安装包过大（{length} 字节）");
         }
     }
 
     let bytes = response
         .bytes()
         .await
-        .with_context(|| format!("failed to read {url}"))?;
+        .with_context(|| format!("读取下载内容失败：{url}"))?;
     if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
-        bail!("download is too large ({} bytes)", bytes.len());
+        bail!("安装包过大（{} 字节）", bytes.len());
     }
     Ok(bytes.to_vec())
 }
@@ -502,54 +502,50 @@ async fn download(client: &Client, url: &str) -> Result<Vec<u8>> {
 #[cfg(unix)]
 fn extract_binary(archive: &Path, output: &Path) -> Result<()> {
     let file =
-        fs::File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
+        fs::File::open(archive).with_context(|| format!("无法打开升级包 {}", archive.display()))?;
     let decoder = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
 
-    for entry in archive.entries().context("failed to read tar archive")? {
+    for entry in archive.entries().context("无法读取 tar 升级包")? {
         let mut entry = entry.context("failed to read tar entry")?;
-        let path = entry.path().context("tar entry has an invalid path")?;
+        let path = entry.path().context("tar 条目路径非法")?;
         if path.file_name().and_then(|name| name.to_str()) == Some("oneapi") {
             let mut output = fs::File::create(output)
-                .with_context(|| format!("failed to create {}", output.display()))?;
-            std::io::copy(&mut entry, &mut output)
-                .context("failed to extract the oneapi binary")?;
+                .with_context(|| format!("无法创建 {}", output.display()))?;
+            std::io::copy(&mut entry, &mut output).context("解压 oneapi 可执行文件失败")?;
             return Ok(());
         }
     }
 
-    bail!("archive does not contain the oneapi binary")
+    bail!("升级包中不包含 oneapi 可执行文件")
 }
 
 #[cfg(windows)]
 fn extract_binary(archive: &Path, output: &Path) -> Result<()> {
     let file =
-        fs::File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
-    let mut archive = zip::ZipArchive::new(file).context("failed to read zip archive")?;
+        fs::File::open(archive).with_context(|| format!("无法打开升级包 {}", archive.display()))?;
+    let mut archive = zip::ZipArchive::new(file).context("无法读取 zip 升级包")?;
 
     for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .context("failed to read zip entry")?;
+        let mut entry = archive.by_index(index).context("无法读取 zip 条目")?;
         if Path::new(entry.name())
             .file_name()
             .and_then(|name| name.to_str())
             == Some("oneapi.exe")
         {
             let mut output = fs::File::create(output)
-                .with_context(|| format!("failed to create {}", output.display()))?;
-            std::io::copy(&mut entry, &mut output)
-                .context("failed to extract the oneapi.exe binary")?;
+                .with_context(|| format!("无法创建 {}", output.display()))?;
+            std::io::copy(&mut entry, &mut output).context("解压 oneapi.exe 失败")?;
             return Ok(());
         }
     }
 
-    bail!("archive does not contain the oneapi.exe binary")
+    bail!("升级包中不包含 oneapi.exe")
 }
 
 #[cfg(not(any(unix, windows)))]
 fn extract_binary(_archive: &Path, _output: &Path) -> Result<()> {
-    bail!("self-update is not supported on this platform")
+    bail!("当前平台不支持自动更新")
 }
 
 fn self_update_disabled_in_container() -> bool {
