@@ -173,7 +173,7 @@ fn write_env_file(config: &Config, username: &str) -> std::io::Result<(bool, Str
     contents
         .push_str("# Set ONEAPI_ADMIN_PASSWORD only when re-bootstrapping an empty admin table.\n");
     contents.push_str("# ONEAPI_ADMIN_PASSWORD=\n");
-    contents.push_str("# Optional: use a fixed secret instead of data/master.key.\n");
+    contents.push_str("# Optional: fixed master key for upstream and stored API key encryption.\n");
     contents.push_str("# ONEAPI_SECRET=\n");
 
     match write_new_file(&path, contents.as_bytes()) {

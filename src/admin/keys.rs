@@ -9,9 +9,9 @@ use crate::{
     error::AppError,
     models::{
         self,
-        api_key::{self, ApiKey, ApiKeyCreate, ApiKeyLimits, ApiKeyUpdate},
+        api_key::{self, ApiKey, ApiKeyCreate, ApiKeyLimits, ApiKeySecret, ApiKeyUpdate},
     },
-    security,
+    security::{self, Crypto},
     state::AppState,
 };
 
@@ -71,6 +71,29 @@ impl KeyOutput {
             created_at: row.created_at,
             key: None,
         }
+    }
+
+    /// Decrypt the stored full key for the admin list. Rows created before
+    /// migration 0011 have no ciphertext and stay `None`; a decryption failure
+    /// is logged and the row remains visible without its secret.
+    fn from_row_with_secret(row: ApiKey, crypto: &Crypto) -> Self {
+        let secret =
+            row.key_ciphertext
+                .as_deref()
+                .and_then(|ciphertext| match crypto.decrypt(ciphertext) {
+                    Ok(secret) => Some(secret.to_string()),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            key_id = row.id,
+                            "failed to decrypt API key; showing prefix only"
+                        );
+                        None
+                    }
+                });
+        let mut output = Self::from_row(row);
+        output.key = secret;
+        output
     }
 }
 
@@ -166,7 +189,11 @@ pub async fn list(
     _session: AdminSession,
 ) -> Result<Json<Vec<KeyOutput>>, AppError> {
     let keys = models::api_key::list(&state.db).await?;
-    Ok(Json(keys.into_iter().map(KeyOutput::from_row).collect()))
+    Ok(Json(
+        keys.into_iter()
+            .map(|row| KeyOutput::from_row_with_secret(row, &state.crypto))
+            .collect(),
+    ))
 }
 
 pub async fn create(
@@ -192,6 +219,10 @@ pub async fn create(
     let key_hash = security::Crypto::api_key_hash_legacy(&key);
     let key_hash_v2 = state.crypto.api_key_hash_v2(&key);
     let key_prefix: String = key.chars().take(12).collect();
+    let key_ciphertext = state.crypto.encrypt(&key).map_err(|error| {
+        tracing::error!(error = %error, "failed to encrypt API key for storage");
+        AppError::Internal(error)
+    })?;
     let enabled = if input.enabled.unwrap_or(true) { 1 } else { 0 };
     let allowed_channel_ids = encode(&channel_ids)?;
     let allowed_models = encode(&model_names)?;
@@ -203,6 +234,7 @@ pub async fn create(
             key_hash: &key_hash,
             key_hash_v2: &key_hash_v2,
             key_prefix: &key_prefix,
+            key_ciphertext: &key_ciphertext,
             enabled,
             expires_at: input.expires_at,
             allowed_channel_ids: &allowed_channel_ids,
@@ -319,6 +351,43 @@ pub async fn update(
         .await?
         .ok_or_else(|| AppError::NotFound("key not found".to_string()))?;
     Ok(Json(KeyOutput::from_row(row)))
+}
+
+pub async fn rotate(
+    State(state): State<AppState>,
+    _session: AdminSession,
+    Path(id): Path<i64>,
+) -> Result<Json<KeyOutput>, AppError> {
+    let key = security::generate_api_key();
+    let key_hash = security::Crypto::api_key_hash_legacy(&key);
+    let key_hash_v2 = state.crypto.api_key_hash_v2(&key);
+    let key_prefix: String = key.chars().take(12).collect();
+    let key_ciphertext = state.crypto.encrypt(&key).map_err(|error| {
+        tracing::error!(error = %error, key_id = id, "failed to encrypt rotated API key");
+        AppError::Internal(error)
+    })?;
+
+    if !models::api_key::rotate_secret(
+        &state.db,
+        id,
+        &ApiKeySecret {
+            key_hash: &key_hash,
+            key_hash_v2: &key_hash_v2,
+            key_prefix: &key_prefix,
+            key_ciphertext: &key_ciphertext,
+        },
+    )
+    .await?
+    {
+        return Err(AppError::NotFound("key not found".to_string()));
+    }
+
+    let row = models::api_key::get(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("key not found".to_string()))?;
+    let mut output = KeyOutput::from_row(row);
+    output.key = Some(key);
+    Ok(Json(output))
 }
 
 pub async fn delete(

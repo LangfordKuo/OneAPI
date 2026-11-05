@@ -81,7 +81,7 @@ impl Crypto {
                 let mut key = Zeroizing::new([0u8; MASTER_KEY_LEN]);
                 rand::thread_rng().fill_bytes(&mut key[..]);
                 write_secret_file(&path, &key[..])?;
-                tracing::info!(path = %path.display(), "generated master key for upstream secrets");
+                tracing::info!(path = %path.display(), "generated master key for stored secrets");
                 key
             }
             Err(error) => {

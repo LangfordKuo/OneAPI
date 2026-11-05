@@ -54,6 +54,7 @@ export interface ApiKey {
   daily_token_limit: number | null;
   daily_token_usage: number;
   created_at: number;
+  /** Full key when the server has a decryptable copy; legacy keys omit it until reset. */
   key?: string;
 }
 

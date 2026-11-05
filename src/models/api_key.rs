@@ -10,6 +10,11 @@ pub struct ApiKey {
     /// Peppered hash; `None` for keys created before migration 0009.
     pub key_hash_v2: Option<String>,
     pub key_prefix: String,
+    /// AES-256-GCM ciphertext of the full key, used by the admin list.
+    /// `None` for keys created before migration 0011; those cannot be
+    /// recovered and must be rotated.
+    #[sqlx(default)]
+    pub key_ciphertext: Option<String>,
     pub enabled: i64,
     pub expires_at: Option<i64>,
     pub last_used_at: Option<i64>,
@@ -96,6 +101,7 @@ pub struct ApiKeyCreate<'a> {
     pub key_hash: &'a str,
     pub key_hash_v2: &'a str,
     pub key_prefix: &'a str,
+    pub key_ciphertext: &'a str,
     pub enabled: i64,
     pub expires_at: Option<i64>,
     pub allowed_channel_ids: &'a str,
@@ -103,6 +109,17 @@ pub struct ApiKeyCreate<'a> {
     pub token_limit: Option<i64>,
     pub daily_token_limit: Option<i64>,
     pub created_at: i64,
+}
+
+/// Replacement secret for [`rotate_secret`]. Both hashes must be replaced
+/// together: authentication matches either column, so updating only the
+/// peppered hash would leave the old key valid through the legacy hash.
+#[derive(Debug)]
+pub struct ApiKeySecret<'a> {
+    pub key_hash: &'a str,
+    pub key_hash_v2: &'a str,
+    pub key_prefix: &'a str,
+    pub key_ciphertext: &'a str,
 }
 
 #[derive(Debug)]
@@ -122,7 +139,9 @@ const SELECT_COLUMNS: &str = "id, name, key_hash, key_hash_v2, key_prefix, enabl
     created_at";
 
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<ApiKey>> {
-    let query = format!("SELECT {SELECT_COLUMNS} FROM api_keys ORDER BY id DESC");
+    // Only the admin list needs the recoverable secret; gateway auth queries
+    // keep using SELECT_COLUMNS without it.
+    let query = format!("SELECT {SELECT_COLUMNS}, key_ciphertext FROM api_keys ORDER BY id DESC");
     sqlx::query_as(&query).fetch_all(pool).await
 }
 
@@ -172,14 +191,15 @@ pub async fn create_with_limits(
 ) -> sqlx::Result<ApiKey> {
     let result = sqlx::query(
         "INSERT INTO api_keys
-         (name, key_hash, key_hash_v2, key_prefix, enabled, expires_at, allowed_channel_ids,
-          allowed_models, token_limit, daily_token_limit, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (name, key_hash, key_hash_v2, key_prefix, key_ciphertext, enabled, expires_at,
+          allowed_channel_ids, allowed_models, token_limit, daily_token_limit, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(input.name)
     .bind(input.key_hash)
     .bind(input.key_hash_v2)
     .bind(input.key_prefix)
+    .bind(input.key_ciphertext)
     .bind(input.enabled)
     .bind(input.expires_at)
     .bind(input.allowed_channel_ids)
@@ -209,6 +229,28 @@ pub async fn update(pool: &SqlitePool, id: i64, input: &ApiKeyUpdate<'_>) -> sql
     .bind(input.allowed_models)
     .bind(input.token_limit)
     .bind(input.daily_token_limit)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Replace a key's secret without touching its name, limits, usage, enabled
+/// state, or expiry. `key_hash` and `key_hash_v2` are written together because
+/// authentication accepts either one.
+pub async fn rotate_secret(
+    pool: &SqlitePool,
+    id: i64,
+    secret: &ApiKeySecret<'_>,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        "UPDATE api_keys SET key_hash = ?, key_hash_v2 = ?, key_prefix = ?, key_ciphertext = ?
+         WHERE id = ?",
+    )
+    .bind(secret.key_hash)
+    .bind(secret.key_hash_v2)
+    .bind(secret.key_prefix)
+    .bind(secret.key_ciphertext)
     .bind(id)
     .execute(pool)
     .await?;
@@ -594,5 +636,73 @@ mod tests {
                 .await
                 .expect("read fresh reserved_at");
         assert_eq!(fresh_at, Some(5_000));
+    }
+
+    #[tokio::test]
+    async fn rotation_replaces_both_hashes_and_stores_ciphertext() {
+        let pool = pool().await;
+        let created = create_with_limits(
+            &pool,
+            &ApiKeyCreate {
+                name: "rotating",
+                key_hash: "legacy-old",
+                key_hash_v2: "peppered-old",
+                key_prefix: "sk-old",
+                key_ciphertext: "v1:old:secret",
+                enabled: 1,
+                expires_at: None,
+                allowed_channel_ids: "[]",
+                allowed_models: "[]",
+                token_limit: None,
+                daily_token_limit: None,
+                created_at: 0,
+            },
+        )
+        .await
+        .expect("create key");
+
+        assert!(
+            find_by_key_hash(&pool, "peppered-old", "legacy-old")
+                .await
+                .expect("find old")
+                .is_some(),
+            "the initial secret must authenticate"
+        );
+
+        let rotated = rotate_secret(
+            &pool,
+            created.id,
+            &ApiKeySecret {
+                key_hash: "legacy-new",
+                key_hash_v2: "peppered-new",
+                key_prefix: "sk-new",
+                key_ciphertext: "v1:new:secret",
+            },
+        )
+        .await
+        .expect("rotate secret");
+        assert!(rotated);
+
+        assert!(
+            find_by_key_hash(&pool, "peppered-old", "legacy-old")
+                .await
+                .expect("find old after rotation")
+                .is_none(),
+            "the old secret must stop authenticating"
+        );
+        let found = find_by_key_hash(&pool, "peppered-new", "legacy-new")
+            .await
+            .expect("find new")
+            .expect("rotated row");
+        assert_eq!(found.id, created.id);
+        assert!(
+            found.key_ciphertext.is_none(),
+            "gateway authentication must not fetch the stored secret"
+        );
+
+        let rows = list(&pool).await.expect("list");
+        let row = rows.iter().find(|row| row.id == created.id).expect("row");
+        assert_eq!(row.key_prefix, "sk-new");
+        assert_eq!(row.key_ciphertext.as_deref(), Some("v1:new:secret"));
     }
 }

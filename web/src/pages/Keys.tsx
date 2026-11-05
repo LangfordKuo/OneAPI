@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Copy,
   KeyRound,
   Loader2,
   Pencil,
   Plus,
+  RefreshCw,
   Trash2,
 } from 'lucide-react';
 import dayjs from 'dayjs';
@@ -122,7 +124,12 @@ export default function Keys() {
   const [editingKey, setEditingKey] = useState<ApiKey | null>(null);
   const [draft, setDraft] = useState<KeyDraft>(emptyDraft);
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [createdKey, setCreatedKey] = useState<string | null>(null);
+  const [revealedKey, setRevealedKey] = useState<{
+    value: string;
+    title: string;
+    description: string;
+  } | null>(null);
+  const [rotateTarget, setRotateTarget] = useState<ApiKey | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
   // Editing must not resend `enabled` unless the user actually flipped it,
   // otherwise a stale form can undo a toggle made elsewhere.
@@ -149,7 +156,12 @@ export default function Keys() {
       setDialogOpen(false);
       setEditingKey(null);
       if (!variables.id && data.key) {
-        setCreatedKey(data.key);
+        setRevealedKey({
+          value: data.key,
+          title: 'API Key 已创建',
+          description:
+            '完整 Key 已保存在服务端，可随时在列表中查看和复制。请妥善保管。',
+        });
       } else {
         toast.success('已保存');
       }
@@ -166,6 +178,27 @@ export default function Keys() {
         enabled,
       }),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['keys'] });
+    },
+    onError: (error) =>
+      toast.error(errorMessage(error)),
+  });
+
+  const rotateMutation = useMutation({
+    mutationFn: (id: number) =>
+      api.post<ApiKey>(`/api/keys/${encodeURIComponent(String(id))}/rotate`),
+    onSuccess: (data) => {
+      setRotateTarget(null);
+      if (data.key) {
+        setRevealedKey({
+          value: data.key,
+          title: 'API Key 已重置',
+          description:
+            '旧 Key 已立即失效，请把新 Key 更新到客户端。名称、限制和用量保持不变。',
+        });
+      } else {
+        toast.success('已重置');
+      }
       queryClient.invalidateQueries({ queryKey: ['keys'] });
     },
     onError: (error) =>
@@ -201,6 +234,15 @@ export default function Keys() {
         ? draft.channelIds.filter((item) => item !== id)
         : [...draft.channelIds, id],
     });
+  }
+
+  async function copyKey(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success('已复制 Key');
+    } catch {
+      toast.error('复制失败，请手动选择文本');
+    }
   }
 
   function openCreate() {
@@ -271,7 +313,7 @@ export default function Keys() {
     <>
       <PageHeader
         title="API Keys"
-        description="客户端使用这些 Key 访问网关。完整 Key 只在创建时显示一次。"
+        description="客户端使用这些 Key 访问网关。完整 Key 保存在服务端，可随时复制；重置后旧 Key 立即失效。"
         actions={
           <Button onClick={openCreate}>
             <Plus />
@@ -308,9 +350,7 @@ export default function Keys() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>名称</TableHead>
-                    <TableHead className="hidden sm:table-cell">
-                      Key 前缀
-                    </TableHead>
+                    <TableHead>Key</TableHead>
                     <TableHead>用量</TableHead>
                     <TableHead>状态</TableHead>
                     <TableHead className="hidden md:table-cell">
@@ -327,6 +367,7 @@ export default function Keys() {
                 </TableHeader>
                 <TableBody>
                   {keys.map((key) => {
+                    const fullKey = key.key;
                     const percent =
                       key.token_limit && key.token_limit > 0
                         ? Math.min(
@@ -351,10 +392,33 @@ export default function Keys() {
                             </p>
                           </div>
                         </TableCell>
-                        <TableCell className="hidden sm:table-cell">
-                          <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
-                            {key.key_prefix}…
-                          </code>
+                        <TableCell className="whitespace-normal">
+                          {fullKey ? (
+                            <div className="flex items-start gap-1">
+                              <code className="max-w-[22rem] break-all font-mono text-xs leading-4">
+                                {fullKey}
+                              </code>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-sm"
+                                className="shrink-0"
+                                title="复制 Key"
+                                onClick={() => void copyKey(fullKey)}
+                              >
+                                <Copy />
+                              </Button>
+                            </div>
+                          ) : (
+                            <div className="space-y-1">
+                              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+                                {key.key_prefix}…
+                              </code>
+                              <p className="text-[11px] text-muted-foreground">
+                                旧 Key 无法显示，请重置
+                              </p>
+                            </div>
+                          )}
                         </TableCell>
                         <TableCell>
                           <div className="space-y-1">
@@ -421,6 +485,14 @@ export default function Keys() {
                                 })
                               }
                             />
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setRotateTarget(key)}
+                            >
+                              <RefreshCw />
+                              <span className="hidden sm:inline">重置</span>
+                            </Button>
                             <Button
                               variant="ghost"
                               size="sm"
@@ -623,31 +695,53 @@ export default function Keys() {
       </Dialog>
 
       <Dialog
-        open={createdKey !== null}
+        open={revealedKey !== null}
         onOpenChange={(next) => {
           if (!next) {
-            setCreatedKey(null);
+            setRevealedKey(null);
           }
         }}
       >
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>API Key 已创建</DialogTitle>
+            <DialogTitle>{revealedKey?.title ?? 'API Key'}</DialogTitle>
           </DialogHeader>
-          <Alert variant="destructive">
-            <AlertTitle>完整 Key 只显示一次</AlertTitle>
-            <AlertDescription>请立即复制并妥善保存。</AlertDescription>
+          <Alert variant="warning">
+            <AlertTitle>请妥善保管 Key</AlertTitle>
+            <AlertDescription>
+              {revealedKey?.description ??
+                '完整 Key 已保存，可随时在列表中查看并复制。'}
+            </AlertDescription>
           </Alert>
-          <CodeBlock copyText={createdKey ?? ''}>
-            {createdKey ?? ''}
+          <CodeBlock copyText={revealedKey?.value ?? ''}>
+            {revealedKey?.value ?? ''}
           </CodeBlock>
           <DialogFooter>
-            <Button type="button" onClick={() => setCreatedKey(null)}>
+            <Button type="button" onClick={() => setRevealedKey(null)}>
               我已保存
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={rotateTarget != null}
+        onOpenChange={(next) => {
+          if (!next) {
+            setRotateTarget(null);
+          }
+        }}
+        title={`重置 Key「${rotateTarget?.name ?? ''}」？`}
+        description="重置会立即生成新 Key 并让旧 Key 失效，使用旧 Key 的客户端将无法继续访问。名称、限制和用量保持不变。"
+        confirmLabel="重置 Key"
+        destructive
+        loading={rotateMutation.isPending}
+        onConfirm={() => {
+          if (rotateTarget) {
+            rotateMutation.mutate(rotateTarget.id);
+          }
+        }}
+      />
 
       <ConfirmDialog
         open={deleteTarget != null}
