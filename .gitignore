@@ -5,3 +5,5 @@
 .env
 *.log
 .DS_Store
+# ZCode session/agent artifacts
+.zcode/
